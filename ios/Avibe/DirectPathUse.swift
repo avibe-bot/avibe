@@ -33,10 +33,14 @@ struct DirectPathUseConnection: Equatable, Sendable {
     var directFailed = false
     var directTimedOut = false
 
-    /// `strict` and `tunnelOnly` are the plan's own, read when the plan was
-    /// made: the record does not carry them.
-    init(record: DirectRaceRecord, strict: Bool, tunnelOnly: Bool) {
-        switch record.winner {
+    /// `carried` is what the listener settled the connection on: the
+    /// backend its relay was granted, or nil when it gave the connection
+    /// up. The race's own winner is not that: a race can be won and its
+    /// connection still planned again. `strict` and `tunnelOnly` are the
+    /// plan's own, read when the plan was made: the record does not carry
+    /// them.
+    init(record: DirectRaceRecord, carried: DirectRelayBackend?, strict: Bool, tunnelOnly: Bool) {
+        switch carried {
         case .direct?:
             carrier = .direct
             if case .ready(let ms) = record.direct {
@@ -83,10 +87,14 @@ struct DirectPathUseConnection: Equatable, Sendable {
 /// route existed never reaches the listener and is not counted here; the
 /// instance's own count of requests by arrival path covers that.
 ///
-/// Fixed words, counts and milliseconds only: no address, host, identifier
-/// or wall time. A minute is reported once it is over, on the next request
-/// the instance answers, and then forgotten. With no answered request the
-/// minutes wait, the oldest dropped past `kept`.
+/// What is sent is fixed words, counts and milliseconds only: no address,
+/// host, identifier or wall time. A minute is reported once it is over, on
+/// the next request its own instance answers, and then forgotten. With no
+/// answered request the minutes wait, the oldest dropped past `kept`.
+///
+/// Counts are kept apart by the account's data store and the instance's
+/// host (`Scope`), in memory only, and a report carries only the counts of
+/// the instance it goes to. An account change drops them all.
 final class DirectPathUse: @unchecked Sendable {
     static let shared = DirectPathUse()
 
@@ -127,8 +135,17 @@ final class DirectPathUse: @unchecked Sendable {
         case background
     }
 
+    /// Whose connections a count is of: the account's data store and the
+    /// instance's host. Never sent; it only decides which request may
+    /// carry the count.
+    struct Scope: Hashable, Sendable {
+        let store: UUID
+        let host: String
+    }
+
     /// One finished minute of one path, ready to send.
     struct Report: Equatable, Sendable {
+        let scope: Scope
         let minute: Int
         let path: Path
         /// The entry as the instance requires it: exactly its 22 keys.
@@ -147,8 +164,14 @@ final class DirectPathUse: @unchecked Sendable {
     static let sampleLimit = 32
 
     private struct Key: Hashable {
+        let scope: Scope
         let minute: Int
         let path: Path
+
+        /// Oldest first; within a minute a fixed order.
+        static func earlier(_ one: Key, _ other: Key) -> Bool {
+            (one.minute, one.scope.host, one.path.rawValue) < (other.minute, other.scope.host, other.path.rawValue)
+        }
     }
 
     private struct Entry {
@@ -189,8 +212,8 @@ final class DirectPathUse: @unchecked Sendable {
         return { Int(start.duration(to: clock.now).components.seconds) }
     }
 
-    func connection(_ connection: DirectPathUseConnection, path: Path) {
-        update(path) { entry in
+    func connection(_ connection: DirectPathUseConnection, scope: Scope, path: Path) {
+        update(scope, path) { entry in
             switch connection.carrier {
             case .direct:
                 entry.direct += 1
@@ -225,8 +248,8 @@ final class DirectPathUse: @unchecked Sendable {
 
     /// A hand-over the page asked for, and how the App answered it:
     /// `refused` nil when it was done.
-    func handover(refused: HandoverRule?, path: Path) {
-        update(path) { entry in
+    func handover(refused: HandoverRule?, scope: Scope, path: Path) {
+        update(scope, path) { entry in
             entry.handoverAsked += 1
             if let refused {
                 entry.handoverRefused += 1
@@ -237,26 +260,28 @@ final class DirectPathUse: @unchecked Sendable {
         }
     }
 
-    func retired(_ rule: RetiredRule, path: Path) {
-        update(path) { entry in
+    func retired(_ rule: RetiredRule, scope: Scope, path: Path) {
+        update(scope, path) { entry in
             entry.retired += 1
             entry.retiredRules[rule, default: 0] += 1
         }
     }
 
-    /// The minutes that are over and not yet answered, oldest first, at most
-    /// `reportLimit`. Asking changes nothing: a request that fails reports
-    /// them again with the next.
-    var pending: [Report] {
+    /// The minutes of `scope` that are over and not yet answered, oldest
+    /// first, at most `reportLimit`. Asking changes nothing: a request that
+    /// fails reports them again with the next.
+    func pending(for scope: Scope) -> [Report] {
         lock.withLock {
             let now = seconds() / 60
             dropLocked(now: now)
             return entries.keys
-                .filter { $0.minute < now }
-                .sorted { ($0.minute, $0.path.rawValue) < ($1.minute, $1.path.rawValue) }
+                .filter { $0.scope == scope && $0.minute < now }
+                .sorted(by: Key.earlier)
                 .prefix(Self.reportLimit)
                 .compactMap { key in
-                    entries[key].map { Report(minute: key.minute, path: key.path, json: Self.json($0, key, now: now)) }
+                    entries[key].map {
+                        Report(scope: key.scope, minute: key.minute, path: key.path, json: Self.json($0, key, now: now))
+                    }
                 }
         }
     }
@@ -265,15 +290,22 @@ final class DirectPathUse: @unchecked Sendable {
     func answered(_ reports: [Report]) {
         lock.withLock {
             for report in reports {
-                entries.removeValue(forKey: Key(minute: report.minute, path: report.path))
+                entries.removeValue(forKey: Key(scope: report.scope, minute: report.minute, path: report.path))
             }
         }
     }
 
-    private func update(_ path: Path, _ change: (inout Entry) -> Void) {
+    /// The account changes: nothing counted so far is ever sent.
+    func removeAll() {
+        lock.withLock {
+            entries.removeAll()
+        }
+    }
+
+    private func update(_ scope: Scope, _ path: Path, _ change: (inout Entry) -> Void) {
         lock.withLock {
             let now = seconds() / 60
-            change(&entries[Key(minute: now, path: path), default: Entry()])
+            change(&entries[Key(scope: scope, minute: now, path: path), default: Entry()])
             dropLocked(now: now)
         }
     }
@@ -287,8 +319,7 @@ final class DirectPathUse: @unchecked Sendable {
         guard excess > 0 else {
             return
         }
-        let oldest = entries.keys.sorted { ($0.minute, $0.path.rawValue) < ($1.minute, $1.path.rawValue) }
-        for key in oldest.prefix(excess) {
+        for key in entries.keys.sorted(by: Key.earlier).prefix(excess) {
             entries.removeValue(forKey: key)
         }
     }

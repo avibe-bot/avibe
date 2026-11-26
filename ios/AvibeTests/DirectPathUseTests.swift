@@ -24,37 +24,49 @@ final class DirectPathUseTests: XCTestCase {
         DirectRaceRecord(direct: direct, publicOrigin: publicOrigin, winner: winner, path: .relay, sticky: sticky)
     }
 
+    /// One account's store and one instance: whose connections are counted.
+    private let scope = DirectPathUse.Scope(store: UUID(), host: "instance-one.example")
+
     private func object(_ report: DirectPathUse.Report) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.json.utf8)) as? [String: Any])
     }
 
     func testAConnectionIsReadFromTheListenersRecordAndThePlansOwnFacts() {
         XCTAssertEqual(
-            Connection(record: record(.ready(120), .cancelled, .direct), strict: false, tunnelOnly: false),
+            Connection(record: record(.ready(120), .cancelled, .direct), carried: .direct, strict: false, tunnelOnly: false),
             Connection(carrier: .direct, plan: .raced, readyMs: 120)
         )
         XCTAssertEqual(
-            Connection(record: record(.cancelled, .ready(80), .publicOrigin), strict: false, tunnelOnly: false),
+            Connection(record: record(.cancelled, .ready(80), .publicOrigin), carried: .publicOrigin, strict: false, tunnelOnly: false),
             Connection(carrier: .tunnel, plan: .raced, readyMs: 80)
         )
         // No direct candidate: for want of a path, or because there is no
         // direct session for the host at all.
         XCTAssertEqual(
-            Connection(record: record(.none, .ready(70), .publicOrigin), strict: false, tunnelOnly: false),
+            Connection(record: record(.none, .ready(70), .publicOrigin), carried: .publicOrigin, strict: false, tunnelOnly: false),
             Connection(carrier: .tunnel, plan: .noDirect, readyMs: 70)
         )
         XCTAssertEqual(
-            Connection(record: record(.none, .ready(70), .publicOrigin), strict: false, tunnelOnly: true),
+            Connection(record: record(.none, .ready(70), .publicOrigin), carried: .publicOrigin, strict: false, tunnelOnly: true),
             Connection(carrier: .tunnel, plan: .tunnelOnly, readyMs: 70)
         )
         // A sticky attempt that missed its bound, carried by the tunnel.
         XCTAssertEqual(
-            Connection(record: record(.timedOut, .ready(90), .publicOrigin, sticky: true), strict: false, tunnelOnly: false),
+            Connection(
+                record: record(.timedOut, .ready(90), .publicOrigin, sticky: true),
+                carried: .publicOrigin, strict: false, tunnelOnly: false
+            ),
             Connection(carrier: .tunnel, plan: .sticky, readyMs: 90, directTimedOut: true)
+        )
+        // A race the direct leg won, and the listener gave the connection
+        // up all the same: nothing carried it, and no time is kept for it.
+        XCTAssertEqual(
+            Connection(record: record(.ready(120), .cancelled, .direct), carried: nil, strict: false, tunnelOnly: false),
+            Connection(carrier: .none, plan: .raced)
         )
         // Strict, and the direct leg failed: nothing carried it.
         XCTAssertEqual(
-            Connection(record: record(.failed, .none, nil), strict: true, tunnelOnly: false),
+            Connection(record: record(.failed, .none, nil), carried: nil, strict: true, tunnelOnly: false),
             Connection(carrier: .none, plan: .strict, directFailed: true)
         )
     }
@@ -71,23 +83,23 @@ final class DirectPathUseTests: XCTestCase {
     func testAMinuteIsReportedOnceItIsOverWithExactlyTheInstancesKeys() throws {
         let clock = DirectPathUseTestClock()
         let use = DirectPathUse(seconds: { clock.now })
-        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 120), path: .relay)
-        use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 80), path: .relay)
-        use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 60), path: .relay)
-        use.connection(Connection(carrier: .tunnel, plan: .sticky, readyMs: 90, directTimedOut: true), path: .relay)
-        use.connection(Connection(carrier: .none, plan: .strict, directFailed: true), path: .relay)
-        use.connection(Connection(carrier: .tunnel, plan: .noDirect, readyMs: 30), path: .none)
-        use.handover(refused: .otherDocuments, path: .relay)
-        use.handover(refused: .otherDocuments, path: .relay)
-        use.handover(refused: .notUsable, path: .relay)
-        use.handover(refused: nil, path: .relay)
-        use.retired(.background, path: .relay)
+        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 120), scope: scope, path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 80), scope: scope, path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 60), scope: scope, path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .sticky, readyMs: 90, directTimedOut: true), scope: scope, path: .relay)
+        use.connection(Connection(carrier: .none, plan: .strict, directFailed: true), scope: scope, path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .noDirect, readyMs: 30), scope: scope, path: .none)
+        use.handover(refused: .otherDocuments, scope: scope, path: .relay)
+        use.handover(refused: .otherDocuments, scope: scope, path: .relay)
+        use.handover(refused: .notUsable, scope: scope, path: .relay)
+        use.handover(refused: nil, scope: scope, path: .relay)
+        use.retired(.background, scope: scope, path: .relay)
         // Nothing while the minute is still counting.
-        XCTAssertEqual(use.pending, [])
+        XCTAssertEqual(use.pending(for: scope), [])
 
         clock.now += 60
-        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 10), path: .lan)
-        let first = use.pending
+        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 10), scope: scope, path: .lan)
+        let first = use.pending(for: scope)
         XCTAssertEqual(first.map(\.path), [.none, .relay])
         XCTAssertEqual(
             first[1].json,
@@ -115,14 +127,42 @@ final class DirectPathUseTests: XCTestCase {
         // Asking changed nothing: a request that failed reports them again,
         // older by then.
         clock.now += 120
-        let again = use.pending
+        let again = use.pending(for: scope)
         XCTAssertEqual(again.map(\.path), [.none, .relay, .lan])
         XCTAssertEqual(try object(again[1])["age_min"] as? Int, 3)
         // Answered: gone, and the others stay.
         use.answered(first)
-        XCTAssertEqual(use.pending.map(\.path), [.lan])
-        use.answered(use.pending)
-        XCTAssertEqual(use.pending, [])
+        XCTAssertEqual(use.pending(for: scope).map(\.path), [.lan])
+        use.answered(use.pending(for: scope))
+        XCTAssertEqual(use.pending(for: scope), [])
+    }
+
+    func testCountsStayWithTheirOwnInstanceAndAccount() throws {
+        let clock = DirectPathUseTestClock()
+        let use = DirectPathUse(seconds: { clock.now })
+        let other = DirectPathUse.Scope(store: scope.store, host: "instance-two.example")
+        let nextAccount = DirectPathUse.Scope(store: UUID(), host: scope.host)
+        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 20), scope: scope, path: .lan)
+        use.connection(Connection(carrier: .tunnel, plan: .tunnelOnly, readyMs: 90), scope: other, path: .none)
+        use.handover(refused: .notUsable, scope: other, path: .none)
+        clock.now += 60
+        // A request to one instance carries that instance's minutes only.
+        let mine = use.pending(for: scope)
+        XCTAssertEqual(mine.map(\.path), [.lan])
+        XCTAssertEqual(try object(mine[0])["tunnel_only"] as? Int, 0)
+        let theirs = use.pending(for: other)
+        XCTAssertEqual(theirs.map(\.path), [DirectPathUse.Path.none])
+        XCTAssertEqual(try object(theirs[0])["tunnel_only"] as? Int, 1)
+        XCTAssertEqual(try object(theirs[0])["handover_refused"] as? Int, 1)
+        // The same host under another account's store has none of them.
+        XCTAssertEqual(use.pending(for: nextAccount), [])
+        // Answering one instance's leaves the other's.
+        use.answered(mine)
+        XCTAssertEqual(use.pending(for: scope), [])
+        XCTAssertEqual(use.pending(for: other).count, 1)
+        // An account change drops everything.
+        use.removeAll()
+        XCTAssertEqual(use.pending(for: other), [])
     }
 
     func testWhatIsKeptAndSentIsBounded() throws {
@@ -130,18 +170,18 @@ final class DirectPathUseTests: XCTestCase {
         let use = DirectPathUse(seconds: { clock.now })
         for minute in 0..<40 {
             clock.now += 60
-            use.retired(.pathMonitor, path: minute % 2 == 0 ? .lan : .punched)
+            use.retired(.pathMonitor, scope: scope, path: minute % 2 == 0 ? .lan : .punched)
         }
         clock.now += 60
         // At most ten in one request, the oldest kept first.
-        let many = use.pending
+        let many = use.pending(for: scope)
         XCTAssertEqual(many.count, DirectPathUse.reportLimit)
         XCTAssertEqual(try object(many[0])["age_min"] as? Int, DirectPathUse.kept)
         XCTAssertEqual(try object(many[0])["retired_rule"] as? String, "path_monitor")
         // At most thirty kept: the oldest ten were dropped.
         var total = 0
         while true {
-            let next = use.pending
+            let next = use.pending(for: scope)
             if next.isEmpty {
                 break
             }
@@ -151,16 +191,16 @@ final class DirectPathUseTests: XCTestCase {
         XCTAssertEqual(total, DirectPathUse.kept)
 
         // A minute older than the instance accepts is dropped unsent.
-        use.retired(.superseded, path: .relay)
+        use.retired(.superseded, scope: scope, path: .relay)
         clock.now += 60 * (DirectPathUse.maxAgeMinutes + 2)
-        XCTAssertEqual(use.pending, [])
+        XCTAssertEqual(use.pending(for: scope), [])
 
         // A minute's median is of the times kept, and the counts are of all.
         for ms in 0..<100 {
-            use.connection(Connection(carrier: .direct, plan: .raced, readyMs: ms), path: .lan)
+            use.connection(Connection(carrier: .direct, plan: .raced, readyMs: ms), scope: scope, path: .lan)
         }
         clock.now += 60
-        let busy = try object(try XCTUnwrap(use.pending.first))
+        let busy = try object(try XCTUnwrap(use.pending(for: scope).first))
         XCTAssertEqual(busy["direct"] as? Int, 100)
         XCTAssertEqual(busy["direct_ms"] as? Int, 15)
         XCTAssertEqual(DirectPathUse.median([]), 0)

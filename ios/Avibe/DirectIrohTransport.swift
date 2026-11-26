@@ -1593,7 +1593,10 @@ final class DirectRendezvousWebViewSource {
             let removals = SlowStoreRemovals.shared.pending
             // And the account of which leg carried the pages' connections:
             // the minutes that are over, until a request is answered.
-            let use = DirectPathUse.shared.pending
+            // Only this instance's, under this account's store.
+            let use = DirectPathUse.shared.pending(
+                for: DirectPathUse.Scope(store: selection.storeIdentifier, host: selection.host)
+            )
             let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,

@@ -2304,6 +2304,67 @@ final class DirectConnectListenerTests: XCTestCase {
         try await eventually { first.isCancelled && second.isCancelled }
         XCTAssertEqual(plans.planCount, 2)
         XCTAssertEqual(lifecycle.grants, [:])
+        // Two races, one CONNECT, and it was refused: said once.
+        XCTAssertEqual(plans.races.count, 2)
+        XCTAssertEqual(plans.settlements, [nil])
+        client.close()
+    }
+
+    /// What became of a CONNECT is said once, whatever its races were: the
+    /// backend its relay was granted on, or nothing carried it. A race that
+    /// was won and then planned again is not said to have carried anything.
+    func testAConnectIsSettledOnceOnTheBackendItWasGrantedOrOnNone() async throws {
+        // Granted on the direct path.
+        var fixture = try await makeListener()
+        var client = LoopbackClient(port: fixture.port)
+        _ = try await establish(client, fixture)
+        XCTAssertEqual(fixture.plans.settlements, [.direct])
+        client.close()
+        await fixture.listener.stop()
+
+        // No direct candidate: granted on the public origin.
+        fixture = try await makeListener()
+        fixture.plans.set(direct: false)
+        client = LoopbackClient(port: fixture.port)
+        _ = try await establishPublic(client, fixture)
+        XCTAssertEqual(fixture.plans.settlements, [.publicOrigin])
+        client.close()
+        await fixture.listener.stop()
+
+        // Both candidates fail: refused, and nothing carried it.
+        fixture = try await makeListener(direct: .fail, publicOrigin: .fail)
+        client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let refusal = try await client.receiveUntilClosed()
+        XCTAssertTrue(String(decoding: refusal, as: UTF8.self).hasPrefix("HTTP/1.1 502 "))
+        XCTAssertEqual(fixture.plans.settlements, [nil])
+        XCTAssertEqual(fixture.plans.races.count, 1)
+        client.close()
+        await fixture.listener.stop()
+
+        // The first plan's race is won on the direct path and fenced at the
+        // grant; the second plan's is granted. Two races, one connection.
+        fixture = try await makeListener()
+        let plans = fixture.plans
+        plans.atValidation(2) {
+            plans.set(current: false)
+        }
+        plans.atValidation(3) {
+            plans.set(current: true)
+        }
+        client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let fenced = try await fixture.direct.waitForStream()
+        fenced.instanceSends(Data(established.utf8))
+        let granted = try await fixture.direct.waitForStream(count: 2)
+        // Nothing is said of the CONNECT while it is still being planned.
+        XCTAssertEqual(plans.settlements, [])
+        granted.instanceSends(Data(established.utf8))
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(plans.races.count, 2)
+        XCTAssertEqual(plans.settlements, [.direct])
+        try await eventually { fenced.isCancelled }
         client.close()
     }
 
@@ -3003,6 +3064,7 @@ final class StandInPlans: @unchecked Sendable {
     private var isSticky = false
     private var path: DirectPathKind?
     private var storedRaces: [DirectRaceRecord] = []
+    private var storedSettlements: [DirectRelayBackend?] = []
     private var misses = 0
 
     /// How many sticky attempts passed their bound without an answer.
@@ -3013,6 +3075,12 @@ final class StandInPlans: @unchecked Sendable {
     /// The races recorded so far, in order.
     var races: [DirectRaceRecord] {
         lock.withLock { storedRaces }
+    }
+
+    /// What the listener said became of each CONNECT, in order: the backend
+    /// it was granted on, or `nil` for one it refused after a race.
+    var settlements: [DirectRelayBackend?] {
+        lock.withLock { storedSettlements }
     }
 
     /// Makes the next plans sticky, as on a direct address.
@@ -3107,6 +3175,12 @@ final class StandInPlans: @unchecked Sendable {
                 return
             }
             self.lock.withLock { self.misses += 1 }
+        }
+        plan.connectionSettled = { [weak self] backend in
+            guard let self else {
+                return
+            }
+            self.lock.withLock { self.storedSettlements.append(backend) }
         }
         return plan
     }

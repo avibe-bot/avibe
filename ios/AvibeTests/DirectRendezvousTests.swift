@@ -571,15 +571,18 @@ final class DirectRendezvousTests: XCTestCase {
         let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
         let clock = DirectPathUseTestClock()
         let use = DirectPathUse(seconds: { clock.now })
+        let scope = DirectPathUse.Scope(store: UUID(), host: "instance-one.example")
         XCTAssertEqual(
-            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], pathUse: use.pending),
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], pathUse: use.pending(for: scope)),
             head + "}"
         )
         for _ in 0..<12 {
-            use.connection(DirectPathUseConnection(carrier: .tunnel, plan: .raced, readyMs: 80), path: .relay)
+            use.connection(
+                DirectPathUseConnection(carrier: .tunnel, plan: .raced, readyMs: 80), scope: scope, path: .relay
+            )
             clock.now += 60
         }
-        let reports = use.pending
+        let reports = use.pending(for: scope)
         XCTAssertEqual(reports.count, 10)
         let body = DirectRendezvous.requestBody(
             clientEndpointID: client,
