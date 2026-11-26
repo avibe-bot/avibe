@@ -332,6 +332,7 @@ jobs:
             scripts/show_runtime_manifest_asset.py
             scripts/release_asset_download.py
             scripts/release_package_version.py
+            scripts/release_dist_manifest.py
             .github/actions/sqlite-predecessor-contract/action.yml
             tests/test_distribution_artifacts.py
             tests/test_upgrade_flow.py
@@ -488,7 +489,7 @@ jobs:
         run: |
           set -euo pipefail
           docker info
-          (cd dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/dist-before.sha256"
+          python release-automation/scripts/release_dist_manifest.py dist > "$RUNNER_TEMP/dist-before.sha256"
           for test_file in \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
@@ -502,7 +503,7 @@ jobs:
             tests/e2e/test_install_command.py \
             -v
           # The exact same set of files with the same bytes: nothing changed, added or removed.
-          (cd dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/dist-after.sha256"
+          python release-automation/scripts/release_dist_manifest.py dist > "$RUNNER_TEMP/dist-after.sha256"
           cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"
           git checkout -- tests/test_upgrade_flow.py tests/test_install_script.py tests/e2e/test_install_command.py
 

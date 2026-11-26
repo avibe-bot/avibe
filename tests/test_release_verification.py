@@ -816,6 +816,7 @@ def test_stable_regressions_take_only_test_files_from_the_workflow_commit():
         "scripts/show_runtime_manifest_asset.py",
         "scripts/release_asset_download.py",
         "scripts/release_package_version.py",
+        "scripts/release_dist_manifest.py",
         ".github/actions/sqlite-predecessor-contract/action.yml",
         "tests/test_distribution_artifacts.py",
         *tests,
@@ -828,5 +829,41 @@ def test_stable_regressions_take_only_test_files_from_the_workflow_commit():
     assert loop is not None
     assert [item.strip(" \\") for item in loop.group(1).split("\n") if item.strip(" \\")] == tests
     assert run.count("cp ") == 1
-    before = run.index('> "$RUNNER_TEMP/dist-before.sha256"')
+    before = run.index("release_dist_manifest.py dist > \"$RUNNER_TEMP/dist-before.sha256\"")
     assert before < loop.start() < run.index("pytest") < run.index('cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"')
+
+
+def _dist_manifest(directory):
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts/release_dist_manifest.py"), str(directory)],
+        capture_output=True, text=True,
+    )
+
+
+def test_dist_manifest_refuses_symlinks_and_tells_added_files_apart(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "avibe_os-3.2.8-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "avibe_os-3.2.8.tar.gz").write_bytes(b"sdist")
+    before = _dist_manifest(dist)
+    assert before.returncode == 0 and before.stdout.count("\n") == 2
+
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").write_bytes(b"extra")
+    added = _dist_manifest(dist)
+    assert added.returncode == 0 and added.stdout != before.stdout
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").unlink()
+
+    outside = tmp_path / "outside.whl"
+    outside.write_bytes(b"elsewhere")
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").symlink_to(outside)
+    assert _dist_manifest(dist).returncode != 0
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").unlink()
+
+    (dist / "nested").mkdir()
+    assert _dist_manifest(dist).returncode != 0
+    (dist / "nested").rmdir()
+
+    linked = tmp_path / "linked-dist"
+    linked.symlink_to(dist)
+    assert _dist_manifest(linked).returncode != 0
+    assert _dist_manifest(dist).stdout == before.stdout
