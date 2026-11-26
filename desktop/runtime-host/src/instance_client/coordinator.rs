@@ -69,7 +69,12 @@ pub trait ClientView: Send + Sync {
         cookies: Vec<cookie::Cookie<'static>>,
     ) -> Result<(), ClientError>;
     /// Cancel presentation and restore the last committed route, without auth.
-    async fn restore(&self, epoch: Epoch, target: ClientTarget, preserve_document: bool) -> Result<(), ClientError>;
+    async fn restore(
+        &self,
+        epoch: Epoch,
+        target: ClientTarget,
+        destination: RestoreDestination,
+    ) -> Result<(), ClientError>;
     /// Erase and destroy every Desktop-owned instance store, including offline.
     async fn signed_out(&self, epoch: Epoch, local: ClientTarget, cleanup_failed: bool) -> Result<(), ClientError>;
     /// Presentation only, after the cleanup error is readable by get_state.
@@ -546,10 +551,10 @@ impl Coordinator {
         // Escape always fences old work. It can never restore old credentials.
         if matches!(
             request.action,
-            ClientAction::Cancel | ClientAction::ReturnLocal | ClientAction::SignOut { .. }
+            ClientAction::Cancel | ClientAction::ReturnHome | ClientAction::ReturnLocal | ClientAction::SignOut { .. }
         ) {
-            let expected =
-                matches!(request.action, ClientAction::SignOut { .. }).then_some(request.expected_generation);
+            let expected = matches!(request.action, ClientAction::SignOut { .. } | ClientAction::ReturnHome)
+                .then_some(request.expected_generation);
             let result = self.escape(request.action, expected, None).await.map(|_| None);
             return self.reply(request.request_id, result);
         }
@@ -1230,6 +1235,22 @@ impl Coordinator {
             } else {
                 expected
             };
+            if matches!(action, ClientAction::ReturnHome)
+                && (inner.state.account.status != AccountStatus::SignedIn
+                    || inner.state.consent.is_some()
+                    || inner.state.connection.pending.is_some()
+                    || !matches!(
+                        inner.state.connection.status,
+                        ConnectionStatus::Local | ConnectionStatus::RemoteConnected
+                    )
+                    || matches!(
+                        inner.state.enrollment.status,
+                        EnrollmentStatus::Registering | EnrollmentStatus::Conflict | EnrollmentStatus::Failed
+                    )
+                    || inner.state.enrollment.error_code.is_some())
+            {
+                return Err(ClientError::new("invalid_action"));
+            }
             let epoch = self.advance_locked(&mut inner, expected, false)?;
             self.supersede_binding();
             inner.selection = None;
@@ -1340,8 +1361,16 @@ impl Coordinator {
                 view.signed_out(epoch.clone(), target, cleanup.is_err()).await
             } else {
                 action_epoch.check()?;
-                view.restore(epoch.clone(), target, matches!(action, ClientAction::Cancel))
-                    .await
+                view.restore(
+                    epoch.clone(),
+                    target,
+                    match action {
+                        ClientAction::ReturnHome => RestoreDestination::Home,
+                        ClientAction::Cancel => RestoreDestination::Document,
+                        _ => RestoreDestination::Local,
+                    },
+                )
+                .await
             };
             if signing_out {
                 // Device-local best effort revocation never delays local erasure.

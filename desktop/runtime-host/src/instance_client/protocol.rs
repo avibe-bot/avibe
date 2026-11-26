@@ -323,6 +323,8 @@ pub enum ClientAction {
     /// (`Coordinator::upgrade_local_runtime`), with the Runtime host.
     UpgradeLocalRuntime {},
     Cancel,
+    /// A completed sign-in returns to the selected instance's home.
+    ReturnHome,
     ReturnLocal,
     SignOut {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +363,7 @@ impl std::fmt::Debug for ClientAction {
             Self::UpdateInstall { .. } => "UpdateInstall",
             Self::UpgradeLocalRuntime {} => "UpgradeLocalRuntime",
             Self::Cancel => "Cancel",
+            Self::ReturnHome => "ReturnHome",
             Self::ReturnLocal => "ReturnLocal",
             Self::SignOut { .. } => "SignOut",
         };
@@ -601,4 +604,12 @@ pub fn presentation_view(url: &Url) -> Option<&'static str> {
         "/updates" => Some("updates"),
         _ => None,
     }
+}
+
+/// Presentation destination; ordinary cancellation preserves the exact document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreDestination {
+    Document,
+    Home,
+    Local,
 }

@@ -209,7 +209,12 @@ impl ClientView for Quiet {
     async fn commit(&self, _: Epoch, _: ClientTarget, _: Vec<cookie::Cookie<'static>>) -> Result<()> {
         panic!("no instance view in an upgrade")
     }
-    async fn restore(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<()> {
+    async fn restore(
+        &self,
+        _: Epoch,
+        _: ClientTarget,
+        _: crate::instance_client::protocol::RestoreDestination,
+    ) -> Result<()> {
         Ok(())
     }
     async fn signed_out(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<()> {

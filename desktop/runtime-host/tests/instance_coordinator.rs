@@ -166,6 +166,7 @@ struct View {
     states: Mutex<Vec<ClientState>>,
     committed: Mutex<Vec<ClientTarget>>,
     restored: Mutex<Vec<ClientTarget>>,
+    destinations: Mutex<Vec<RestoreDestination>>,
     update_calls: Mutex<Vec<(ClientAction, Epoch)>>,
     update_failure: Mutex<Option<String>>,
     retirement_failure: AtomicBool,
@@ -209,8 +210,14 @@ impl ClientView for View {
         self.committed.lock().unwrap().push(target);
         Ok(())
     }
-    async fn restore(&self, _: Epoch, target: ClientTarget, _: bool) -> Result<(), ClientError> {
+    async fn restore(
+        &self,
+        _: Epoch,
+        target: ClientTarget,
+        destination: RestoreDestination,
+    ) -> Result<(), ClientError> {
         self.restored.lock().unwrap().push(target);
+        self.destinations.lock().unwrap().push(destination);
         Ok(())
     }
     async fn signed_out(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<(), ClientError> {
@@ -3120,4 +3127,58 @@ async fn signing_out_ends_the_kept_sign_ins_even_offline() {
             "offline {offline}"
         );
     }
+}
+
+// Returning after a completed login preserves the selected instance and account.
+// Ordinary cancel still restores the document; stale or unfinished logins cannot navigate.
+#[tokio::test]
+async fn completed_sign_in_returns_home_without_changing_account_or_instance() {
+    let f = fixture(vec![]);
+    assert!(!action(&f.client, ClientAction::ReturnHome).await.ok);
+    assert!(f.view.restored.lock().unwrap().is_empty());
+    sign_in(&f, catalog("account-a", &["one"])).await;
+    let before = f.client.state();
+    let calls = f.http.calls.lock().unwrap().len();
+    assert!(action(&f.client, ClientAction::ReturnHome).await.ok);
+    assert_eq!(*f.view.destinations.lock().unwrap(), vec![RestoreDestination::Home]);
+    assert_eq!(
+        f.client.state().account.identity.unwrap().id,
+        before.account.identity.unwrap().id
+    );
+    assert_eq!(f.client.state().connection.committed, before.connection.committed);
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    let stale = f
+        .client
+        .request(ClientRequest {
+            version: 1,
+            request_id: "stale-home".into(),
+            expected_generation: before.generation,
+            action: ClientAction::ReturnHome,
+        })
+        .await;
+    assert!(!stale.ok);
+    assert_eq!(stale.error.unwrap().code, "stale_generation");
+    assert_eq!(f.view.restored.lock().unwrap().len(), 1);
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    assert_eq!(
+        *f.view.destinations.lock().unwrap(),
+        vec![RestoreDestination::Home, RestoreDestination::Document]
+    );
+}
+
+#[tokio::test]
+async fn completed_sign_in_returns_to_the_committed_remote_home() {
+    let f = selected_for_update().await;
+    let before = f.client.state();
+    assert!(!before.connection.committed.is_local());
+    let calls = f.http.calls.lock().unwrap().len();
+    assert!(action(&f.client, ClientAction::ReturnHome).await.ok);
+    assert_eq!(
+        *f.view.restored.lock().unwrap(),
+        vec![before.connection.committed.clone()]
+    );
+    assert_eq!(*f.view.destinations.lock().unwrap(), vec![RestoreDestination::Home]);
+    assert_eq!(f.client.state().connection.committed, before.connection.committed);
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
 }

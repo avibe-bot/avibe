@@ -195,6 +195,7 @@ export function AccountApp() {
   // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
+  const [completedSignIn, setCompletedSignIn] = useState<number | null>(null);
   const [localUpgrade, setLocalUpgrade] = useState<'running' | 'failed' | undefined>();
   // When the last action was one sent to the selected instance's updater: the time of that click.
   const [instanceAction, setInstanceAction] = useState<number | null>(null);
@@ -271,6 +272,9 @@ export function AccountApp() {
       } else if (action.type === 'finish_totp_enrollment' && reply.result?.type === 'totp_enrolled') {
         recoveryProtection.current = reply.result.recoveryCodes?.length ? { generation: reply.state.generation } : null;
         setMaterial({ generation: reply.state.generation, result: reply.result });
+        if (!reply.result.recoveryCodes?.length && reply.state.account.status === 'signed_in') {
+          setCompletedSignIn(reply.state.generation);
+        }
       }
       return true;
     } finally {
@@ -279,7 +283,7 @@ export function AccountApp() {
       setBusy(false);
     }
   }, [send, state?.generation, state?.consent?.instance_id]);
-  const leave = useCallback((type: 'cancel' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
+  const leave = useCallback((type: 'cancel' | 'return_home' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
     // Only the saved-codes action acknowledges; native invalidation remains independent.
     if ((recoveryProtection.current || claimCodesShown.current) && !recoveryAcknowledged) return;
     epoch.current += 1;
@@ -290,6 +294,28 @@ export function AccountApp() {
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
   }, [send]);
+  // A broadcast can precede a failed persistence result or one-time recovery codes.
+  // Only a successful direct sign-in reply authorizes returning home.
+  const sendSignIn = useCallback<typeof send>(async (action) => {
+    const reply = await send(action);
+    if (['verify_otp', 'sign_in_password', 'sign_in_with_provider', 'sign_in_with_passkey',
+      'verify_second_factor', 'verify_passkey'].includes(action.type)
+      && reply && 'ok' in reply && reply.ok && reply.state.account.status === 'signed_in') {
+      setCompletedSignIn(reply.state.generation);
+    }
+    return reply;
+  }, [send]);
+  useEffect(() => {
+    if (completedSignIn === null || completedSignIn !== state?.generation || claimDocument
+      || popover || view === 'updates' || view === 'sign-out' || view === 'setup-complete' || view === 'add'
+      || busy || recoveryProtection.current || claimCodesShown.current || awaitingRecoveryAcknowledgement
+      || state.account.status !== 'signed_in' || state.consent || state.connection.pending
+      || !['local', 'remote_connected'].includes(state.connection.status)
+      || ['registering', 'conflict', 'failed'].includes(state.enrollment.status)
+      || state.enrollment.error_code) return;
+    setCompletedSignIn(null);
+    leave('return_home');
+  }, [completedSignIn, state, claimDocument, popover, view, busy, awaitingRecoveryAcknowledgement, leave]);
   // Leaving the claim view ends its review (Cancel) before the shell returns to the Workbench; the
   // shell also retires it when the document is hidden.
   const { close: closeClaim } = claim;
@@ -391,7 +417,7 @@ export function AccountApp() {
     </UpdatePopover>;
   }
   /** The App's own sign-in, as its page or as the claim dialog's first face (whose way out cancels). */
-  const signIn = (inClaim: boolean) => state && <><DesktopSignIn state={state} send={send}
+  const signIn = (inClaim: boolean) => state && <><DesktopSignIn state={state} send={sendSignIn}
       onLocal={() => { if (inClaim) exitClaim(); else leave('return_local'); }} exitLabel={inClaim ? t('common.cancel') : undefined}
       heading={inClaim ? <h2 className="mb-2 text-xl font-semibold tracking-tight">{t('desktopAccount.bind.signInTitle')}</h2> : undefined}
       onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
@@ -423,7 +449,10 @@ export function AccountApp() {
       setMaterial(null);
       // The claim view goes on to the name; elsewhere a finished sign-in returns to the Workbench.
       if (claimDocument) setView('claim');
-      else if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
+      else if (state.account.status === 'signed_in' && !errorMessage) {
+        setView('account');
+        setCompletedSignIn(state.generation);
+      }
       else setView('account');
     }}>{failure}</RecoveryCodesView>;
   } else if (claimDocument && view === 'claim') {

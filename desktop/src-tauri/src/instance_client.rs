@@ -3043,12 +3043,17 @@ impl ClientView for NativeView {
         }
         result
     }
-    async fn restore(&self, epoch: Epoch, target: ClientTarget, preserve_document: bool) -> Result<(), ClientError> {
+    async fn restore(
+        &self,
+        epoch: Epoch,
+        target: ClientTarget,
+        destination: RestoreDestination,
+    ) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
         let owner = epoch.value;
         self.presentation_epoch(owner)?;
         self.discard_candidate().await?;
-        if preserve_document {
+        if destination != RestoreDestination::Local {
             let views = self.views.lock().expect("views");
             if let Some(account) = &views.account {
                 if !views.return_matches(account) {
@@ -3069,6 +3074,20 @@ impl ClientView for NativeView {
                 }
             });
             if same {
+                if destination == RestoreDestination::Home {
+                    let home = workbench_home(&runtime.url().map_err(failure)?);
+                    let checked = self.presentation_epoch(owner)?;
+                    let returning = runtime.clone();
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    self.app
+                        .run_on_main_thread(move || {
+                            let result = checked.check().and_then(|()| returning.navigate(home).map_err(failure));
+                            let _ = tx.send(result);
+                        })
+                        .map_err(failure)?;
+                    rx.await.map_err(failure)??;
+                    self.presentation_epoch(owner)?;
+                }
                 self.close_account().await?;
                 let epoch = self.presentation_epoch(owner)?;
                 let url = runtime.url().map_err(failure)?;
@@ -3137,9 +3156,34 @@ impl ClientView for NativeView {
     }
 }
 
+/// Root of the already validated committed instance, without a stale page query/fragment.
+fn workbench_home(current: &Url) -> Url {
+    let mut home = current.clone();
+    home.set_path("/");
+    home.set_query(None);
+    home.set_fragment(None);
+    home
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_home_keeps_the_selected_origin_and_clears_the_old_route() {
+        for (current, expected) in [
+            (
+                "http://127.0.0.1:4080/chat/session?draft=1#tail",
+                "http://127.0.0.1:4080/",
+            ),
+            (
+                "https://studio.example/settings/account?tab=old",
+                "https://studio.example/",
+            ),
+        ] {
+            assert_eq!(workbench_home(&current.parse().unwrap()).as_str(), expected);
+        }
+    }
 
     /// The browser's last page comes from the product catalogs, one language at a time.
     #[test]
