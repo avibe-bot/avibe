@@ -86,6 +86,7 @@ use offer::Offer;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use transport::Link;
+pub use transport::{Fault, FaultCode, QualificationKind, QualificationStep, Stage};
 
 /// Listener location only. Each routed window supplies its own registration.
 pub struct Route<'a> {
@@ -137,6 +138,8 @@ pub struct Client {
     // Only writers take this gate. Never nest the public status and link watch locks.
     status_writer: Arc<std::sync::Mutex<()>>,
     monitor: Option<JoinHandle<()>>,
+    steps: transport::Steps,
+    retirement: tokio::sync::broadcast::Sender<Fault>,
 }
 impl Client {
     /// The native shell calls this only for a direct-eligible, signed-in managed
@@ -160,6 +163,8 @@ impl Client {
             status_writer: Default::default(),
             status,
             monitor: None,
+            steps: tokio::sync::broadcast::channel(16).0,
+            retirement: tokio::sync::broadcast::channel(8).0,
         })
     }
     /// Ask the selected session's native adapter for a same-origin reply. The
@@ -174,7 +179,7 @@ impl Client {
             .await
             .ok()
             .flatten();
-        self.apply(answer.as_deref(), sent).await
+        self.apply(answer.as_deref(), sent).await.is_ok()
     }
 
     /// A missing reply is not a withdrawal. Preserve only an already usable
@@ -184,44 +189,69 @@ impl Client {
     where
         F: std::future::Future<Output = rendezvous::Reply>,
     {
+        self.refresh_reply_detailed(fetch).await.0
+    }
+
+    /// Same operation and authority as refresh_reply. The reason is independent
+    /// of disposition: a failed refresh may safely retain an earlier lease.
+    pub async fn refresh_reply_detailed<F>(
+        &mut self,
+        fetch: impl FnOnce(String) -> F,
+    ) -> (RefreshOutcome, Option<Fault>)
+    where
+        F: std::future::Future<Output = rendezvous::Reply>,
+    {
         use rendezvous::Reply;
+        use FaultCode::*;
         let sent = self.clock.now();
-        match tokio::time::timeout(std::time::Duration::from_secs(5), fetch(self.key.public().to_string())).await {
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), fetch(self.key.public().to_string())).await;
+        let code = match result {
             Ok(Reply::Ready(body)) => {
-                if self.apply(Some(&body), sent).await {
-                    RefreshOutcome::Renewed
-                } else {
-                    RefreshOutcome::Retired
+                return match self.apply(Some(&body), sent).await {
+                    Ok(()) => (RefreshOutcome::Renewed, None),
+                    Err(reason) => (RefreshOutcome::Retired, Some(reason)),
                 }
             }
-            Err(_) | Ok(Reply::NotReady | Reply::Failed | Reply::Refused(408 | 429 | 500..=599)) => {
-                let remaining = self
-                    .links
-                    .borrow()
-                    .as_ref()
-                    .filter(|l| l.usable())
-                    .map(|l| l.remaining())
-                    .unwrap_or_default();
-                if remaining.is_zero() {
-                    self.retire().await;
-                    RefreshOutcome::Retired
-                } else {
-                    RefreshOutcome::Retained {
-                        retry_before: (remaining / 2).min(Duration::from_secs(5)),
+            Err(_) => Timeout,
+            Ok(Reply::NotReady) => NotReady,
+            Ok(Reply::Failed) => Other,
+            Ok(Reply::Refused(408 | 429 | 500..=599)) => Status,
+            Ok(reply) => {
+                let code = match reply {
+                    Reply::SelectionChanged => {
+                        if let Some(task) = self.withdraw(false) {
+                            let _ = task.await;
+                        }
+                        Superseded
                     }
-                }
+                    other => {
+                        self.retire().await;
+                        match other {
+                            Reply::Controlled | Reply::Refused(401 | 403) => Denied,
+                            _ => Refused,
+                        }
+                    }
+                };
+                return (RefreshOutcome::Retired, Some(Fault(Stage::Rendezvous, code)));
             }
-            Ok(Reply::SelectionChanged) => {
-                if let Some(task) = self.withdraw(false) {
-                    let _ = task.await;
-                }
-                RefreshOutcome::Retired
+        };
+        let remaining = self
+            .links
+            .borrow()
+            .as_ref()
+            .filter(|l| l.usable())
+            .map(|l| l.remaining())
+            .unwrap_or_default();
+        let disposition = if remaining.is_zero() {
+            self.retire().await;
+            RefreshOutcome::Retired
+        } else {
+            RefreshOutcome::Retained {
+                retry_before: (remaining / 2).min(Duration::from_secs(5)),
             }
-            Ok(Reply::Refused(_) | Reply::Controlled) => {
-                self.apply(None, sent).await;
-                RefreshOutcome::Retired
-            }
-        }
+        };
+        (disposition, Some(Fault(Stage::Rendezvous, code)))
     }
 
     /// The route describes the proxy, not direct-path readiness. Its port
@@ -268,12 +298,22 @@ impl Client {
         }
     }
 
+    pub fn qualification_steps(&self) -> tokio::sync::broadcast::Receiver<QualificationStep> {
+        self.steps.subscribe()
+    }
+
+    /// Live, bounded stream of link withdrawals; never contains peer identifiers.
+    pub fn retirements(&self) -> tokio::sync::broadcast::Receiver<Fault> {
+        self.retirement.subscribe()
+    }
+
     fn withdraw(&mut self, involuntary: bool) -> Option<JoinHandle<()>> {
         let _writer = self.status_writer.lock().unwrap();
         if let Some(l) = self.links.send_replace(None) {
             // Withdraw immediately; a zero deadline also wakes the monitor.
             let closed = l.claim_loss();
             l.retire();
+            let _ = self.retirement.send(Fault(Stage::Handover, FaultCode::Superseded));
             PathStatus::publish(&self.status, None, involuntary && closed);
         }
         self.monitor.take()
@@ -285,7 +325,7 @@ impl Client {
     }
     /// Only the native isolated-world adapter may supply a completion. No
     /// command or message handler accepts a rendezvous answer from a page.
-    async fn apply(&mut self, answer: Option<&str>, sent: Duration) -> bool {
+    async fn apply(&mut self, answer: Option<&str>, sent: Duration) -> Result<(), Fault> {
         let Some(offer) = answer.and_then(|body| {
             Offer::parse(
                 body,
@@ -297,61 +337,79 @@ impl Client {
             )
         }) else {
             self.retire().await;
-            return false;
+            return Err(Fault(Stage::Rendezvous, FaultCode::InvalidOffer));
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
-            return true;
+            return Ok(());
         }
         // Retire previous authority before starting a replacement. Never use a
         // stale result to make a new stream while waiting for the next probe.
         self.retire().await;
-        if !self.listener.is_alive() || self.clock.now() >= offer.until {
-            return false;
+        if !self.listener.is_alive() {
+            return Err(Fault(Stage::Handover, FaultCode::ListenerClosed));
+        }
+        if self.clock.now() >= offer.until {
+            return Err(Fault(Stage::Dial, FaultCode::Expired));
         }
         // A non-renewable grant gets a fresh endpoint. In particular an old
         // relay map or iroh peer-address cache cannot cross a policy change.
-        let Ok(Ok(endpoint)) = tokio::time::timeout(
+        let endpoint = tokio::time::timeout(
             offer.until.saturating_sub(self.clock.now()),
             transport::endpoint_builder(self.key.clone(), offer.relay.as_ref()).bind(),
         )
         .await
-        else {
-            return false;
-        };
-        self.probe(endpoint, offer).await
+        .map_err(|_| Fault(Stage::Dial, FaultCode::Timeout))?
+        .map_err(|_| Fault(Stage::Dial, FaultCode::Other))?;
+        self.probe_detailed(endpoint, offer).await
     }
 
+    #[cfg(test)]
     async fn probe(&mut self, endpoint: Endpoint, offer: Offer) -> bool {
+        self.probe_detailed(endpoint, offer).await.is_ok()
+    }
+
+    async fn probe_detailed(&mut self, endpoint: Endpoint, offer: Offer) -> Result<(), Fault> {
         let drain = EndpointDrain::new(endpoint.clone());
-        let Some(link) = Link::dial(&endpoint, offer, &self.host, self.clock.clone()).await else {
-            drain.close().await;
-            return false;
+        let link = match Link::dial_detailed(&endpoint, offer, &self.host, self.clock.clone(), Some(&self.steps)).await
+        {
+            Ok(link) => link,
+            Err(fault) => {
+                drain.close().await;
+                return Err(fault);
+            }
         };
-        if !self.listener.is_alive() || !link.usable() {
+        let check = if self.listener.is_alive() {
+            link.check_path(Stage::Handover)
+        } else {
+            Err(Fault(Stage::Handover, FaultCode::ListenerClosed))
+        };
+        if let Err(fault) = check {
             link.retire();
             drain.close().await;
-            return false;
+            return Err(fault);
         }
         self.publish(link, drain);
-        true
+        Ok(())
     }
 
     fn publish(&mut self, link: Arc<Link>, drain: EndpointDrain) {
         self.links.send_replace(Some(link.clone()));
+        transport::step(Some(&self.steps), QualificationKind::LinkPublished);
         PathStatus::publish(&self.status, link.selected_path(), false);
         let status = self.status.clone();
         let writer = self.status_writer.clone();
         let mut health = self.listener.health();
         let tx = self.links.clone();
+        let retirement = self.retirement.clone();
         self.monitor = Some(tokio::spawn(async move {
             let mut accepting = true;
             let mut paths = link.conn.paths_stream();
             let mut deadlines = link.deadlines();
-            loop {
+            let reason = loop {
                 let bound = *deadlines.borrow_and_update();
                 let remaining = bound.saturating_sub(link.clock.now());
                 if remaining.is_zero() {
-                    break;
+                    break FaultCode::Expired;
                 }
                 // Tokio's timer may pause during suspend. Bound idle teardown
                 // latency after wake; stream admissions and I/O check directly.
@@ -367,13 +425,14 @@ impl Client {
                         }
                     },
                     next=paths.next()=>{
-                        let Some(path)=next.and_then(|snapshot|link.selected_in(snapshot)) else{break};
+                        let Some(snapshot) = next else {break FaultCode::ConnectionEnded};
+                        let Some(path) = link.selected_in(snapshot) else {break FaultCode::NoPermittedPath};
                         let _writer=writer.lock().unwrap();
-                        if !tx.borrow().as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break;}
+                        if !tx.borrow().as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break FaultCode::Superseded;}
                         if accepting && health.has_changed().is_ok() {PathStatus::publish(&status,Some(path),false);}
                     }
                 }
-            }
+            };
             // The old watcher can finish while a new link is being published.
             {
                 let _writer = writer.lock().unwrap();
@@ -387,6 +446,7 @@ impl Client {
                     true
                 });
                 if removed {
+                    let _ = retirement.send(Fault(Stage::Handover, reason));
                     PathStatus::publish(&status, None, closed);
                 }
             }
@@ -395,6 +455,29 @@ impl Client {
         }));
     }
 }
+#[cfg(test)]
+mod diagnosis_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn refresh_keeps_disposition_and_returns_only_classified_failures() {
+        use rendezvous::Reply;
+        let mut client = Client::new("desk-app.avibe.bot", "fixture".into()).await.unwrap();
+        for (reply, code) in [
+            (Reply::Ready("not a wire offer".into()), FaultCode::InvalidOffer),
+            (Reply::NotReady, FaultCode::NotReady),
+            (Reply::Refused(403), FaultCode::Denied),
+            (Reply::Refused(503), FaultCode::Status),
+            (Reply::SelectionChanged, FaultCode::Superseded),
+        ] {
+            assert_eq!(
+                client.refresh_reply_detailed(|_| async move { reply }).await,
+                (RefreshOutcome::Retired, Some(Fault(Stage::Rendezvous, code)))
+            );
+        }
+    }
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         self.listener.retire();
