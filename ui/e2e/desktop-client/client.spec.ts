@@ -31,7 +31,7 @@ async function capturePresentations(page: Page) {
     const response = await route.fetch();
     const body = await response.text();
     expect(body).toContain('window.location.assign(');
-    await route.fulfill({ response, body: body.replace('window.location.assign(', 'window.__fixturePresent(') });
+    await route.fulfill({ response, body: body.replaceAll('window.location.assign(', 'window.__fixturePresent(') });
   });
   return presentations;
 }
@@ -112,8 +112,9 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-version-trigger] button')).toBeFocused();
       await page.locator('[data-account-trigger]').click();
+      await page.getByRole('menuitem', { name: lang === 'en' ? en.desktopClient.switchInstance : zh.desktopClient.switchInstance }).click();
       await expect.poll(() => presentations).toEqual([`avibe://desktop/instances?locale=${lang}`]);
-      await expect(page.locator('[data-account-trigger]')).not.toHaveAttribute('aria-expanded');
+      await expect(page.locator('[data-account-trigger]')).toHaveAttribute('aria-expanded', 'false');
       await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
       await expect(popup).toHaveCount(0);
       await expect(page.locator('[data-update-menu]')).toHaveCount(0);
@@ -196,8 +197,9 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await chip.click();
     await expect.poll(() => presentations).toEqual([`avibe://desktop/updates?locale=${lang}`]);
     await page.locator('[data-account-trigger]').click();
+    await page.getByRole('menuitem', { name: lang === 'en' ? en.desktopClient.switchInstance : zh.desktopClient.switchInstance }).click();
     await expect.poll(() => presentations).toEqual([`avibe://desktop/updates?locale=${lang}`, `avibe://desktop/instances?locale=${lang}`]);
-    await expect(page.locator('[data-account-trigger]')).not.toHaveAttribute('aria-expanded');
+    await expect(page.locator('[data-account-trigger]')).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('[data-instance-menu],[data-update-menu],[data-update-panel]')).toHaveCount(0);
     expect(await page.evaluate(() => '__TAURI_INTERNALS__' in window)).toBe(false);
     expect(requests).toEqual([]); expect(denied).toEqual([]);
