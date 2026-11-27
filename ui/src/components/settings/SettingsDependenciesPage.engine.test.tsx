@@ -12,6 +12,7 @@ import type { EngineOperationResult } from './engineOperations';
 const api = vi.hoisted(() => ({
   installDependency: vi.fn(),
   listDependencies: vi.fn(),
+  connectWorkbenchEvents: vi.fn(() => vi.fn()),
   engineOperationRequest: vi.fn(),
   setEngineAutoUpdate: vi.fn(),
   // The request-to-outcome wait has its own tests (engineOperations.test.ts); here it is one call.

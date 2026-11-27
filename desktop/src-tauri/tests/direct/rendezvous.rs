@@ -99,7 +99,9 @@ fn only_a_complete_200_from_the_script_gives_a_body() {
         (Some(r#"{"ok":false,"failure":"csrf"}"#), Reply::NotReady),
         (Some(r#"{"ok":false,"failure":"controlled"}"#), Reply::Controlled),
         (Some(r#"{"ok":false,"failure":"redirect"}"#), Reply::Failed),
-        (Some(r#"{"ok":false,"failure":"timeout"}"#), Reply::Failed),
+        // The script's own deadline is told apart from the rest: the core
+        // reports it as a time-out, and keeps the link as for any failure.
+        (Some(r#"{"ok":false,"failure":"timeout"}"#), Reply::TimedOut),
         (Some(r#"{"ok":false}"#), Reply::Failed),
         (Some(r#"{"ok":true,"status":403,"body":""}"#), Reply::Refused(403)),
         (Some(r#"{"ok":true,"status":401,"body":"no"}"#), Reply::Refused(401)),

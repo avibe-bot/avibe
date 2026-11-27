@@ -35,7 +35,7 @@ describe('Settings › Experimental', () => {
     render(<MemoryRouter><SettingsExperimentalPage /></MemoryRouter>);
     const row = await screen.findByRole('link', { name: /settings\.experimental\.sourceFilter\.title/ });
     expect(row.getAttribute('href')).toBe(SOURCE_FILTER_PATH);
-    await screen.findByText('settings.experimental.on');
+    await screen.findByText('devices.capability.stateOn');
     expect(screen.queryByRole('switch')).toBeNull();
   });
 
@@ -50,6 +50,6 @@ describe('Settings › Experimental', () => {
     const [path, init] = apiFetch.mock.calls[1];
     expect(path).toBe('/api/settings/experimental/source-filter');
     expect(init).toMatchObject({ method: 'PUT', body: JSON.stringify({ enabled: true }) });
-    expect(screen.getAllByText('settings.experimental.sourceFilter.notFound')).toHaveLength(3);
+    expect(screen.getAllByText('common.notFound')).toHaveLength(3);
   });
 });

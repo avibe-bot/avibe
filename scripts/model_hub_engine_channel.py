@@ -1037,7 +1037,7 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     authorize_parser = commands.add_parser("authorize", help="Prove this run may use a protected environment.")
-    authorize_parser.add_argument("--environment", required=True, choices=[SIGNER_ENVIRONMENT, WRITER_ENVIRONMENT])
+    authorize_parser.add_argument("--environment", required=True, choices=[SIGNER_ENVIRONMENT, WRITER_ENVIRONMENT, "model-hub-engine-asset-approval"])
     authorize_parser.add_argument("--operation", required=True)
     authorize_parser.add_argument("--require-approval", action="store_true")
 

@@ -7089,12 +7089,17 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         process.stdin = SimpleNamespace(
             is_closing=lambda: False, write=accept_code, drain=AsyncMock(),
         )
-        # Observe the real launcher: a PTY would select agy's browser mode.
+        # AUTH-SETUP-931: pipes alone do not suppress agy's browser opener.
         async def launch(*command, **kwargs):
             assert command == (str(fake_agy.binary), "acp", "--login", "--disable-telemetry")
             assert kwargs["stdin"] == asyncio.subprocess.PIPE
             assert kwargs["stdout"] == asyncio.subprocess.PIPE
             assert kwargs["stderr"] == asyncio.subprocess.STDOUT
+            if os.name != "nt":
+                from pathlib import Path
+                directory = Path(kwargs["env"]["PATH"].split(os.pathsep)[0])
+                assert directory.name.startswith("avibe-agy-login-")
+                assert all((directory / name).is_file() for name in ("open", "xdg-open"))
             return process
 
         start_login = AsyncMock(side_effect=launch)

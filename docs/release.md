@@ -108,6 +108,17 @@ remain mandatory.
   input. Put `<!-- avibe:update-notification=none -->` in the tag annotation
   for a silent release: no notification announces it and nothing installs it
   automatically.
+- A GitHub-only RC (`gh-vX.Y.ZrcN`) is **silent by default**. It announces
+  itself only when its annotated tag carries the explicit flag
+  `<!-- avibe:update-notification=default -->` on a line by itself; the release
+  Session adds it to
+  every RC it cuts for testers. Without the flag (including a lightweight tag),
+  the RC still builds and publishes, but its notes get the silent marker, so no
+  automatic updater offers it. A silent marker in the annotation wins over the
+  flag. Stable `v*` tags are unchanged. A tag pushed on a commit from before
+  this rule runs that commit's older workflow and announces by default; put
+  `<!-- avibe:update-notification=none -->` in its annotation when it must be
+  silent.
 - On the Runtime, the periodic check neither notifies about nor automatically
   installs a silent release. It skips releases the mirror index marks silent
   and still finds the newest announced release below them. A release the index
@@ -325,232 +336,47 @@ installed Avibe adopts an engine from the channel yet: the client reads and
 checks the index, and the code that would act on it is later work.
 Commissioning is listed at the end of this section and needs the owner.
 
-### One signed index, one ledger
+### Publishing the current manifest
 
-`https://dl.avibe.bot/index/model-hub-engine.json` tells clients which engine
-releases may be adopted and which were withdrawn. It is a signed envelope
-around an exact payload; each release entry carries the minimum Avibe version
-and the exact bytes of that release's manifest. Clients trust it only through
-a key shipped inside Avibe, never because of where it was downloaded.
+The 3.2.8 complete RC and stable ship no channel trust root. The bundled engine is
+independent of this channel. A later root PR needs the owner's public key ID, compressed
+public key and sequence floor, along with confirmation of signer custody. Never put a
+private key or an export of the signing store in Git. Installing the publication tools
+does not publish an index or commission a client.
 
-There is one current index. It has no expiry and is never renewed: a client
-follows the highest sequence it has accepted for as long as that is the
-highest it has, and only a promotion or a withdrawal produces a new one.
+After commissioning, merging **one file**, `patches/model-hub-engine-channel.json`, to
+protected `master` authorizes an update. Its `payload` is a complete channel payload:
+repository, channel, sequence, fixed `issued_at`, installable releases (each with its
+minimum Avibe version and exact manifest bytes), and permanent withdrawals. The signed
+bytes are the ASCII JSON encoding of `payload` with sorted keys and compact separators,
+without a trailing newline. Changed bytes require a higher sequence, even if a previous
+upload never completed. Formatting the outer file does not change the signed payload.
 
-What the index should say is recorded in a **ledger on the signer host**: the
-next sequence, the exact payload last allocated, and every release identity
-and withdrawal ever allocated. `Publish Model Hub engine channel` is the
-index's only writer, and it plans every change from that ledger. It never
-reads the published object, the bucket or a workflow artifact as the state to
-continue from. If the published index is replaced by an older signed one, or
-deleted, the next publication puts back what the ledger holds, and the signer
-is never led to sign the older state again.
+For a new promotion set `rehearsals[asset_release_tag]` to `{"run": <id>, "attempt": <n>}`.
+The read-only preflight checks the hosted attempt and the original report, not the PR body.
+There is one reviewed producer revision at a time: commit the workflow, its tools and
+candidate record first; pin that revision in the later caller and its CI data checkout.
+The validator computes the expected digest from the pinned Git blobs (including the
+workflow), checks the attempt ran that revision, and compares candidate identity,
+released-wheel context and baselines. The record from the hosted rehearsal is not
+a signature on an index and cannot publish anything. The separate asset-release workflow
+still requires owner approval before it publishes immutable release assets.
 
-The ledger must not go backward. Restoring it from an old copy is not a
-supported recovery: if the published index was rolled back or removed as
-well, nothing in this tooling can tell that ledger from a current one, and it
-would sign an index that forgets later withdrawals. A lost, damaged or
-doubtful ledger stops the channel until a recovery is separately designed and
-approved. The workflow has no operation that creates, resets or restores a
-ledger.
+An entry in the merged master manifest must retain its identity or be explicitly withdrawn,
+even if its upload was interrupted. On withdrawal,
+remove it from `releases`, retain a permanent record in `revoked` and name a listed,
+compatible rollback target. All offered packages, including that fallback, must verify
+at both download sources; a withdrawn archive need not be available. The asset guard
+backs up the packaged engine and current installable releases, not retired non-bundled
+archives. Offline clients learn of a withdrawal when they next receive the index.
 
-Nothing regenerates the index from the list of GitHub releases, and
-`Mirror releases to dl.avibe.bot` refuses to write or delete that object.
-
-### From candidate to adoption
-
-1. **Record.** Review a candidate record under
-   `patches/model-hub-engine-candidates/` (format in its `README.md`): the exact
-   six-asset manifest and the minimum Avibe version. The record is separate
-   from the packaged engine, so merging it changes nothing users install.
-2. **Rehearse.** Dispatch `Qualify Model Hub engine candidate` on `master` with
-   the record's tag. It holds no business secret, repository-write token or
-   OIDC publication authority. Its disposable jobs rebuild and exercise the
-   exact candidate and publish only the informational result named
-   `untrusted_rehearsal`, with source, manifest/archive digests, run identity,
-   and missing/failed observations. It does not authorize anything.
-3. **Prepare and publish.** Dispatch the channel workflow with
-   `operation: release` and the rehearsal run id. Its trusted prepare job uses
-   a fixed checkout, checks the exact run and current candidate/source/manifest/
-   archive digests, parses the result as bounded untrusted data, and places
-   only byte-checked assets in a separate trusted artifact namespace. The
-   existing protected writer environment then requires explicit owner approval
-   for this run and digest before publishing immutable, non-latest assets.
-4. **Promote.** After the mirror holds the release, dispatch
-   `operation: promote` with the same rehearsal run id. Trusted prepare checks
-   the same exact context and availability. The existing protected signer and
-   writer approvals then authorize allocation, signing and publication of the
-   index. Owner authorization is the promotion authority, not a rehearsal
-   receipt.
-
-The trusted prepare job verifies the workflow run is the intended dispatch on
-`master`, the run attempt and commit, the current reviewed candidate, the
-upstream source reference, exact manifest/archive digests, minimum Avibe and
-the concrete baseline context. It independently resolves the current minimum
-and stable Avibe releases, verifies immutable wheel sizes and SHA-256 digests,
-and reads their packaged manifests as ZIP data; it does not trust released-role
-or bundled-manifest files from the rehearsal artifact. It never executes
-candidate code, imports uploaded modules or wheels, or accepts an uploaded
-executable as trusted input. Runtime pass/fail assertions remain explicitly
-untrusted. The job split protects the
-trusted workflow and privileged credentials; it does not prove that a
-malicious candidate reported honestly. A future stronger receipt or
-malicious-candidate-resistant provenance requires a new product/owner decision.
-
-| Observation | What it shows | Current producer |
-| --- | --- | --- |
-| `build` | The pinned source reports a rebuild matching the reviewed manifest and six assets. | Yes; independently rechecked by trusted prepare |
-| `platform_smoke` | Each archive reports startup and Avibe health on its own platform. | Yes; untrusted runtime data |
-| `hosted_wire` | The hosted passthrough comparison with each baseline engine. Reviewed differences remain visible. | Yes when a candidate has baselines |
-| `released_avibe_e2e` | The hermetic E2E through the minimum and current-stable released wheels. | Yes when immutable wheels are available |
-| `backward_state` | Candidate state read back by baseline engines. | Future lifecycle work; missing is reported, not fabricated |
-| `lifecycle` | Activation, rollback and recovery observations. | Future lifecycle work; missing is reported, not fabricated |
-
-All concrete integrity, manifest, minimum-version, availability, health and
-rollback checks remain useful data or trusted checks at their owning boundary.
-No universal failure is caused solely by absent backward-state or lifecycle
-producers. Full candidate containment is rejected for this scope, not deferred
-as a prerequisite. PR4 must not restore the removed producer/receipt gate under
-another name.
-
-The released-Avibe job installs the published stable wheel into its own
-environment and runs **that release tag's own tests** from a directory that
-holds no product package. The service starts from the wheel's own entry
-script. Every Python process in that environment logs where it imported each
-Avibe module from, and the run is refused if any module, in the test runner,
-the service or a helper, came from anywhere else.
-
-`Rehearse the released-wheel Model Hub E2E` runs the same shared steps against
-one pinned release candidate, so the harness is exercised before the stable
-tag freezes its tests. A rehearsal qualifies nothing; its result is separate
-from `untrusted_rehearsal` and no owner approval can be inferred from it.
-
-### Operations
-
-Each run of the channel workflow is one of these, and every one needs a manual
-dispatch on `master` and this run's approval.
-
-| Operation | What it does |
-| --- | --- |
-| `release` | Publishes trusted-checked candidate assets after owner approval. Does not touch the index. |
-| `promote` | Lists an owner-approved, published, mirrored release in the index. Allocates the next sequence. |
-| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Allocates the next sequence. |
-| `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence and no new signature, however long ago it was allocated. |
-
-Nothing else allocates a sequence, and nothing runs on a schedule. An index
-does not expire, so there is no renewal to perform or to miss, and no
-operation re-signs an unchanged list. The signer host only has to be up for a
-run that was approved; between runs it can be off, as long as its ledger
-survives.
-
-**What a client without the newest index does.** It keeps following the index
-it has. If that index lists a release that a later index withdrew, the client
-may still install it, a month later as well as a minute later, for as long as
-it cannot fetch the later index and the release's pinned archive can still be
-downloaded. A signature shows an index was authorized, and the sequence rule
-stops a client going back from one it has seen; neither shows that a newer
-one was received. A client that has the later index refuses the earlier one.
-This is the chosen behaviour, not a gap to close with a time limit
-(`docs/plans/model-hub-engine-channel.md`, section 2). A withdrawal reaches a
-machine when that machine next reaches the index.
-
-A withdrawal is permanent. Later indexes carry it unchanged, clients refuse
-an index that drops it, and the writer refuses to publish one. The release's
-assets and its index entry stay. The fallback must be a listed release that
-was not withdrawn and that does not need a newer Avibe than the withdrawn
-one. An engine that only a packaged Avibe bundles can be withdrawn too.
-Clients learn of a withdrawal at their next check; a machine that cannot
-reach the index learns of it when it can.
-
-**When a run fails part way.** The signer commits the exact payload to the
-ledger before it asks avault to sign, and commits the envelope before it
-leaves the job. So a sequence is only ever signed over one payload, and a
-failure leaves one of two states:
-
-- Nothing was allocated. Dispatch the operation again.
-- A sequence was allocated, and its envelope was or was not signed or
-  published. Dispatch `resume`: it signs that same payload if it was never
-  signed, and publishes the identical envelope. Publishing an envelope the
-  bucket already holds writes nothing.
-
-Another operation may also be dispatched instead of `resume`. It is planned
-from the ledger, which already contains the unpublished change, so that
-change is carried into the new index rather than lost. Sequences may skip.
-
-### Availability of listed releases
-
-`Guard Model Hub engine release` keeps available the engine Avibe packages and
-every release the index lists, withdrawn ones and rollback targets included.
-On its schedule it verifies each release's published assets against the
-manifest, keeps a verified backup, and restores assets a release lost from
-the newest backup that still verifies. It uploads only asset names that are
-missing and never overwrites published bytes. It reads the index through the
-keys Avibe ships and holds no channel key and no bucket credential, so it can
-restore pinned bytes but cannot promote a release or undo a withdrawal.
-
-### Authority
-
-The channel workflow separates authority so that no job holds two:
-
-- `authorize` holds no secret. It requires the reviewed workflow, dispatched on
-  `master`, and reads both GitHub Environments from the API: each must exist,
-  require review by a named user, and admit only `master`.
-- `sign` runs on the signer host. The channel key stays inside avault there,
-  beside the ledger. The job holds no bucket credential and runs only this
-  checkout's scripts.
-- `publish` holds the bucket credential and no key. It writes only over the
-  object it read (`If-Match`), or only where none exists (`If-None-Match`). It
-  refuses to replace a stored index signed by the channel key unless the new
-  one strictly follows it, by sequence and by content.
-
-`release`, `sign` and `publish` each prove, before their first privileged step,
-that this run was approved for their Environment by one of its required
-reviewers. A job that names an Environment nobody configured would otherwise
-run unprotected.
-
-Those checks are not an execution boundary for the signer host. A self-hosted
-runner runs whatever its runner group admits, so `sign` names the runner
-group, and that group must admit only this workflow at `refs/heads/master`.
-
-A change counts as published only after the bucket returns the exact envelope
-and the public URL serves those same bytes. The object is cached for 60
-seconds, so the workflow waits for the public URL instead of purging it.
-
-### Commissioning (owner-held, not done)
-
-Commissioning does not turn `untrusted_rehearsal` into an authority. It remains
-an owner-held action that requires the signer, ledger, protected environments and
-custody boundaries below; this follow-up neither commissions nor verifies them.
-
-Nothing below exists yet, and this repository creates none of it:
-
-- **A channel key.** A dedicated secp256k1 key that is not a wallet key,
-  generated and held inside avault on the signer. avault 0.1.10 cannot generate
-  a secp256k1 key; that needs the avault release that adds
-  `keypair generate --curve secp256k1` (avault#47, not yet released). Clients
-  are unaffected: they only verify, which avault 0.1.10 does.
-- **The public root.** A reviewed change adds the key id, the compressed public
-  key and a sequence floor to `engine_channel_roots.json`. It must not come
-  before the protections below are in place.
-- **The signer host and its runner group.** A self-hosted runner in the group
-  `model-hub-engine-channel-signer`, with avault, its store, the sealed key and
-  a durable directory for the ledger. The group must admit only the channel
-  workflow at `refs/heads/master`. Whether this organization's plan can
-  enforce that restriction is **not verified**. Without it, any workflow run
-  in the repository could reach the signer host, and the signer must not be
-  commissioned. The host is needed only while an approved run signs. It does
-  not have to stay up between runs; the ledger directory has to outlast them.
-- **The ledger.** Created once, by hand on the signer host, with
-  `scripts/model_hub_engine_channel.py initialize-ledger`, for a channel whose
-  key has never signed an index. An empty directory is not proof of that; the
-  owner asserts it. It is never run again. The ledger holds no secret and
-  should be backed up, but a backup is a record, not something to restore and
-  continue from.
-- **Two GitHub Environments**, `model-hub-engine-channel-signer` and
-  `model-hub-engine-channel-writer`, each with required reviewers and a branch
-  policy of exactly `master`, and the repository variables and Environment
-  secrets the workflow names. The writer's bucket credential is separate from
-  the release mirror's.
+The master workflow checks installable bytes before signing. The signer and writer run
+on separate hosted runners. Only the signer can use the channel signing key; only the
+writer upload step gets mirror credentials. The writer authenticates the origin, rejects
+stale or conflicting payloads, and replaces the object only if its ETag still matches
+(or the object is absent). An identical payload only needs readback, never another PUT.
+If origin and public bytes differ, publication is **pending**, not successful. Retry the
+workflow on master; it uses the current manifest, not a past PR or Actions run.
 
 ## Managed-runtime manifests
 

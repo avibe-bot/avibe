@@ -634,13 +634,15 @@ def build_untrusted_rehearsal(
         "jobs": [dict(job) for job in jobs],
     }
 
-def run_identity_problems(result: Mapping[str, Any], *, api: Callable[[str], Any]) -> list[str]:
+def run_identity_problems(result: Mapping[str, Any], *, api: Callable[[str], Any],
+                          reviewed_revision: str | None = None) -> list[str]:
     """Check the rehearsal's run identity without treating job output as proof."""
 
     run_id, attempt = result.get("run_id"), result.get("run_attempt")
     if type(run_id) is not int or type(attempt) is not int:
         return ["the rehearsal names no run"]
-    run = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}")
+    path = f"/repos/{REPOSITORY}/actions/runs/{run_id}"
+    run = api(f"{path}/attempts/{attempt}" if reviewed_revision else path)
     if not isinstance(run, dict):
         return ["GitHub has no such rehearsal run"]
     expected = {
@@ -648,9 +650,12 @@ def run_identity_problems(result: Mapping[str, Any], *, api: Callable[[str], Any
         "run_attempt": attempt,
         "path": QUALIFICATION_WORKFLOW_PATH,
         "event": "workflow_dispatch",
-        "head_branch": DEFAULT_BRANCH,
-        "head_sha": result.get("head_sha"),
+        "head_sha": reviewed_revision or result.get("head_sha"),
     }
+    if reviewed_revision is None:
+        expected['head_branch'] = DEFAULT_BRANCH
+    elif result.get('head_sha') != reviewed_revision:
+        return ['the rehearsal artifact is not from the reviewed revision']
     problems = [
         f"the run's {field} is {run.get(field)!r}, not {value!r}"
         for field, value in expected.items()
@@ -666,9 +671,12 @@ def run_identity_problems(result: Mapping[str, Any], *, api: Callable[[str], Any
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or _COMMIT_RE.fullmatch(head_sha) is None:
         return problems + ["the run names no commit"]
-    comparison = api(f"/repos/{REPOSITORY}/compare/{head_sha}...{DEFAULT_BRANCH}")
-    if not isinstance(comparison, dict) or comparison.get("status") not in {"ahead", "identical"}:
-        problems.append(f"the run's commit is not on {DEFAULT_BRANCH}")
+    if reviewed_revision is None:
+        comparison = api(f"/repos/{REPOSITORY}/compare/{head_sha}...{DEFAULT_BRANCH}")
+        if not isinstance(comparison, dict) or comparison.get("status") not in {"ahead", "identical"}:
+            problems.append(f"the run's commit is not on {DEFAULT_BRANCH}")
+    elif run.get('conclusion') != 'success':
+        problems.append('the designated rehearsal attempt did not succeed')
     listing = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
     jobs = listing.get("jobs") if isinstance(listing, dict) else None
     if not isinstance(jobs, list) or not isinstance(listing.get("total_count"), int) or listing["total_count"] != len(jobs):
@@ -691,12 +699,13 @@ def verify_untrusted_rehearsal(
     harness_sha256: str,
     baselines: Mapping[str, str],
     avibe: Mapping[str, ReleasedAvibe] | None = None,
+    reviewed_revision: str | None = None,
 ) -> None:
     """Validate trusted context and bytes; never authorize from rehearsal claims."""
 
     if not isinstance(result, dict) or result.get("schema_version") != 2 or result.get("result") != RESULT_NAME:
         raise QualificationError("the result is not an untrusted_rehearsal")
-    problems = run_identity_problems(result, api=api)
+    problems = run_identity_problems(result, api=api, reviewed_revision=reviewed_revision)
     if result.get("repository") != REPOSITORY or result.get("workflow_path") != QUALIFICATION_WORKFLOW_PATH:
         problems.append("the rehearsal is for another repository or workflow")
     if result.get("candidate") != candidate.identity():

@@ -10,7 +10,7 @@
 use super::{
     choices::{Choices, Mode, Reason, Reverted},
     dead_end::DeadEnd,
-    rendezvous::{origin_of, Reply, Request},
+    rendezvous::{origin_of, Asked, Reply, Request},
     wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
     Client, RefreshOutcome,
 };
@@ -369,7 +369,8 @@ fn route_window(app: &AppHandle, state: &Arc<Direct>, effect: Effect) -> Option<
                 route(state, session).zip(pages::register(state, session, &window))
             {
                 let still = still(session, &window);
-                native::install(app, window, host, material, registration, still);
+                let taken = route_taken(app, state, session, &window);
+                native::install(app, window, host, material, registration, still, taken);
             }
             None
         }
@@ -396,6 +397,23 @@ fn route_window(app: &AppHandle, state: &Arc<Direct>, effect: Effect) -> Option<
             None
         }
         other => Some(other),
+    }
+}
+
+/// What is done with the answer of a window's browsing data to its route,
+/// on the main thread, at once. A window that did not take it is not one the
+/// session routes: its page is told the tunnel, which is what it is on, and
+/// what it was registered as with the listener is revoked (`pages::refresh`).
+/// The session's next answer tries it again (`Wiring::probed`).
+fn route_taken(app: &AppHandle, state: &Arc<Direct>, session: u64, window: &str) -> impl FnOnce(bool) + Send + 'static {
+    let (app, state, window) = (app.clone(), state.clone(), window.to_owned());
+    move |taken| {
+        if taken {
+            return;
+        }
+        lock(&state.wiring).route_refused(session, &window);
+        eprintln!("desktop direct: a window did not take its route");
+        pages::refresh(&app, &state, false);
     }
 }
 
@@ -692,7 +710,7 @@ fn instance_answered(reply: &Reply) -> bool {
     match reply {
         Reply::Ready(_) | Reply::Controlled => true,
         Reply::Refused(status) => (400..500).contains(status) && !matches!(status, 408 | 429),
-        Reply::NotReady | Reply::Failed | Reply::SelectionChanged => false,
+        Reply::NotReady | Reply::TimedOut | Reply::Failed | Reply::SelectionChanged => false,
     }
 }
 
@@ -801,15 +819,8 @@ async fn run(
 /// "the selection changed", whatever the instance said. A view that is only
 /// between two documents is still the selection; the adapter then finds no
 /// document of the instance and says "not ready".
-async fn ask(
-    app: AppHandle,
-    state: Arc<Direct>,
-    session: u64,
-    window: String,
-    origin: String,
-    endpoint: String,
-) -> Reply {
-    let Some(request) = Request::new(&origin, &endpoint) else {
+async fn ask(app: AppHandle, state: Arc<Direct>, session: u64, window: String, origin: String, asked: Asked) -> Reply {
+    let Some(request) = Request::asked(&origin, &asked) else {
         return Reply::Failed;
     };
     let (answer, answered) = oneshot::channel();
@@ -882,13 +893,22 @@ pub(crate) struct AtCreation {
 }
 
 /// The main window's instance view for `destination` is about to be created,
-/// on the main thread. When this account's instance has answered a
-/// rendezvous before, or its choice is "the direct path and the relay
-/// only", this starts its client and returns the route, which
-/// `window_created` puts in place before the view's first load; otherwise
-/// `None`, and the view is created as it always was. (A direct-only
-/// instance whose view is made without a route is opened again, or has its
-/// choice set back, at the next look: `Wiring::reconcile`.)
+/// on the main thread. When its instance gets a route before its first load
+/// (`Wiring::starts_at_creation`: where a window is routed live, every
+/// instance that may have a session; where a route is given at creation,
+/// one that has answered a rendezvous before or whose choice is "the direct
+/// path and the relay only"), this starts its client and returns the route,
+/// which `window_created` puts in place before the view's first load. Until
+/// a direct link is up, the client's listener carries the view on the
+/// tunnel.
+///
+/// Otherwise `None`, and the view is created as it always was: also when
+/// the instance is not in the account's list yet, when no client can be
+/// started (no loopback port), or from a thread that runs the async
+/// runtime. Such a view is asked from once it is open (`Effect::Open`) and
+/// routed with the first answer. (A direct-only instance whose view is made
+/// without a route is opened again, or has its choice set back, at the next
+/// look: `Wiring::reconcile`.)
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
     let state = direct(app).filter(|state| state.available)?;
     let target = target_at(app, destination)?;

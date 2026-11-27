@@ -1,23 +1,11 @@
 name: Rehearse the released-wheel Model Hub E2E
 
-# A rehearsal of the harness that engine qualification uses to drive the Model
-# Hub E2E through a released Avibe wheel (docs/release.md). It runs the same
-# shared action against one published release candidate, pinned below by tag,
-# commit and wheel digest. No secret is used.
-#
-# It qualifies nothing. It does not call the stable-only release resolver, its
-# record has a class no receipt reads, and qualification still requires the
-# stable tag's own tests and wheel.
-#
-# Two legs, kept apart on purpose:
-#   tag tests   the candidate's own tagged tests. A tag cannot be fixed, so this
-#               leg reports what fails and fails only if the harness itself did
-#               not run the wheel.
-#   head tests  this commit's tests against the same wheel. This leg must pass:
-#               it is where a fix to a checkout-only assumption is proven before
-#               the stable tag freezes the tests.
-#
-# The pin is one release candidate. Once stable 3.2.6 exists, repoint or remove it.
+# Exercise the qualification harness against a published stable wheel, pinned by
+# tag, commit and SHA-256. Both legs use the shared released-wheel E2E action.
+# The tag leg checks that the harness ran the wheel and reports any test failures;
+# the head leg also requires this checkout's tests and scenario evidence to pass.
+# This catches harness changes that accidentally rely on code outside the wheel.
+# Its rehearsal record does not qualify an engine or authorize publication.
 
 on:
   pull_request:
@@ -37,11 +25,11 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  RC_TAG: gh-v3.2.6rc3
-  RC_TAG_COMMIT: c826a90c0c904e9ee7aaae75fd8f7c8782499aa0
-  RC_VERSION: 3.2.6rc3
-  RC_WHEEL: avibe_os-3.2.6rc3-py3-none-any.whl
-  RC_WHEEL_SHA256: f7b439906cb344df46edc794caeaac667b7a6bd2ee6e88a9b34b27d6eebc33db
+  RC_TAG: v3.2.8
+  RC_TAG_COMMIT: 643075b3fa441939e4aa476e53cff747703e22a3
+  RC_VERSION: 3.2.8
+  RC_WHEEL: avibe_os-3.2.8-py3-none-any.whl
+  RC_WHEEL_SHA256: 71f37919f62ad76d4355ce6f226d288811a278a0b83250a9b7f9e0f3cb199d66
 
 jobs:
   rehearsal:
@@ -59,7 +47,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download the pinned release candidate wheel
+      - name: Download the pinned stable wheel
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -77,7 +65,7 @@ jobs:
               raise SystemExit(f"{wheel.name} does not match the pinned digest")
           EOF
 
-      - name: Check out the release candidate's tag
+      - name: Check out the pinned stable tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ env.RC_TAG }}

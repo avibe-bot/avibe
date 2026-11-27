@@ -109,7 +109,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Tap to open the conversation"
+            "value": "Tap to open"
           }
         },
         "zh-Hans": {
@@ -126,13 +126,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Avibe to respond"
+            "value": "Open Avibe"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开 Avibe 回应"
+            "value": "去 Avibe 回应"
           }
         }
       }
@@ -143,13 +143,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Took %@. Tap to read the reply."
+            "value": "Took %@. Tap to read"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "用时 %@，轻点查看回复"
+            "value": "用时 %@，轻点查看"
           }
         }
       }
@@ -160,13 +160,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ran %@. Open Avibe to see why."
+            "value": "Open Avibe to see why"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "运行 %@，打开 Avibe 查看原因"
+            "value": "打开 Avibe 查看原因"
           }
         }
       }
@@ -194,13 +194,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Last confirmed working at %@. Open Avibe to check."
+            "value": "Since %@"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 最后确认在处理，打开 Avibe 查看"
+            "value": "%@ 后没有更新"
           }
         }
       }
