@@ -1,0 +1,37 @@
+--- a/internal/runtime/executor/openai_compat_executor.go
++++ b/internal/runtime/executor/openai_compat_executor.go
+@@ -1396,7 +1396,7 @@
+ 	tosAppealURL       string
+ 	tosAppealURLText   string
+ 	// Forwardable upstream headers, subject to the central passthrough filter.
+-	headers http.Header
++	headers *http.Header
+ 	// diagnostic is a content-free detail for logs only; it never reaches clients.
+ 	diagnostic string
+ }
+@@ -1412,7 +1412,12 @@
+ func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+ func (e statusErr) IsRequestScoped() bool      { return e.requestScoped }
+ func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+-func (e statusErr) Headers() http.Header       { return e.headers }
++func (e statusErr) Headers() http.Header {
++	if e.headers == nil {
++		return nil
++	}
++	return *e.headers
++}
+ 
+ // LogDiagnostic lets upstream failure logs explain a sanitized client message.
+ func (e statusErr) LogDiagnostic() string { return e.diagnostic }
+--- a/internal/runtime/executor/claude_executor_request.go
++++ b/internal/runtime/executor/claude_executor_request.go
+@@ -901,7 +901,8 @@
+ 	if statusCode == http.StatusTooManyRequests || (statusCode >= 400 && statusCode < 600) {
+ 		retryAfter = helps.ParseClaudeRateLimitResetForError(headers, body, time.Now())
+ 	}
+-	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter, headers: helps.ClaudeRetryHeaders(headers)}
++	forwardHeaders := helps.ClaudeRetryHeaders(headers)
++	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter, headers: &forwardHeaders}
+ 	if statusCode == http.StatusTooManyRequests {
+ 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+ 			return claudeRateLimitError{statusErr: err, credentialScoped: true}
