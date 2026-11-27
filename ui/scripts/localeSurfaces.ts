@@ -82,7 +82,7 @@ const pageSurface = new Map(Object.entries(SURFACES).flatMap(([surface, pages]) 
  * except a page its loader loads), and each surface for the modules its pages
  * import. A module that runs with only one surface draws only that copy.
  */
-function moduleOwners(graph: ModuleGraph, main: string): Map<string, Set<string>> {
+export function moduleOwners(graph: ModuleGraph, main: string): Map<string, Set<string>> {
   const loaders = new Set(PAGE_LOADERS.map((path) => join(UI, path)));
   const owners = new Map<string, Set<string>>();
   const walk = (roots: string[], owner: string) => {
@@ -238,6 +238,25 @@ export function localeSurfaces(): Plugin[] {
   return [copyParts(), pageLoaders()];
 }
 
+/**
+ * Each dynamic import of a surface page in `code` that is not itself the
+ * `import()` of a `withCopy` naming that page's surface: [surface, specifier].
+ */
+export function unwrappedPageImports(code: string, resolve: (specifier: string) => string | undefined): [string, string][] {
+  const wrapped = [...code.matchAll(WITH_COPY)].map((match) => ({
+    surface: match[1],
+    at: match.index + match[0].lastIndexOf('import('),
+  }));
+  const unwrapped: [string, string][] = [];
+  for (const match of code.matchAll(IMPORT)) {
+    const target = resolve(match[1]);
+    const surface = target && pageSurface.get(target);
+    const at = match.index + match[0].indexOf('import(');
+    if (surface && !wrapped.some((call) => call.at === at && call.surface === surface)) unwrapped.push([surface, match[1]]);
+  }
+  return unwrapped;
+}
+
 /** A loader loads each page with its own surface's copy, and in no other way. */
 function pageLoaders(): Plugin {
   const loaders = new Set(PAGE_LOADERS.map((path) => join(UI, path)));
@@ -247,14 +266,12 @@ function pageLoaders(): Plugin {
       order: 'pre',
       async handler(code, id) {
         if (!loaders.has(id)) return undefined;
-        const wrapped = new Map<string, string>();
-        for (const [, surface, specifier] of code.matchAll(WITH_COPY)) wrapped.set(specifier, surface);
-        for (const [, specifier] of code.matchAll(IMPORT)) {
-          const target = (await this.resolve(specifier, id))?.id;
-          const surface = target && pageSurface.get(target);
-          if (surface && wrapped.get(specifier) !== surface) {
-            this.error(`i18n surfaces: ${id.slice(UI.length + 1)} loads ${specifier} without its copy; write withCopy('${surface}', () => import('${specifier}'))`);
-          }
+        const resolved = new Map<string, string | undefined>();
+        for (const [, specifier] of code.matchAll(IMPORT)) resolved.set(specifier, (await this.resolve(specifier, id))?.id);
+        const unwrapped = unwrappedPageImports(code, (specifier) => resolved.get(specifier));
+        if (unwrapped.length) {
+          this.error(`i18n surfaces: ${id.slice(UI.length + 1)} loads a page without its copy; write ${unwrapped
+            .map(([surface, specifier]) => `withCopy('${surface}', () => import('${specifier}'))`).join(', ')}`);
         }
         return undefined;
       },
