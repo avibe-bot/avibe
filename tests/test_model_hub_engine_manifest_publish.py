@@ -10,20 +10,23 @@ channel = publish.channel
 A, B = ('model-hub-engine-v8.0.63-1', 'model-hub-engine-v8.0.63-2')
 
 
-@pytest.mark.parametrize('change', ['omit', 'withdraw', 'drop tombstone'])
-def test_preflight_requires_explicit_permanent_retirement(tmp_path, monkeypatch, change):
-    import subprocess
-
-    a, b = [release_entry(manifest_bytes(build=i)) for i in (1, 2)]
+@pytest.fixture
+def revision(tmp_path):
     path = tmp_path / publish.MANIFEST
     path.parent.mkdir()
-    def revision(sequence, entries, revoked):
+    publish.git(tmp_path, 'init', '-q')
+    def commit(sequence, entries, revoked):
         payload = payload_document(sequence, releases=entries, revoked=revoked)
         path.write_text(json.dumps({'payload': payload, 'rehearsals': {}}))
         publish.git(tmp_path, 'add', '.')
         publish.git(tmp_path, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture')
         return publish.git(tmp_path, 'rev-parse', 'HEAD').decode().strip()
-    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    return commit
+
+
+@pytest.mark.parametrize('change', ['omit', 'withdraw', 'drop tombstone'])
+def test_preflight_requires_explicit_permanent_retirement(tmp_path, monkeypatch, revision, change):
+    a, b = [release_entry(manifest_bytes(build=i)) for i in (1, 2)]
     withdrawal = [tombstone(B, A)]
     retired = change == 'drop tombstone'
     base = revision(1, [a] if retired else [a, b], withdrawal if retired else [])
@@ -52,6 +55,42 @@ class Origin:
             raise publish.Error('conditional write lost')
         self.stored = body
         self.puts += 1
+
+
+def test_withdraw_historical_fallback_without_offering_it(tmp_path, monkeypatch, revision):
+    a, b, c = [release_entry(manifest_bytes(build=i)) for i in (1, 2, 3)]
+    C = 'model-hub-engine-v8.0.63-3'
+    first = revision(1, [a, b, c], [])
+    retired_b = revision(2, [a, c], [tombstone(B, A)])
+    retired_a = revision(3, [a, c], [tombstone(B, A), tombstone(A, C)])
+    checked = []
+    monkeypatch.setattr(publish.q, 'require_published', lambda record, _: checked.append(record.name))
+    publish.preflight(tmp_path, first, retired_b, harness=tmp_path)
+    assert checked == [A, C]
+    checked.clear()
+    publish.preflight(tmp_path, retired_b, retired_a, harness=tmp_path)
+    assert checked == [C]
+
+    signer, verifier, bucket = Signer(), LocalVerifier(), Origin()
+    # Origin missed B's withdrawal; do not mistake its historical record for a new decision.
+    bucket.stored = envelope_bytes(signer, publish.manifest(tmp_path, first)[0].raw)
+    desired, _ = publish.manifest(tmp_path, retired_a)
+    checked.clear()
+    publish.write_index(desired, envelope_bytes(signer, desired.raw), bucket=bucket, roots=signer.roots(),
+                        verifier=verifier, public=lambda: bucket.stored, assert_current=lambda: None)
+    assert checked == [C]
+    _, received = channel.authenticate(bucket.stored, roots=signer.roots(), verifier=verifier)
+    def resolve(installed):
+        return channel.resolve(received, bundled=A, current=installed, hold=None, avibe_version='3.2.8', host_platform='linux-amd64')
+    assert (resolve(A).action.value, resolve(A).target.asset_release_tag) == ('withdraw', C)
+    blocked = resolve(B)
+    assert blocked.action.value == 'blocked' and blocked.target is None and not blocked.download_authorized
+
+    bad = revision(4, [a, c], [tombstone(B, A), tombstone(A, C), tombstone('model-hub-engine-v8.0.63-4', A)])
+    checked.clear()
+    with pytest.raises(publish.Error, match='withdrawn fallback'):
+        publish.preflight(tmp_path, retired_a, bad, harness=tmp_path)
+    assert not checked
 
 
 def test_withdrawal_survives_a_missed_promotion_upload(monkeypatch):

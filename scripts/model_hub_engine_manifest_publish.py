@@ -34,9 +34,10 @@ def manifest(repo, rev):
         raise Error('expected payload and rehearsal selectors')
     # This serialization is the signing contract. Never read a clock in the signer.
     payload = channel.parse_payload(json.dumps(doc['payload'], sort_keys=True, separators=(',', ':')).encode('ascii'))
+    fallback_tags = {w.rollback_to for w in payload.revoked}
     for w in payload.revoked:
-        if payload.release(w.asset_release_tag) or payload.tombstone(w.rollback_to):
-            raise Error('withdrawn release cannot be offered or used for rollback')
+        if payload.release(w.asset_release_tag) and w.asset_release_tag not in fallback_tags:
+            raise Error('withdrawn release metadata may remain only for a historical fallback')
     return payload, doc['rehearsals']
 
 
@@ -53,6 +54,11 @@ def successor(previous, desired, *, origin=False):
     for w in desired.revoked:
         if previous and previous.tombstone(w.asset_release_tag) == w:
             continue
+        if desired.tombstone(w.rollback_to):
+            # Only master knows which withdrawals are new; origin can lag by several merges.
+            if not origin:
+                raise Error('new withdrawal cannot name a withdrawn fallback')
+            continue
         target = previous and previous.release(w.asset_release_tag)
         # A lagging origin may never have seen the retired master entry. The
         # merge preflight already checked that withdrawal against the actual
@@ -66,6 +72,8 @@ def successor(previous, desired, *, origin=False):
 
 def verify_assets(payload):
     for release in payload.releases:
+        if payload.tombstone(release.asset_release_tag):
+            continue  # retained identity, not an installable archive
         with tempfile.TemporaryDirectory() as work:
             directory = Path(work) / release.asset_release_tag
             directory.mkdir()
@@ -89,6 +97,8 @@ def preflight(repo, base, head, *, harness):
         tag = release.asset_release_tag
         if previous and previous.release(tag) == release:
             continue
+        if desired.tombstone(tag):
+            raise Error('historical fallback metadata must retain its previously merged identity')
         if tag not in receipts or set(receipts[tag]) != {'run', 'attempt'}:
             raise Error('promotion needs a designated rehearsal run and attempt')
         candidate = rehearsal.verify(harness, tag=tag, previous=previous, **receipts[tag])
