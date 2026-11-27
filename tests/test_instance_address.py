@@ -590,10 +590,14 @@ def test_invalid_prefixes_are_refused_locally(address, prefix):
 # --- B1, C1, C2, C4, F1-F3: the switch ---------------------------------------------------
 
 
-def health_pairing():
+def health_pairing(*, legacy_initial=False):
     store = MobileStore()
     identity = {"id": "inst_123", "owner": "owner@test.invalid", "name": "Fixture"}
-    request, _ = store.create_request("health.connect", identity, names=["steps"])
+    if legacy_initial:
+        from tests.test_mobile_health import legacy_initial_request
+        request = legacy_initial_request(store, identity)
+    else:
+        request, _ = store.create_request("health.connect", identity, names=["steps"])
     code = store.issue_pairing(request["id"], identity)["pairing_code"]
     return store.pair(
         {"pairing_code": code, "device_name": "Fixture", "platform": "ios", "app_version": "1",
@@ -1716,7 +1720,7 @@ def test_c4_a_phone_paired_on_the_old_address_while_a_returning_name_settles_is_
     def pair_while_the_name_settles(seconds):
         # The address being left is still served during the settle; a phone can finish pairing there.
         if seconds == instance_address.REACTIVATION_SETTLE_SECONDS and not during:
-            during.append(health_pairing())
+            during.append(health_pairing(legacy_initial=True))
         settle(seconds)
 
     monkeypatch.setattr(instance_address, "_sleep", pair_while_the_name_settles)

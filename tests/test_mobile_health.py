@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.handlers import mobile_health
-from core.mobile_health_contract import MobileError, validate_result, validate_upload
+from core.mobile_health_contract import LEGACY_METRICS, MobileError, validate_result, validate_upload
 from storage import mobile_store
 from storage.mobile_store import MobileStore
 from tests.ui_server_test_helpers import _save_config, csrf_headers
@@ -37,9 +37,26 @@ def store(clock):
     return MobileStore()
 
 
-def pair_device(store, *, installation="synthetic-install", names=None):
+def legacy_initial_request(store, identity=IDENTITY):
+    """Seed a released initial card; current connect cannot add a second phone."""
+    request_id = "mreq_" + mobile_store.secrets.token_hex(16)
+    now = mobile_store._now()
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO requests(id,operation,instance_id,owner,metrics,state,created_at,expires_at,caller) "
+            "VALUES(?,'health.connect',?,?,?,'queued',?,?,'legacy-fixture')",
+            (request_id, identity["id"], identity["owner"], json.dumps(list(LEGACY_METRICS)),
+             now, mobile_store._after(now, hours=24)),
+        )
+    return store.show_request(request_id)
+
+
+def pair_device(store, *, installation="synthetic-install", names=None, legacy_initial=False):
     names = names or ["steps", "sleep"]
-    request, _ = store.create_request("health.connect", IDENTITY, names=names)
+    if legacy_initial:
+        request = legacy_initial_request(store)
+    else:
+        request, _ = store.create_request("health.connect", IDENTITY, names=names)
     code = store.issue_pairing(request["id"], IDENTITY)
     result = store.pair({
         "pairing_code": code["pairing_code"], "device_name": "假设备 iPhone",
@@ -109,7 +126,7 @@ def test_targeted_disconnect_preserves_other_phone_data_and_pending_pairing(stor
     store.upload(device_for(store, first), upload_payload())
     store.cancel_request(req_a["id"])
     clock[0] += timedelta(seconds=1)
-    second, req_b = pair_device(store, installation="phone-b")
+    second, req_b = pair_device(store, installation="phone-b", legacy_initial=True)
     assert req_b['id'] != req_a['id']
     store.upload(device_for(store, second), upload_payload())
     store.cancel_request(req_b["id"])
@@ -1689,7 +1706,7 @@ def test_replacement_cannot_recover_days_no_longer_readable_on_phone(store):
     store.cancel_request(setup["id"])
     store.upload(device_for(store, first), upload_payload(day="2026-11-01"))
     assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"]
-    second, _ = pair_device(store)
+    second, _ = pair_device(store, legacy_initial=True)
     store.upload(device_for(store, second), upload_payload(day="2026-11-01", empty=True))
     assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"] is None
 
@@ -1706,7 +1723,7 @@ def test_heart_expansion_preserves_identity_history_and_request_scopes(store):
     old = device_for(store, paired)
     store.upload(old, upload_payload(day="2026-11-01"))
     refresh, _ = store.create_request("health.refresh", IDENTITY)
-    expansion, _ = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=True)
+    expansion, _ = store.create_request("health.connect", IDENTITY, names=["hrv"])
     assert expansion["minimum_health_version"] == 2
     assert expansion["metrics"] == [m for m in METRICS if m not in ["steps", "sleep"]]
     code = store.issue_pairing(expansion["id"], IDENTITY)
@@ -1755,11 +1772,11 @@ def test_heart_expansion_failure_cannot_change_existing_data_or_consent(store, c
     other, setup = pair_device(store, installation="other-phone")
     store.cancel_request(setup["id"])
     clock[0] += timedelta(seconds=1)
-    paired, setup = pair_device(store)
+    paired, setup = pair_device(store, legacy_initial=True)
     store.cancel_request(setup["id"])
     original = device_for(store, paired)
     store.upload(original, upload_payload(day="2026-11-01"))
-    request, _ = store.create_request("health.connect", IDENTITY, expand=True)
+    request, _ = store.create_request("health.connect", IDENTITY)
     pairing_code = store.issue_pairing(request["id"], IDENTITY)["pairing_code"]
     target = original
     names = list(METRICS)
@@ -1818,9 +1835,9 @@ def test_connect_has_one_full_scope_and_keeps_the_first_continuation(store, expa
     if expand:
         _, setup = pair_device(store, names=confirmed)
         store.cancel_request(setup["id"])
-    first, _ = store.create_request("health.connect", IDENTITY, names=["heart_rate"], expand=expand,
+    first, _ = store.create_request("health.connect", IDENTITY, names=["heart_rate"],
                                     callback_session="first-owner")
-    second, created = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=expand,
+    second, created = store.create_request("health.connect", IDENTITY, names=["hrv"],
                                           callback_session="second-owner")
     assert first["metrics"] == [m for m in METRICS if m not in confirmed]
     assert not created and second == first
@@ -1843,7 +1860,7 @@ def test_concurrent_connect_callers_share_one_transactional_request(store, expan
 
     def request(index):
         barrier.wait(timeout=5)
-        return store.create_request("health.connect", IDENTITY, expand=expand,
+        return store.create_request("health.connect", IDENTITY,
                                     callback_session=f"caller-{index}")
 
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1857,7 +1874,7 @@ def test_concurrent_connect_callers_share_one_transactional_request(store, expan
 
 def test_bound_connect_still_waiting_for_sync_is_the_only_pending_connect(store):
     _, bound = pair_device(store)
-    repeated, created = store.create_request("health.connect", IDENTITY, expand=True)
+    repeated, created = store.create_request("health.connect", IDENTITY)
     assert not created and repeated["id"] == bound["id"]
 
 
@@ -1876,7 +1893,7 @@ def test_confirmed_scope_transition_atomically_settles_stale_connect_cards(store
         store.cancel_request(setup["id"])
         device = device_for(store, paired)
         store.upload(device, upload_payload())
-    winning, _ = store.create_request("health.connect", IDENTITY, expand=expand)
+    winning, _ = store.create_request("health.connect", IDENTITY)
     code = store.issue_pairing(winning["id"], IDENTITY)["pairing_code"]
     # Persisted rows from the superseded selective-request model. They cannot
     # be created concurrently through the new API, but must become harmless.

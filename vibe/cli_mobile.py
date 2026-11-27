@@ -96,7 +96,7 @@ def _callback(args) -> str | None:
     return session_id
 
 
-def _request(store, operation, identity, args, *, names=METRICS, caller="local", expand=False):
+def _request(store, operation, identity, args, *, names=METRICS, caller="local"):
     seconds = _seconds(args.wait)
     callback = _callback(args)
     waiter_id = secrets.token_hex(16) if seconds else None
@@ -108,8 +108,10 @@ def _request(store, operation, identity, args, *, names=METRICS, caller="local",
     try:
         request, created = store.create_request(
             operation, identity, names=names, caller=caller, callback_session=callback,
-            waiter_id=waiter_id, wait_seconds=seconds, expand=expand,
+            waiter_id=waiter_id, wait_seconds=seconds,
         )
+        if request is None:
+            return None
         if created:
             try:
                 publish_request_card(request, os.environ.get("AVIBE_SESSION_ID"))
@@ -164,12 +166,10 @@ def execute(args) -> dict:
     if command == "status":
         return {"kind": "mobile_health", **store.status()}
     if command == "connect":
-        status = store.status()
-        if status["connected"] and set(METRICS) <= set(status["confirmed_metrics"]):
-            return {"kind": "mobile_health", **status}
-        return {"kind": "mobile_request", "request": _request(
-            store, "health.connect", identity, args, caller=caller, expand=status["connected"],
-        )}
+        request = _request(store, "health.connect", identity, args, caller=caller)
+        if request is None:
+            return {"kind": "mobile_health", **store.status()}
+        return {"kind": "mobile_request", "request": request}
     names = metrics(args.metric.split(","))
     start, end = _window(args, today=store.calendar_today())
     max_age = _max_age(args.max_age)

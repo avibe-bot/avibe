@@ -216,8 +216,9 @@ class MobileStore:
 
     def create_request(
         self, operation: str, identity: dict, *, names=METRICS, caller="local",
-        callback_session=None, waiter_id=None, wait_seconds=0, expand=False,
-    ) -> tuple[dict, bool]:
+        callback_session=None, waiter_id=None, wait_seconds=0,
+    ) -> tuple[dict | None, bool]:
+        """Select work atomically; None means confirmed scope already has upload ACKs."""
         if operation == "health.refresh":
             metrics(list(names))
         if operation not in {"health.connect", "health.refresh"}:
@@ -225,29 +226,47 @@ class MobileStore:
         now = _now()
         with self.transaction() as conn:
             self._expire(conn, now)
-            device = self.active_device(conn)
-            if expand and (operation != "health.connect" or device is None):
-                raise MobileError("not_connected", 409)
-            if operation == "health.refresh" and not device:
-                raise MobileError("not_connected", 409)
-            device_id = device["id"] if operation == "health.refresh" else None
-            existing = conn.execute(
-                "SELECT * FROM requests WHERE operation=? AND instance_id=? AND owner=? "
-                "AND state IN ('queued','claimed') AND (operation='health.connect' OR device_id IS ?) "
-                "ORDER BY created_at LIMIT 1",
-                (operation, identity["id"], identity["owner"], device_id),
-            ).fetchone()
-            if existing:
-                # One pending connect per owner, including the winner awaiting
-                # its first sync. Repeated callers keep the original continuation.
-                return self._request(existing), False
             if operation == "health.connect":
-                confirmed = json.loads(device["metrics"]) if expand else []
+                existing = conn.execute(
+                    "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner=? "
+                    "AND state IN ('queued','claimed') ORDER BY created_at LIMIT 1",
+                    (identity["id"], identity["owner"]),
+                ).fetchone()
+                if existing:
+                    # Pairing/consent is not completion: retain the original
+                    # continuation until upload ACK and the request result.
+                    return self._request(existing), False
+            device = self.active_device(conn)
+            confirmed = json.loads(device["metrics"]) if device else []
+            expand = operation == "health.connect" and device is not None
+            if operation == "health.connect":
                 selected = [name for name in METRICS if name not in confirmed]
                 if not selected:
-                    raise MobileError("request_terminal", 410)
-            else:
-                selected = json.loads(device["metrics"])
+                    acknowledged = {row[0] for row in conn.execute(
+                        "SELECT metric FROM metric_sync WHERE device_id=? AND synced_at IS NOT NULL",
+                        (device["id"],),
+                    )}
+                    if set(confirmed) <= acknowledged:
+                        return None, False
+                    # A canceled/expired setup can leave consent without data.
+                    # Reuse ordinary synchronization; never reopen permission.
+                    operation, expand, names = "health.refresh", False, confirmed
+            if operation == "health.refresh":
+                if not device:
+                    raise MobileError("not_connected", 409)
+                selected = confirmed
+                required = set(names) & set(confirmed)
+                candidates = conn.execute(
+                    "SELECT * FROM requests WHERE operation='health.refresh' AND instance_id=? AND owner=? "
+                    "AND device_id=? AND state IN ('queued','claimed') ORDER BY created_at",
+                    (identity["id"], identity["owner"], device["id"]),
+                ).fetchall()
+                existing = next((row for row in candidates if required <= set(json.loads(row["metrics"]))), None)
+                if existing:
+                    # An immutable pre-expansion claim cannot satisfy a caller
+                    # asking for newly confirmed types it never queried.
+                    return self._request(existing), False
+            device_id = device["id"] if operation == "health.refresh" else None
             request_id = "mreq_" + secrets.token_hex(16)
             conn.execute(
                 "INSERT INTO requests(id,operation,device_id,instance_id,owner,metrics,state,created_at,"

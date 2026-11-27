@@ -385,7 +385,9 @@ Authentication:
 
 - Only per-metric status (`ok` / `empty` / error code); **no values**.
   Values exist only in storage.
-- Unfinished `health.refresh` requests for the same device are coalesced.
+- Unfinished `health.refresh` requests for the same device are coalesced only
+  when the existing scope covers the requested, device-confirmed metrics.
+  A frozen four-type request cannot absorb an HRV refresh after expansion.
 
 **States:**
 
@@ -447,8 +449,14 @@ vibe mobile requests await <request-id> [--timeout S]
 
 **`connect`:**
 
-- Creates `health.connect`, sends push, and leaves a card in the conversation.
-- When already connected, returns current status directly.
+- In one write transaction, reuse the owner's pending connect before deciding
+  initial connection or expansion from the current active device.
+- A new consent request sends push and leaves a card in the conversation.
+- Repeated calls keep the original request ID through upload ACK and result;
+  `--wait` observes that request even after pairing or expansion is confirmed.
+- Return status directly only without a pending connect and with all supported
+  types confirmed and acknowledged. If consent is complete but a canceled or
+  expired setup left missing ACKs, use an ordinary refresh to finish syncing.
 
 **`revoke`:**
 
@@ -684,8 +692,10 @@ keep their existing meaning. See [the heart-metric design](health-heart-metrics.
 `connect` on a connected device requests all supported metrics missing from the confirmed set;
 first connections request all supported metrics. Connect has no metric selector;
 `read --metric` remains selective. One owner/instance has at most one pending
-connect, including a bound request waiting for first sync. Repeated callers reuse
-that request without changing its callback or waiter. On pairing or expansion,
+connect, including a bound request waiting for first sync. Pending reuse and the
+active-device initial/expansion/no-op decision share one write transaction.
+Repeated callers reuse that request without changing its callback or waiter,
+even when consent is complete but ACK/result is pending. On pairing or expansion,
 other pending legacy connects are settled atomically: covered requests succeed
 without invented sync results, inapplicable ones cancel, and their codes retire.
 An expansion request remains unbound and unclaimable until native consent; its

@@ -22,9 +22,13 @@ def phone(config, name):
     return cookie, (row["binding"], row["subject"], True, sid), row["device_id"]
 
 
-def code_for(store, viewer):
+def code_for(store, viewer, *, legacy_initial=False):
     identity = {"id": "inst_123", "owner": "owner@test.invalid", "name": "Fixture"}
-    request, _ = store.create_request("health.connect", identity, names=["steps"])
+    if legacy_initial:
+        from tests.test_mobile_health import legacy_initial_request
+        request = legacy_initial_request(store, identity)
+    else:
+        request, _ = store.create_request("health.connect", identity, names=["steps"])
     code = registry.issue_pairing(store, request["id"], identity, viewer)["pairing_code"]
     return identity, {
         "pairing_code": code,
@@ -71,7 +75,8 @@ def test_loopback_signout_fences_without_purging_unverified_health(install, monk
     with store.transaction() as mobile:
         setup_id = mobile.execute("SELECT id FROM requests WHERE device_id=?", (mid,)).fetchone()[0]
     store.cancel_request(setup_id)
-    _, unused = code_for(store, viewer)
+    # Preserve coverage of an unused initial code issued by a released version.
+    _, unused = code_for(store, viewer, legacy_initial=True)
     local, origin = ui_server.app.test_client(), "http://127.0.0.1:5123"
 
     with monkeypatch.context() as m:
