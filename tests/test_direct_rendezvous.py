@@ -738,6 +738,9 @@ def test_malformed_handover_batches_leave_other_diagnostics_intact(instance, cap
     for key in ("age_s", "ms", "closed", "kept"):
         for value in (True, 0.5, -1, 86401 if key == "age_s" else 2**31):
             invalid.append([good, {**good, key: value}])
+    invalid.extend([[good, {**good, "refused": refused, "other": other}] for refused, other in (
+        ("none", "voice"), ("not_usable", "unknown"), ("other_documents", "none"),
+    )])
     for key in ("refused", "other", "path"):
         for value in ({}, None, "unrecognized"):
             invalid.append([good, {**good, key: value}])

@@ -231,6 +231,7 @@ def log_handovers(entries: Any) -> None:
             return
         if (entry["refused"] not in ("none", "not_usable", "other_documents")
                 or entry["other"] not in ("none", "voice", "child", "runtime", "unloaded", "unknown")
+                or (entry["refused"] == "other_documents") != (entry["other"] != "none")
                 or entry["path"] not in _LEG_FAULT_PATHS):
             return
         for key, maximum in (("age_s", 86400), ("ms", 2**31 - 1), ("closed", 2**31 - 1), ("kept", 2**31 - 1)):
