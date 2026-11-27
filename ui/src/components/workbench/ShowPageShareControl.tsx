@@ -232,6 +232,7 @@ export const ShowPageShareControl: React.FC<{
       document.removeEventListener('load', refreshFrame, true);
     };
   }, [open, frameVisible, nativeShell, exportAvailable, sessionId]);
+
   const canPublishPublic = access?.can_publish_public === true;
   useEffect(() => {
     if (canPublishPublic) ShowPageSharingSettings.preload().catch(() => {});

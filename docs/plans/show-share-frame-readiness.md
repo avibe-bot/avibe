@@ -34,6 +34,10 @@ remains link-only; Desktop exports remain limited to native Show windows.
 - Real signed Desktop package, AppKit share menu, PDF/image bytes and installed
   window acceptance remain untested by this change.
 
-Base: `f41ae96018`. First-screen gzip measurements compare this base and the
+Base: `af091c6316` (including the deferred sharing settings from #4374). First-screen gzip measurements compare this base and the
 change using the same dependency lock and build command; the PR records the
 delta separately from the existing budget overrun. Budgets are unchanged.
+
+After synchronization, Home JS is 624,609 → 624,615 B (+6 B), and Chat JS
+is 922,303 → 922,490 B (+187 B), gzip level 6. Both routes pass the unchanged
+first-screen budget. The lazy settings preload and boundary remain intact.
