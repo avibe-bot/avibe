@@ -267,7 +267,9 @@ struct HealthDayAggregation {
             var value: [String: Any]?
             if let statistic {
                 if metric == "heart_rate", let minimum = statistic.minimum, let maximum = statistic.maximum {
-                    value = ["min_bpm": minimum, "average_bpm": statistic.average, "max_bpm": maximum]
+                    // Independent HealthKit unit conversions can differ by an ulp.
+                    let average = min(max(statistic.average, minimum), maximum)
+                    value = ["min_bpm": minimum, "average_bpm": average, "max_bpm": maximum]
                 } else if metric == "hrv" { value = ["sdnn_ms": statistic.average] }
             }
             return item(metric: metric, day: day, value: value,

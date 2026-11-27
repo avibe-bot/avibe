@@ -18,7 +18,7 @@ vibe mobile health read --metric sleep,steps --period last7d --max-age 6h
 vibe mobile health read --metric activity,workouts --from 2026-11-01 --to 2026-11-07
 vibe mobile health read --metric steps --period today --refresh --wait 20
 vibe mobile health read --metric heart_rate,resting_heart_rate,hrv --period last7d
-vibe mobile health connect --metric heart_rate,resting_heart_rate,hrv --wait 0
+vibe mobile health connect --wait 0
 vibe mobile requests show mreq_0123456789abcdef0123456789abcdef
 vibe mobile requests await mreq_0123456789abcdef0123456789abcdef --timeout 20
 vibe mobile health revoke
@@ -27,9 +27,12 @@ vibe mobile health revoke
 If reading returns `not_connected`, run `connect`. Its conversation card and
 notification let the user authorize on iPhone. An explicit native confirmation and iOS Health permission request precede synchronization;
 the browser receives no health values or device credential. If a metric reports
-`confirmation_required: true`, use `connect --metric` for those metrics. Existing
+`confirmation_required: true`, use `connect` to confirm all supported metrics not yet confirmed. Existing
 metrics keep syncing while the user confirms the additions. An older App needs
 updating to confirm new metrics; an older instance accepts only the original four.
+Connect always covers all missing supported types; repeated calls share the pending
+request. The user can choose individual read permissions in iOS. `--metric` is
+only for reading, not connecting.
 Do not prompt again merely because data is empty: HealthKit conceals read denials.
 
 `read` uses local daily data. Check `availability`, freshness and all three

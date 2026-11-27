@@ -453,7 +453,7 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
         from tests.test_mobile_health import heart_manifest
         names = ["heart_rate", "resting_heart_rate", "hrv"]
         args = cli.build_parser().parse_args([
-            "mobile", "health", "connect", "--metric", ",".join(names), "--no-callback",
+            "mobile", "health", "connect", "--no-callback",
         ])
         request = cli_mobile.execute(args)["request"]
         assert request["minimum_health_version"] == 2
@@ -461,20 +461,25 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
                               headers=csrf_headers(client)).get_json()
         assert pairing["supported_metrics"] == list(METRICS) and pairing["expansion"]
         response = client.put("/api/mobile/device/v1/manifest", headers=h.auth,
-            json=heart_manifest(["steps", "sleep", *names],
+            json=heart_manifest(list(METRICS),
                                 pairing_code=pairing["pairing_code"], request_id=request["id"]))
         assert response.status_code == 200
         claim = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
             json={"wait_seconds": 0, "max": 1, "request_id": request["id"]}).get_json()["requests"][0]
-        payload = upload_payload(seq=2, names=tuple(names))
-        for item, value in zip(payload["items"], [
+        additions = [m for m in METRICS if m not in ["steps", "sleep"]]
+        assert request["metrics"] == additions
+        payload = upload_payload(seq=2, names=tuple(additions), empty=True)
+        values = dict(zip(names, [
             {"min_bpm": 50, "average_bpm": 72.5, "max_bpm": 140}, {"bpm": 55}, {"sdnn_ms": 42.5},
-        ]):
-            item["value"] = value
+        ]))
+        for item in payload["items"]:
+            if item["metric"] in values:
+                item.update(value=values[item["metric"]], availability="ok",
+                            latest_sample_end_at="2026-11-18T07:00:00+08:00")
         assert client.put("/api/mobile/device/v1/health/days", headers=h.auth, json=payload).status_code == 200
         result = client.post(f"/api/mobile/device/v1/requests/{request['id']}/result", headers=h.auth,
             json={"claim_token": claim["claim_token"], "outcome": "succeeded",
-                  "result": {"metrics": {name: "ok" for name in names}}})
+                  "result": {"metrics": {name: "ok" if name in names else "empty" for name in additions}}})
         assert result.status_code == 200
         data = cli_mobile.execute(cli.build_parser().parse_args([
             "mobile", "health", "read", "--metric", ",".join(names), "--period", "today",

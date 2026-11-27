@@ -8054,7 +8054,8 @@
       "failed": "这次请求未完成。你可以稍后在会话里重新查询。",
       "expired": "这个请求已过期。请在会话里重新发起。",
       "canceled": "这个请求已取消。",
-      "needsUpdate": "这台 iPhone 上的 Avibe 版本不支持健康数据，请先更新 Avibe。"
+      "needsUpdate": "这台 iPhone 上的 Avibe 版本不支持健康数据，请先更新 Avibe。",
+      "needsUpdateExpansion": "更新这台 iPhone 上的 Avibe 后才能添加这些数据，现有同步不受影响。"
     },
     "landing": {
       "authorize": "读取这台 iPhone 的{{metrics}}，并同步到当前实例。接下来在 Avibe 和 iOS 中选择授权。",

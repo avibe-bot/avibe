@@ -1744,6 +1744,8 @@ ThisDeviceOnly Keychain items. Logout deletes the credential, stops observation,
 cancels uploads and removes local sync state; the non-authenticating installation
 identifier remains for repeat-pairing identification.
 
+Connect requests always cover all supported types not yet confirmed (all types
+for a first connection); agents select individual metrics only when reading.
 Adding metrics to an existing connection requires an explicit connect request,
 `health:2`, native confirmation of the added types, and HealthKit authorization.
 The approved intent is persisted before the shared convergence owner sends its

@@ -1706,6 +1706,10 @@ def test_c4_a_phone_paired_on_the_old_address_while_a_returning_name_settles_is_
     rename_to("new")
     run()
     before = health_pairing()
+    store = MobileStore()
+    with store.transaction() as mobile:
+        setup_id = mobile.execute("SELECT id FROM requests WHERE device_id=?", (before,)).fetchone()[0]
+    store.cancel_request(setup_id)  # The first connection finishes before another phone pairs.
     during, after = [], []
     settle = instance_address._sleep
 

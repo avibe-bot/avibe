@@ -118,8 +118,12 @@ def _metric_value(metric: str, value: Any) -> None:
         object_fields(value, fields)
         for item in value.values():
             _number(item)
-        if metric == "heart_rate" and not value["min_bpm"] <= value["average_bpm"] <= value["max_bpm"]:
-            raise MobileError("invalid_payload")
+        if metric == "heart_rate":
+            # Separately converted HealthKit statistics can differ by an ulp.
+            # 0.001 bpm admits rounding noise, never a reversed min/max range.
+            low, average, high = value["min_bpm"], value["average_bpm"], value["max_bpm"]
+            if low > high or not low - 0.001 <= average <= high + 0.001:
+                raise MobileError("invalid_payload")
     else:
         object_fields(value, {"asleep_minutes", "in_bed_minutes", "start_at", "end_at", "stages"})
         for component in ("asleep_minutes", "in_bed_minutes"):

@@ -416,7 +416,7 @@ vibe mobile health status
 vibe mobile health read [--metric steps,activity,workouts,sleep,heart_rate,resting_heart_rate,hrv]
     [--period today|yesterday|last7d|last30d | --from YYYY-MM-DD --to YYYY-MM-DD]
     [--max-age 6h] [--refresh [--wait 20]] [--callback-session-id ID | --no-callback]
-vibe mobile health connect [--metric heart_rate,resting_heart_rate,hrv] [--wait 0] [--callback-session-id ID | --no-callback]
+vibe mobile health connect [--wait 0] [--callback-session-id ID | --no-callback]
 vibe mobile health revoke
 vibe mobile requests show <request-id>
 vibe mobile requests await <request-id> [--timeout S]
@@ -681,7 +681,13 @@ with end/start/source/UUID tie breaking. These daily values have no sample count
 Availability, timestamps, timezone, retention and the original four aggregations
 keep their existing meaning. See [the heart-metric design](health-heart-metrics.md).
 
-`connect --metric` on a connected device requests only missing confirmed metrics.
+`connect` on a connected device requests all supported metrics missing from the confirmed set;
+first connections request all supported metrics. Connect has no metric selector;
+`read --metric` remains selective. One owner/instance has at most one pending
+connect, including a bound request waiting for first sync. Repeated callers reuse
+that request without changing its callback or waiter. On pairing or expansion,
+other pending legacy connects are settled atomically: covered requests succeed
+without invented sync results, inapplicable ones cancel, and their codes retire.
 An expansion request remains unbound and unclaimable until native consent; its
 metadata carries `minimum_health_version: 2`. An ordinary connection uses 1.
 Pairing-code responses add `supported_metrics`, `metrics`, and `expansion`.
@@ -697,7 +703,7 @@ that device/owner/instance, expands its metrics and binds the request. Ordinary
 manifests cannot expand the set. Replies add `supported_metrics` and
 `confirmed_metrics`; replaying a bound request is idempotent and cannot grant more.
 Pairing codes never enter the stored manifest or logs. The device credential,
-registry link, upload sequence, outbox, old data and outstanding requests survive.
+registry link, upload sequence, outbox, old data and outstanding refresh requests survive.
 
 The App persists approved intent before HTTP. A restart retries/reconciles a lost
 manifest reply without presenting a permission sheet. Only added metrics receive

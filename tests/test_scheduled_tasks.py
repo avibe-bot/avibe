@@ -12361,7 +12361,8 @@ def test_mobile_maintenance_follows_pairing_lifecycle(tmp_path: Path, monkeypatc
     mobile_dir = paths.get_state_dir() / "mobile"
     mobile = None if initial == "absent" else MobileStore()
     if initial in {"paired", "revoked"}:
-        pair_device(mobile)
+        _, setup = pair_device(mobile)
+        mobile.cancel_request(setup["id"])  # Finish setup before connecting the second phone.
         if initial == "revoked":
             mobile.revoke()
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")

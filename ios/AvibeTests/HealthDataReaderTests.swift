@@ -63,6 +63,16 @@ final class HealthDataReaderTests: XCTestCase {
         XCTAssertEqual(hrv[1]["availability"] as? String, "ok")
     }
 
+    func testHeartAverageIsClampedBeforeBuildingTheUploadPayload() throws {
+        let aggregation = try window(days: 1)
+        for average in [Double(72).nextUp, Double(72).nextDown] {
+            let rows = aggregation.heart("heart_rate", statistics: [aggregation.days[0].start:
+                .init(minimum: 72, average: average, maximum: 72, latest: aggregation.now)], queriedAt: aggregation.now)
+            XCTAssertEqual(try value(rows[0])["average_bpm"] as? Double, 72)
+            XCTAssertEqual(rows[0]["availability"] as? String, "ok")
+        }
+    }
+
     func testRestingHeartRateUsesLatestDailyEstimateAndExcludesNextMidnight() throws {
         let aggregation = try window(days: 2)
         let type = HKQuantityType(.restingHeartRate)

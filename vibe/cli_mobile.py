@@ -34,7 +34,6 @@ def add_mobile_parser(subparsers) -> None:
     read.add_argument("--wait", type=float, default=None, metavar="S", help="Seconds to wait for refresh (default 20)")
     connect = commands.add_parser("connect", help="Request authorization on iPhone")
     connect.add_argument("--wait", type=float, default=0, metavar="S")
-    connect.add_argument("--metric", default=",".join(METRICS), help="Metrics to confirm on iPhone")
     for parser in (read, connect):
         callbacks = parser.add_mutually_exclusive_group()
         callbacks.add_argument("--callback-session-id", metavar="ID")
@@ -166,13 +165,10 @@ def execute(args) -> dict:
         return {"kind": "mobile_health", **store.status()}
     if command == "connect":
         status = store.status()
-        names = metrics(args.metric.split(","))
-        if status["connected"]:
-            names = [name for name in names if name not in status["confirmed_metrics"]]
-            if not names:
-                return {"kind": "mobile_health", **status}
+        if status["connected"] and set(METRICS) <= set(status["confirmed_metrics"]):
+            return {"kind": "mobile_health", **status}
         return {"kind": "mobile_request", "request": _request(
-            store, "health.connect", identity, args, names=names, caller=caller, expand=status["connected"],
+            store, "health.connect", identity, args, caller=caller, expand=status["connected"],
         )}
     names = metrics(args.metric.split(","))
     start, end = _window(args, today=store.calendar_today())

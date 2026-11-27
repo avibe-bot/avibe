@@ -52,8 +52,31 @@ describe('Health request production consumers (synthetic server and native peer)
       <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>
     </MemoryRouter></I18nextProvider>);
     await screen.findByRole('heading', { name: localized.t('health.title.connect') });
-    for (const label of labels) expect(result.container.textContent?.split(label).length).toBeGreaterThanOrEqual(3);
+    for (const label of labels) expect(result.container.textContent?.toLowerCase().split(label.toLowerCase()).length).toBeGreaterThanOrEqual(3);
     expect(result.container.textContent).not.toContain('heart_rate');
+  });
+
+  it.each([
+    ['en', 'Update Avibe on this iPhone to add these. Your current sync keeps running.'],
+    ['zh', '更新这台 iPhone 上的 Avibe 后才能添加这些数据，现有同步不受影响。'],
+  ] as const)('explains expansion updates without implying existing sync is broken (%s)', async (lng, message) => {
+    const localized = createInstance();
+    await localized.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } } });
+    installBridge({ health: 1 });
+    current = { ...request, metrics: ['heart_rate', 'resting_heart_rate', 'hrv'], minimum_health_version: 2 };
+    render(<I18nextProvider i18n={localized}><MemoryRouter initialEntries={[`/mobile/health/${request.id}`]}>
+      <HealthRequestCard request={current} />
+      <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>
+    </MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(screen.getAllByText(message)).toHaveLength(2));
+    expect(screen.queryByText(localized.t('health.note.needsUpdate'))).toBeNull();
+  });
+
+  it('uses sentence-case metric names and the locale conjunction on the English landing', async () => {
+    installBridge({ health: 2 });
+    current = { ...request, metrics: ['heart_rate', 'resting_heart_rate', 'hrv'], minimum_health_version: 2 };
+    mount(<Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>);
+    await screen.findByText('Read this iPhone’s heart rate, resting heart rate, and heart rate variability, and sync them to this instance. Next, choose access in Avibe and iOS.');
   });
 
   it('requires the new native capability before expanding an existing connection', () => {

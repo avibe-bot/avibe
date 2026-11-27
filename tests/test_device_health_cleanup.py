@@ -67,6 +67,10 @@ def test_loopback_signout_fences_without_purging_unverified_health(install, monk
     install.save()
     identity, payload = code_for(store, viewer)
     mid = registry.pair(store, payload, identity)["device_id"]
+    # A second request starts only after the first connection has finished.
+    with store.transaction() as mobile:
+        setup_id = mobile.execute("SELECT id FROM requests WHERE device_id=?", (mid,)).fetchone()[0]
+    store.cancel_request(setup_id)
     _, unused = code_for(store, viewer)
     local, origin = ui_server.app.test_client(), "http://127.0.0.1:5123"
 

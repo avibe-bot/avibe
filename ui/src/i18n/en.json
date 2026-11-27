@@ -8054,7 +8054,8 @@
       "failed": "This request did not finish. You can ask again in the conversation later.",
       "expired": "This request has expired. Ask for a new one in the conversation.",
       "canceled": "This request was canceled.",
-      "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first."
+      "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first.",
+      "needsUpdateExpansion": "Update Avibe on this iPhone to add these. Your current sync keeps running."
     },
     "landing": {
       "authorize": "Read this iPhone’s {{metrics}}, and sync them to this instance. Next, choose access in Avibe and iOS.",

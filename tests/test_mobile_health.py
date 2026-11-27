@@ -93,6 +93,7 @@ def test_pairing_is_one_use_request_bound_and_stores_only_hashes(store, clock):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
     assert store.path.stat().st_mode & 0o777 == 0o600
     assert store.show_request(request["id"])["state"] == "queued"
+    store.cancel_request(request["id"])  # Finish the first connection before requesting another.
     other_request, _ = store.create_request("health.connect", IDENTITY, names=["steps"])
     code = store.issue_pairing(other_request["id"], IDENTITY)
     clock[0] += timedelta(minutes=5)
@@ -101,16 +102,17 @@ def test_pairing_is_one_use_request_bound_and_stores_only_hashes(store, clock):
 
 
 def test_targeted_disconnect_preserves_other_phone_data_and_pending_pairing(store, clock):
-    # Two independent clients check before either creates its request. The
-    # second creation happens after the first phone has actually paired.
+    # Separate completed connections may belong to different installations.
     assert not store.status()['connected']
     assert not store.status()['connected']
     first, req_a = pair_device(store, installation="phone-a")
     store.upload(device_for(store, first), upload_payload())
+    store.cancel_request(req_a["id"])
     clock[0] += timedelta(seconds=1)
     second, req_b = pair_device(store, installation="phone-b")
     assert req_b['id'] != req_a['id']
     store.upload(device_for(store, second), upload_payload())
+    store.cancel_request(req_b["id"])
     pending, _ = store.create_request("health.connect", IDENTITY)
     code = store.issue_pairing(pending["id"], IDENTITY)
 
@@ -1542,6 +1544,7 @@ def test_unknown_expired_and_used_pairing_codes_do_not_query_live_permissions(
     assert len(checks) == 1
     assert client.post(route, json=payload).status_code == 401
     assert len(checks) == 1
+    store.cancel_request(request["id"])
     other, _ = store.create_request("health.connect", IDENTITY, names=["steps"])
     expiry = store.issue_pairing(other["id"], IDENTITY)
     clock[0] += timedelta(minutes=5)
@@ -1682,7 +1685,8 @@ def test_native_health_push_filters_owner_and_keeps_budget_across_endpoint_rotat
 
 def test_replacement_cannot_recover_days_no_longer_readable_on_phone(store):
     """A retained day outside routine resync is lost if HealthKit cannot backfill it."""
-    first, _ = pair_device(store)
+    first, setup = pair_device(store)
+    store.cancel_request(setup["id"])
     store.upload(device_for(store, first), upload_payload(day="2026-11-01"))
     assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"]
     second, _ = pair_device(store)
@@ -1697,28 +1701,28 @@ def heart_manifest(names, **extra):
 
 def test_heart_expansion_preserves_identity_history_and_request_scopes(store):
     from core.mobile_health_contract import METRICS
-    paired, _ = pair_device(store)
+    paired, setup = pair_device(store)
+    store.cancel_request(setup["id"])
     old = device_for(store, paired)
     store.upload(old, upload_payload(day="2026-11-01"))
     refresh, _ = store.create_request("health.refresh", IDENTITY)
     expansion, _ = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=True)
     assert expansion["minimum_health_version"] == 2
-    assert expansion["metrics"] == ["hrv"]
+    assert expansion["metrics"] == [m for m in METRICS if m not in ["steps", "sleep"]]
     code = store.issue_pairing(expansion["id"], IDENTITY)
     assert code["supported_metrics"] == list(METRICS)
     assert code["expansion"] is True
     assert all(r["id"] != expansion["id"] for r in store.claim(old["id"], maximum=10)["requests"])
-    response = store.manifest(old, heart_manifest(["steps", "sleep", "hrv"],
+    response = store.manifest(old, heart_manifest(list(METRICS),
                               pairing_code=code["pairing_code"], request_id=expansion["id"]))
-    assert response["confirmed_metrics"] == ["steps", "sleep", "hrv"]
+    assert response["confirmed_metrics"] == list(METRICS)
     assert device_for(store, paired)["device_seq"] == 1
     assert store.show_request(refresh["id"])["metrics"] == ["steps", "sleep"]
     assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"]
     # The exact approved request is idempotent after the response was lost.
-    assert store.manifest(old, heart_manifest(["steps", "sleep", "hrv"],
+    assert store.manifest(old, heart_manifest(list(METRICS),
                           pairing_code=code["pairing_code"], request_id=expansion["id"]))["confirmed_metrics"] == response["confirmed_metrics"]
-    with pytest.raises(MobileError):
-        store.manifest(old, heart_manifest(list(METRICS)))
+    assert store.manifest(old, heart_manifest(list(METRICS)))["confirmed_metrics"] == list(METRICS)
 
 
 def test_heart_values_and_missing_rows_are_distinct(store):
@@ -1739,28 +1743,39 @@ def test_heart_values_and_missing_rows_are_distinct(store):
         validate_upload(payload, allowed_metrics=list(values))
 
 
-@pytest.mark.parametrize("failure", ["wrong-device", "expired", "overbroad", "revoked", "missing-code"])
-def test_heart_expansion_failure_cannot_change_existing_data_or_consent(store, clock, failure):
-    paired, _ = pair_device(store)
+@pytest.mark.parametrize("failure,code,status", [
+    ("wrong-device", "request_not_found", 404),
+    ("expired", "request_terminal", 410),
+    ("wrong-union", "unsupported_metric", 422),
+    ("revoked", "device_revoked", 403),
+    ("missing-code", "request_terminal", 410),
+])
+def test_heart_expansion_failure_cannot_change_existing_data_or_consent(store, clock, failure, code, status):
+    from core.mobile_health_contract import METRICS
+    other, setup = pair_device(store, installation="other-phone")
+    store.cancel_request(setup["id"])
+    clock[0] += timedelta(seconds=1)
+    paired, setup = pair_device(store)
+    store.cancel_request(setup["id"])
     original = device_for(store, paired)
     store.upload(original, upload_payload(day="2026-11-01"))
-    request, _ = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=True)
-    code = store.issue_pairing(request["id"], IDENTITY)["pairing_code"]
+    request, _ = store.create_request("health.connect", IDENTITY, expand=True)
+    pairing_code = store.issue_pairing(request["id"], IDENTITY)["pairing_code"]
     target = original
-    names = ["steps", "sleep", "hrv"]
+    names = list(METRICS)
     if failure == "wrong-device":
-        other, _ = pair_device(store, installation="other-phone")
         target = device_for(store, other)
     elif failure == "expired":
         clock[0] += timedelta(minutes=6)
-    elif failure == "overbroad":
-        names.append("heart_rate")
+    elif failure == "wrong-union":
+        names.remove("heart_rate")
     elif failure == "revoked":
         store.revoke(device_id=original["id"])
     elif failure == "missing-code":
-        code = "invalid-code"
-    with pytest.raises(MobileError):
-        store.manifest(target, heart_manifest(names, pairing_code=code, request_id=request["id"]))
+        pairing_code = "invalid-code"
+    with pytest.raises(MobileError, match=code) as caught:
+        store.manifest(target, heart_manifest(names, pairing_code=pairing_code, request_id=request["id"]))
+    assert caught.value.status == status
     if failure != "revoked":
         assert json.loads(device_for(store, paired)["metrics"]) == ["steps", "sleep"]
         with store.transaction() as conn:
@@ -1797,20 +1812,127 @@ def test_legacy_device_on_new_instance_keeps_four_metric_claims(store):
     assert result["items"][0]["availability"] == "not_synced"
 
 @pytest.mark.parametrize("expand", [False, True])
-def test_selective_connect_coalesces_only_a_covering_request_without_stealing_its_owner(store, expand):
+def test_connect_has_one_full_scope_and_keeps_the_first_continuation(store, expand):
+    from core.mobile_health_contract import METRICS
+    confirmed = ["steps", "sleep"] if expand else []
     if expand:
-        pair_device(store)
+        _, setup = pair_device(store, names=confirmed)
+        store.cancel_request(setup["id"])
     first, _ = store.create_request("health.connect", IDENTITY, names=["heart_rate"], expand=expand,
                                     callback_session="first-owner")
     second, created = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=expand,
                                           callback_session="second-owner")
-    assert created and second["id"] != first["id"]
-    assert second["metrics"] == ["hrv"]
-    repeated, created = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=expand,
-                                            callback_session="later-owner")
-    assert not created and repeated["id"] == second["id"]
+    assert first["metrics"] == [m for m in METRICS if m not in confirmed]
+    assert not created and second == first
     with store.transaction() as conn:
-        assert conn.execute("SELECT callback_session FROM requests WHERE id=?", (second["id"],)).fetchone()[0] == "second-owner"
+        assert conn.execute("SELECT count(*) FROM requests WHERE state IN ('queued','claimed')").fetchone()[0] == 1
+        assert conn.execute("SELECT callback_session FROM requests WHERE id=?", (first["id"],)).fetchone()[0] == "first-owner"
+
+
+@pytest.mark.parametrize("expand", [False, True])
+def test_concurrent_connect_callers_share_one_transactional_request(store, expand):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from core.mobile_health_contract import METRICS
+
+    confirmed = ["steps", "sleep"] if expand else []
+    if expand:
+        _, setup = pair_device(store, names=confirmed)
+        store.cancel_request(setup["id"])
+    barrier = Barrier(4)
+
+    def request(index):
+        barrier.wait(timeout=5)
+        return store.create_request("health.connect", IDENTITY, expand=expand,
+                                    callback_session=f"caller-{index}")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = list(pool.map(request, range(4)))
+    assert sum(created for _, created in answers) == 1
+    assert len({row["id"] for row, _ in answers}) == 1
+    assert all(row["metrics"] == [m for m in METRICS if m not in confirmed] for row, _ in answers)
+    with store.transaction() as conn:
+        assert conn.execute("SELECT count(*) FROM requests WHERE state IN ('queued','claimed')").fetchone()[0] == 1
+
+
+def test_bound_connect_still_waiting_for_sync_is_the_only_pending_connect(store):
+    _, bound = pair_device(store)
+    repeated, created = store.create_request("health.connect", IDENTITY, expand=True)
+    assert not created and repeated["id"] == bound["id"]
+
+
+def test_connect_flag_is_removed_while_read_metric_stays_selective():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["mobile", "health", "connect", "--metric", "hrv"])
+    args = cli.build_parser().parse_args(["mobile", "health", "read", "--metric", "hrv"])
+    assert args.metric == "hrv"
+
+
+@pytest.mark.parametrize("expand", [False, True])
+def test_confirmed_scope_transition_atomically_settles_stale_connect_cards(store, expand):
+    from core.mobile_health_contract import LEGACY_METRICS, METRICS
+    if expand:
+        paired, setup = pair_device(store, names=list(LEGACY_METRICS))
+        store.cancel_request(setup["id"])
+        device = device_for(store, paired)
+        store.upload(device, upload_payload())
+    winning, _ = store.create_request("health.connect", IDENTITY, expand=expand)
+    code = store.issue_pairing(winning["id"], IDENTITY)["pairing_code"]
+    # Persisted rows from the superseded selective-request model. They cannot
+    # be created concurrently through the new API, but must become harmless.
+    with store.transaction() as conn:
+        template = dict(conn.execute("SELECT * FROM requests WHERE id=?", (winning["id"],)).fetchone())
+        for digit, scope, target, owner in [
+            ("a", ["hrv"] if expand else ["steps"], template["consent_device_id"], IDENTITY["owner"]),
+            ("b", ["hrv"], "old-device" if expand else None, IDENTITY["owner"]),
+            ("c", ["steps"], None, "another-owner@example.test"),
+        ]:
+            row = dict(template, id="mreq_" + digit * 32, metrics=json.dumps(scope), consent_device_id=target,
+                       owner=owner, callback_session="callback-" + digit)
+            conn.execute(f"INSERT INTO requests({','.join(row)}) VALUES({','.join('?' for _ in row)})", tuple(row.values()))
+    stale_code = store.issue_pairing("mreq_" + "a" * 32, IDENTITY)["pairing_code"]
+    if expand:
+        store.manifest(device, heart_manifest(list(METRICS), pairing_code=code, request_id=winning["id"]))
+        assert device_for(store, paired)["device_seq"] == 1
+        with store.transaction() as conn:
+            assert conn.execute("SELECT count(*) FROM health_days").fetchone()[0] == 2
+    else:
+        paired = store.pair({"pairing_code": code, "device_name": "Legacy iPhone", "platform": "ios",
+                             "app_version": "1", "metrics": list(LEGACY_METRICS)}, IDENTITY)
+    assert store.show_request("mreq_" + "a" * 32)["state"] == "succeeded"
+    assert store.show_request("mreq_" + "a" * 32)["result"] is None  # No invented sync result.
+    assert store.show_request("mreq_" + "b" * 32)["state"] == "canceled"
+    assert store.show_request("mreq_" + "c" * 32)["state"] == "queued"
+    assert store.show_request(winning["id"])["state"] == "queued"  # Winner still needs upload/ACK.
+    with pytest.raises(MobileError) as error:
+        store.issue_pairing("mreq_" + "a" * 32, IDENTITY)
+    assert (error.value.code, error.value.status) == ("request_terminal", 410)
+    with pytest.raises(MobileError) as error:
+        store.pair({"pairing_code": stale_code, "device_name": "Stale card", "platform": "ios",
+                    "app_version": "1", "metrics": ["steps"]}, IDENTITY)
+    assert error.value.status == 401
+    with store.transaction() as conn:
+        assert conn.execute("SELECT callback_session FROM requests WHERE id=?", ("mreq_" + "a" * 32,)).fetchone()[0] == "callback-a"
+
+
+@pytest.mark.parametrize("average", [72.00000000000001, 71.99999999999999, 72.0005, 71.9995])
+def test_heart_average_accepts_only_tiny_boundary_rounding(average):
+    payload = upload_payload(names=("heart_rate",))
+    payload["items"][0]["value"] = {"min_bpm": 72, "average_bpm": average, "max_bpm": 72}
+    validate_upload(payload, allowed_metrics=["heart_rate"])
+
+
+@pytest.mark.parametrize("value", [
+    {"min_bpm": 72, "average_bpm": 72.01, "max_bpm": 72},
+    {"min_bpm": 72, "average_bpm": 71.99, "max_bpm": 72},
+    {"min_bpm": 72.0001, "average_bpm": 72, "max_bpm": 72},
+])
+def test_heart_rounding_tolerance_never_hides_invalid_ranges(value):
+    payload = upload_payload(names=("heart_rate",))
+    payload["items"][0]["value"] = value
+    with pytest.raises(MobileError) as error:
+        validate_upload(payload, allowed_metrics=["heart_rate"])
+    assert (error.value.code, error.value.status) == ("invalid_payload", 422)
 
 
 def test_heart_expansion_migration_preserves_released_rows_and_old_named_writers(store):

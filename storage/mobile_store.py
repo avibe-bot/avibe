@@ -218,7 +218,8 @@ class MobileStore:
         self, operation: str, identity: dict, *, names=METRICS, caller="local",
         callback_session=None, waiter_id=None, wait_seconds=0, expand=False,
     ) -> tuple[dict, bool]:
-        metrics(list(names))
+        if operation == "health.refresh":
+            metrics(list(names))
         if operation not in {"health.connect", "health.refresh"}:
             raise MobileError("invalid_payload")
         now = _now()
@@ -230,19 +231,23 @@ class MobileStore:
             if operation == "health.refresh" and not device:
                 raise MobileError("not_connected", 409)
             device_id = device["id"] if operation == "health.refresh" else None
-            selected = list(names) if expand else json.loads(device["metrics"]) if device else list(names)
-            consent_device_id = device["id"] if expand else None
-            candidates = conn.execute(
-                "SELECT * FROM requests WHERE operation=? AND device_id IS ? AND instance_id=? "
-                "AND owner=? AND state IN ('queued','claimed') ORDER BY created_at",
-                (operation, device_id, identity["id"], identity["owner"]),
-            ).fetchall()
-            existing = next((row for row in candidates if row["consent_device_id"] == consent_device_id
-                             and set(selected) <= set(json.loads(row["metrics"]))), None)
+            existing = conn.execute(
+                "SELECT * FROM requests WHERE operation=? AND instance_id=? AND owner=? "
+                "AND state IN ('queued','claimed') AND (operation='health.connect' OR device_id IS ?) "
+                "ORDER BY created_at LIMIT 1",
+                (operation, identity["id"], identity["owner"], device_id),
+            ).fetchone()
             if existing:
-                # Refresh always queries all consented groups. A coalesced caller
-                # cannot change the original request's continuation owner.
+                # One pending connect per owner, including the winner awaiting
+                # its first sync. Repeated callers keep the original continuation.
                 return self._request(existing), False
+            if operation == "health.connect":
+                confirmed = json.loads(device["metrics"]) if expand else []
+                selected = [name for name in METRICS if name not in confirmed]
+                if not selected:
+                    raise MobileError("request_terminal", 410)
+            else:
+                selected = json.loads(device["metrics"])
             request_id = "mreq_" + secrets.token_hex(16)
             conn.execute(
                 "INSERT INTO requests(id,operation,device_id,instance_id,owner,metrics,state,created_at,"
@@ -336,9 +341,30 @@ class MobileStore:
             conn.execute("UPDATE requests SET device_id=?,metrics=? WHERE id=?",
                          (device_id, _json(names), request["id"]))
             conn.execute("DELETE FROM pairings WHERE request_id=?", (request["id"],))
+            self._settle_other_connects(conn, identity, device_id, names, request["id"], now)
         publish_mobile_schedule_changed()
         return {"device_id": device_id, "credential": credential,
                 "instance": {"id": identity["id"], "name": identity["name"]}}
+
+    @staticmethod
+    def _settle_other_connects(conn, identity, device_id, confirmed, winner_id, now):
+        """Retire stale approval cards atomically with a confirmed-scope change.
+
+        Covered requests finish without inventing a sync receipt. The winning
+        request still follows the existing query/upload/ACK/result lifecycle.
+        """
+        rows = conn.execute(
+            "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner=? "
+            "AND id<>? AND state IN ('queued','claimed')",
+            (identity["id"], identity["owner"], winner_id),
+        ).fetchall()
+        for row in rows:
+            covered = (row["consent_device_id"] in (None, device_id)
+                       and row["device_id"] in (None, device_id)
+                       and set(json.loads(row["metrics"])) <= set(confirmed))
+            conn.execute("UPDATE requests SET state=?,ended_at=?,result=NULL,error=NULL WHERE id=?",
+                         ("succeeded" if covered else "canceled", now, row["id"]))
+            conn.execute("DELETE FROM pairings WHERE request_id=?", (row["id"],))
 
     @staticmethod
     def _revoke_device(conn, device_id: str, now: str):
@@ -397,6 +423,7 @@ class MobileStore:
         if type(payload["background_delivery"]) is not bool or type(payload["push_wake"]) is not bool:
             raise MobileError("invalid_payload")
         now = _now()
+        consent_changed = False
         with self.transaction() as conn:
             self._ensure_active(conn, device["id"])
             self._expire(conn, now)
@@ -423,6 +450,9 @@ class MobileStore:
                     conn.execute("UPDATE devices SET metrics=? WHERE id=?", (_json(confirmed), device["id"]))
                     conn.execute("UPDATE requests SET device_id=? WHERE id=?", (device["id"], request_id))
                     conn.execute("DELETE FROM pairings WHERE request_id=?", (request_id,))
+                    self._settle_other_connects(conn, {"id": device["instance_id"], "owner": device["owner"]},
+                                                device["id"], confirmed, request_id, now)
+                    consent_changed = True
                 # Bound requests already consumed consent; retries do not expand it further.
             if not set(names) <= set(confirmed):
                 raise MobileError("unsupported_metric")
@@ -430,6 +460,8 @@ class MobileStore:
                                if key not in {"pairing_code", "request_id"}}
             conn.execute("UPDATE devices SET manifest=?,app_version=? WHERE id=?",
                          (_json(stored_manifest), payload["app_version"], device["id"]))
+        if consent_changed:
+            publish_mobile_schedule_changed()
         return {"accepted_at": now, "supported_metrics": list(METRICS), "confirmed_metrics": confirmed}
 
     @staticmethod
