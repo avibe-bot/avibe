@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.app.json",
+  "compilerOptions": { "types": ["vite/client", "node"] },
+  "include": ["*.ts", "../../playwright.event-transport.config.ts"],
+  "exclude": []
+}

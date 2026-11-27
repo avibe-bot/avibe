@@ -318,6 +318,7 @@ jobs:
           npm run typecheck:tests
           npm run typecheck:design
           npm run typecheck:e2e
+          npm run test:dev-event-proxy
 
   ui-tests:
     needs: changes

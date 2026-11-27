@@ -347,17 +347,19 @@ def test_session_endpoint_only_adds_fields_to_its_released_shape(
 
     assert _session_set_cookie(response) is None
     if state == "current":
+        assert body.pop("event_stream_transport") == "websocket-sse-v1"
         assert body.pop("instance_id") == "inst_123"
         assert body.pop("session_expires_at") == _cookie_payload(cookie)["exp"]
         assert body.pop("capabilities")["is_instance_owner"] is True
         assert re.fullmatch(r"[0-9a-f]{32}", body.pop("access_digest"))
     assert body == released
-    # Local and signed-out readers get exactly the released shape.
+    # Signed-out readers keep the released shape; local readers also advertise transport.
     assert app.test_client().get(
         "/api/session",
         base_url="https://alex.avibe.bot",
     ).get_json() == {"remote": True, "authenticated": False}
     local = app.test_client().get("/api/session", base_url="http://localhost").get_json()
+    assert local.pop("event_stream_transport") == "websocket-sse-v1"
     assert set(local) == {"remote", "instance_kind", "instance_role", "capabilities", "author_id"}
 
 
