@@ -207,7 +207,6 @@ async def test_only_warm_matching_generation_can_publish_full_connected_catalog(
         "providers": [
             {"id": "openai", "models": {"one": {"name": "One", "variants": {"high": {}}}}},
             {"id": "openrouter", "models": {"org/two": {"name": "Two"}}},
-            {"id": "disconnected", "models": {"never": {}}},
         ]
     }
     connections = {
@@ -318,6 +317,9 @@ async def test_only_warm_matching_generation_can_publish_full_connected_catalog(
                 await picker.discover(controller, binary, cwd)
             assert not runtime.has_bound_work()
         write(documents, {**docs, "/provider": {**connections, "connected": []}})
+        with pytest.raises(ValueError):
+            await picker.discover(controller, binary, cwd)  # two native reads disagree, not a withdrawal
+        write(documents, {**docs, "/provider": {**connections, "connected": []}, "/config/providers": {"providers": []}})
         assert await picker.discover(controller, binary, cwd) == []
         children[0].terminate()
         await children[0].wait()
