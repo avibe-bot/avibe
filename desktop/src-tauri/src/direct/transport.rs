@@ -194,9 +194,10 @@ pub(super) struct Link {
     pub offer: Offer,
     pub plan: Selection,
     commits: Mutex<Commits>,
-    /// The last path the grant permitted on this connection. It stays when
-    /// the link stops taking new connections: it is what a withdrawal is
-    /// reported under.
+    /// The path this link was published on, then each one its monitor saw
+    /// the grant permit, in the order the connection reported them. It
+    /// stays when the link stops taking new connections: it is what a
+    /// withdrawal is reported under.
     accepted: Mutex<Option<SelectedPath>>,
     pub(super) clock: Clock,
     deadline: tokio::sync::watch::Sender<Duration>,
@@ -259,10 +260,7 @@ impl Link {
     pub(super) fn judged(&self, paths: iroh::endpoint::PathList<'_>) -> Result<SelectedPath, FaultCode> {
         let paths = paths.iter().map(|p| (p.is_selected(), p.remote_addr().clone()));
         match self.offer.judge(self.conn.remote_id(), paths) {
-            Verdict::Accepted(path) => {
-                *self.accepted.lock().unwrap() = Some(path);
-                Ok(path)
-            }
+            Verdict::Accepted(path) => Ok(path),
             Verdict::Unselected => Err(FaultCode::PathUnselected),
             Verdict::Refused(class) => Err(FaultCode::refused(class)),
         }
@@ -272,6 +270,13 @@ impl Link {
             return None;
         }
         self.selected_in(self.conn.paths())
+    }
+    /// Only the publication and then the link's monitor call this, so the
+    /// paths are remembered in the order they were observed. Any other
+    /// read of the paths is of a snapshot that may be older than the
+    /// monitor's, and remembers nothing.
+    pub(super) fn remember(&self, path: SelectedPath) {
+        *self.accepted.lock().unwrap() = Some(path);
     }
     /// The kind of path this link was last on, whether or not it still is.
     pub(super) fn last_path(&self) -> Option<SelectedPath> {

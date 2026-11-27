@@ -4,11 +4,12 @@
 //! (docs/plans/remote-direct-rendezvous.md section 2).
 //!
 //! Counted where the listener decides each authenticated CONNECT (direct,
-//! the tunnel, or a direct leg that was tried and gave nothing), and where a
-//! link is withdrawn. Counts and fixed
+//! the tunnel, or a direct open that was started and gave nothing), and
+//! where a link is withdrawn. Counts and fixed
 //! words only: no address, host, identifier or wall time. A minute is taken
 //! for a request once it is over and given back if the instance did not
-//! answer; the oldest are dropped past `KEPT`.
+//! answer; the oldest are dropped past `KEPT`. Best effort: a minute can be
+//! dropped unsent, and can arrive more than once when an answer is lost.
 //!
 //! What this desktop does not send yet is zero or `none` in the entry: the
 //! race's counts and timings, the hand-overs, and why a connection was not
@@ -32,8 +33,8 @@ const MAX: u64 = i32::MAX as u64;
 struct Counts {
     direct: u64,
     tunnel: u64,
-    /// Authenticated CONNECTs answered `502` after a direct leg was tried
-    /// for them: alone, or beside the tunnel on a usable link.
+    /// Authenticated CONNECTs answered `502` after a direct open was
+    /// started for them: alone, or beside the tunnel on a usable link.
     failed: u64,
     /// Those decided with only the direct path and the relay allowed,
     /// carried or not.
@@ -114,10 +115,16 @@ impl Usage {
     pub(super) fn tunnel(&self, path: PathWord) {
         self.count(path, |counts| counts.tunnel += 1);
     }
-    /// A direct leg was tried and the CONNECT was answered `502`.
-    pub(super) fn direct_failed(&self, path: PathWord, strict: bool) {
+    /// A CONNECT answered `502`: no leg gave a backend. A failed direct leg
+    /// where a direct open was started for it (`tried`). One that waited
+    /// in direct-only for a link that did not come is `strict` and no
+    /// failed leg; one for which only the tunnel was tried is in no count.
+    pub(super) fn unanswered(&self, path: PathWord, strict: bool, tried: bool) {
+        if !(strict || tried) {
+            return;
+        }
         self.count(path, |counts| {
-            counts.failed += 1;
+            counts.failed += u64::from(tried);
             counts.strict += u64::from(strict);
         });
     }
@@ -218,7 +225,11 @@ mod tests {
         usage.direct(PathWord::Relay, true);
         usage.tunnel(PathWord::Relay);
         usage.tunnel(PathWord::Relay);
-        usage.direct_failed(PathWord::Relay, true);
+        usage.unanswered(PathWord::Relay, true, true);
+        // Waited in direct-only for a link that did not come: no failed leg.
+        usage.unanswered(PathWord::Relay, true, false);
+        // Only the tunnel was tried: in no count, and it makes no entry.
+        usage.unanswered(PathWord::Punched, false, false);
         usage.retired(PathWord::Relay, FaultCode::Superseded);
         usage.retired(PathWord::Relay, FaultCode::PathRefusedCgnat);
         usage.retired(PathWord::Relay, FaultCode::PathRefusedCgnat);
@@ -242,7 +253,7 @@ mod tests {
                 "client": "desktop", "age_min": 1, "path": "relay",
                 "direct": 2, "tunnel": 2,
                 "raced": 0, "direct_won": 0, "tunnel_won": 0,
-                "no_direct": 0, "sticky": 0, "strict": 2, "tunnel_only": 0,
+                "no_direct": 0, "sticky": 0, "strict": 3, "tunnel_only": 0,
                 "direct_failed": 1, "direct_timed_out": 0,
                 "direct_ms": 0, "tunnel_ms": 0,
                 "handover_asked": 0, "handover_done": 0, "handover_refused": 0,

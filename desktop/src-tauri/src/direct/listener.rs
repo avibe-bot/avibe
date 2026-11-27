@@ -158,10 +158,12 @@ impl Listener {
                 let paths = status.clone();
                 clients.spawn(async move {
                     let mut failed = false;
-                    // Whether a direct leg was tried for this CONNECT: alone
-                    // (direct-only), or beside the tunnel on a usable link.
-                    // Set where the open decides, read where it is counted.
-                    let (alone, beside) = (AtomicBool::new(false), AtomicBool::new(false));
+                    // For the minute's count: whether this CONNECT was
+                    // decided in direct-only, and whether a direct open was
+                    // started for it at all. Waiting in direct-only for a
+                    // link that does not come starts none. Set where the
+                    // open runs, read where the CONNECT is counted.
+                    let (only, tried) = (AtomicBool::new(false), AtomicBool::new(false));
                     // Counted under the kind of direct path new connections
                     // prefer when the CONNECT is decided.
                     let decided = |what: Decided| {
@@ -169,24 +171,19 @@ impl Listener {
                             PreferredPath::Direct(path) => Some(path),
                             PreferredPath::Tunnel => None,
                         });
-                        let alone = alone.load(Ordering::Relaxed);
+                        let only = only.load(Ordering::Relaxed);
                         match what {
-                            Decided::Direct => usage.direct(path, alone),
+                            Decided::Direct => usage.direct(path, only),
                             Decided::Public => usage.tunnel(path),
-                            // A failed direct leg only where one was tried.
-                            // With no usable link the tunnel was the only
-                            // leg, and its failure is not the direct path's.
-                            Decided::Failed if alone || beside.load(Ordering::Relaxed) => {
-                                usage.direct_failed(path, alone)
-                            }
-                            Decided::Failed => {}
+                            Decided::Failed => usage.unanswered(path, only, tried.load(Ordering::Relaxed)),
                         }
                     };
                     serve(socket, &h, &keys, decided, || async {
                         let Some(ticket) = policy.sample() else {
-                            alone.store(true, Ordering::Relaxed);
-                            let host = &h;
+                            only.store(true, Ordering::Relaxed);
+                            let (host, tried) = (&h, &tried);
                             let opened = strict::open(links.clone(), &clock, budget, |l| async move {
+                                tried.store(true, Ordering::Relaxed);
                                 let stream = l.open(host).await?;
                                 Some(Backend::Direct(stream, l.commit_stream()?))
                             }).await;
@@ -197,10 +194,12 @@ impl Listener {
                         let fallback = async { dial(h.clone(), port).await.map(|s| Backend::Public(s, ticket)) };
                         match link {
                             Some(l) if l.usable() => {
-                                beside.store(true, Ordering::Relaxed);
                                 l.plan
                                     .choose(
-                                        async { l.open(&h).await.map(|s| Backend::Direct(s, l.clone())) },
+                                        async {
+                                            tried.store(true, Ordering::Relaxed);
+                                            l.open(&h).await.map(|s| Backend::Direct(s, l.clone()))
+                                        },
                                         fallback,
                                     )
                                     .await
@@ -389,7 +388,7 @@ mod tests {
             .unwrap();
         assert_eq!(response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
         // Not a failed direct leg in the instance's log: there was no usable
-        // link, so the tunnel was the only leg tried, and nothing carried it.
+        // link, so no direct open was started, and nothing carried it.
         let usage = &l.access.usage;
         for key in ["direct", "tunnel", "direct_failed", "strict"] {
             assert_eq!(usage.total(None, key), 0, "{key}");

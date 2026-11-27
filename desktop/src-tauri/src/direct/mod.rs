@@ -220,10 +220,12 @@ impl Client {
     /// The request also carries this client's report for the instance's
     /// log: the legs that failed and the links that were withdrawn since the
     /// last answered request, and which leg carried the windows'
-    /// connections in each minute that is over. What a request did not
-    /// deliver is kept for the next: an entry reaches the instance at least
-    /// once, and twice only when the instance took a request whose answer
-    /// was then lost.
+    /// connections in each minute that is over. Best effort: what a request
+    /// did not deliver is kept for the next, for as long as it is retained.
+    /// An entry can be lost (pushed out by newer ones, or too old, before
+    /// any request is answered; or the session ends), and can arrive more
+    /// than once (each time the instance takes a request whose answer is
+    /// then lost).
     async fn refresh_reply_detailed<F>(
         &mut self,
         fetch: impl FnOnce(rendezvous::Asked) -> F,
@@ -312,17 +314,18 @@ impl Client {
                 );
             }
         };
-        let remaining = self
-            .links
-            .borrow()
-            .as_ref()
-            .filter(|l| l.usable())
-            .map(|l| l.remaining())
-            .unwrap_or_default();
+        // One look at the link decides both: whether it is kept, and if not,
+        // the loss it is withdrawn for. The request only failed to renew it.
+        let (remaining, lost) = match self.links.borrow().as_ref() {
+            None => (Duration::ZERO, None),
+            Some(link) => match link.check_path(Stage::Handover) {
+                Ok(()) => (link.remaining(), None),
+                Err(Fault(_, lost)) => (Duration::ZERO, Some(lost)),
+            },
+        };
         let disposition = if remaining.is_zero() {
-            // The request only failed to renew it: a link with nothing left
-            // is withdrawn for its own loss, which `withdraw` reads from it.
-            self.retire(Expired).await;
+            // Usable a moment ago with nothing left now: the lease ran out.
+            self.retire(lost.unwrap_or(Expired)).await;
             RefreshOutcome::Retired
         } else {
             RefreshOutcome::Retained {
@@ -376,21 +379,22 @@ impl Client {
         }
     }
 
-    /// `reason` is why a link that still had its path is withdrawn:
-    /// `superseded` only for a replacement, a changed selection or the end
-    /// of the session. A link that had already lost its path says that loss
-    /// instead, as its monitor would have had it run first.
+    /// `reason` is what the caller decided on, and is recorded as given:
+    /// `superseded` only for a replacement by a newer offer, a changed
+    /// selection or the end of the session; the answer's code for a refresh
+    /// the instance refused or answered with no offer; the loss the caller
+    /// observed for a link that had nothing left. Nothing is read from the
+    /// link again here: it may say something else by now.
     fn withdraw(&mut self, involuntary: bool, reason: FaultCode) -> Option<JoinHandle<()>> {
         let _writer = self.status_writer.lock().unwrap();
         if let Some(l) = self.links.send_replace(None) {
             // Withdraw immediately; a zero deadline also wakes the monitor.
             let closed = l.claim_loss();
-            let code = l.check_path(Stage::Handover).err().map_or(reason, |lost| lost.1);
             // The kind of path the link was last on, whether or not new
             // connections still preferred it.
             let path = faults::PathWord::of(l.last_path());
             l.retire();
-            let fault = Fault(Stage::Handover, code);
+            let fault = Fault(Stage::Handover, reason);
             Withdrawn {
                 faults: self.faults.clone(),
                 usage: self.listener.access.usage.clone(),
@@ -498,7 +502,13 @@ impl Client {
 
     fn publish(&mut self, link: Arc<Link>, drain: EndpointDrain) {
         self.links.send_replace(Some(link.clone()));
-        PathStatus::publish(&self.status, link.selected_path(), false);
+        let path = link.selected_path();
+        // What its withdrawal is reported under, until the monitor below
+        // sees the connection move to another permitted path.
+        if let Some(path) = path {
+            link.remember(path);
+        }
+        PathStatus::publish(&self.status, path, false);
         let status = self.status.clone();
         let writer = self.status_writer.clone();
         let mut health = self.listener.health();
@@ -536,6 +546,7 @@ impl Client {
                             Ok(path) => path,
                             Err(code) => break code,
                         };
+                        link.remember(path);
                         let _writer=writer.lock().unwrap();
                         if !tx.borrow().as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break FaultCode::Superseded;}
                         if accepting && health.has_changed().is_ok() {PathStatus::publish(&status,Some(path),false);}

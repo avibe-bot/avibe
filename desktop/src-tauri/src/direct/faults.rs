@@ -7,8 +7,10 @@
 //! The transport's own words only (`Stage`, `FaultCode`), the kind of path, a
 //! duration and a count: no address, host, identifier or error text. The
 //! last few are kept, equal ones in a row as one with a count. They are
-//! taken for a request and given back if the instance did not answer it:
-//! an entry arrives at least once.
+//! taken for a request and given back if the instance did not answer it.
+//! Best effort: an entry pushed out by newer ones before any request is
+//! answered is lost, and one whose request the instance took and whose
+//! answer was lost arrives again.
 use super::{
     transport::{Fault, FaultCode, Stage},
     SelectedPath,

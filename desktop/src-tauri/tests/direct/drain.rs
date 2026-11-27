@@ -152,12 +152,13 @@ async fn a_refused_probe_says_how_long_its_own_stage_ran() {
     .expect("confined probe fixture timed out");
 }
 
-/// A CONNECT answered `502` is a failed direct leg in the count when one was
-/// tried for it: here beside the tunnel, on a link that is up. (With no
-/// usable link it is not: the listener's own test.)
+/// A CONNECT answered `502` is a failed direct leg in the count when a
+/// direct open was started for it: beside the tunnel on a link that is up,
+/// then alone in direct-only. (With no usable link none is started: the
+/// listener's own test, and the direct-only one in `strict.rs`.)
 #[tokio::test]
 async fn a_connect_that_no_leg_carried_counts_as_a_failed_direct_leg_where_one_was_tried() {
-    timeout(Duration::from_secs(12), async {
+    timeout(Duration::from_secs(25), async {
         let (mut client, _millis, server, ep, target) = fixture().await;
         // The tunnel's leg is unreachable, and needs no network.
         client.listener = Listener::bind_via(
@@ -171,18 +172,20 @@ async fn a_connect_that_no_leg_carried_counts_as_a_failed_direct_leg_where_one_w
         let head = client.host.direct_head();
         let peer = tokio::spawn(async move {
             let conn = server.accept().await.unwrap().await.unwrap();
-            // The probe's stream is accepted; the window's is refused.
-            for answer in ["HTTP/1.1 200 OK\r\n\r\n", "HTTP/1.1 403 Forbidden\r\n\r\n"] {
+            // The probe's stream is accepted; the window's two are refused.
+            let refused = "HTTP/1.1 403 Forbidden\r\n\r\n";
+            for answer in ["HTTP/1.1 200 OK\r\n\r\n", refused, refused] {
                 let (mut send, mut recv) = conn.accept_bi().await.unwrap();
                 let mut req = vec![0; head.len()];
                 recv.read_exact(&mut req).await.unwrap();
                 send.write_all(answer.as_bytes()).await.unwrap();
             }
-            let _ = timeout(Duration::from_secs(5), conn.closed()).await;
+            let _ = timeout(Duration::from_secs(20), conn.closed()).await;
             server.close().await;
         });
         assert_eq!(client.probe_detailed(ep.clone(), target).await, Ok(()));
-        let window = client.handover().window_credential("instance-view").unwrap();
+        let handover = client.handover();
+        let window = handover.window_credential("instance-view").unwrap();
         drop(super::credential_tests::connect_as(&client, &window, 502).await);
         let usage = &client.listener.access.usage;
         let total = |key| usage.total(None, key);
@@ -196,6 +199,13 @@ async fn a_connect_that_no_leg_carried_counts_as_a_failed_direct_leg_where_one_w
             ),
             (1, 0, 0, 0)
         );
+        // In direct-only the refused open is not tried again on the same
+        // link: the CONNECT is answered when its budget is over.
+        handover.set_direct_only(true);
+        drop(super::credential_tests::connect_as(&client, &window, 502).await);
+        assert_eq!(usage.total(Some(PathWord::Lan), "direct_failed"), 2);
+        assert_eq!((total("direct_failed"), total("strict")), (2, 1));
+        assert_eq!((total("direct"), total("tunnel")), (0, 0));
         drop(client);
         peer.await.unwrap();
     })
@@ -226,6 +236,8 @@ enum Ending {
     Reply(Reply),
     /// The lease runs out, and a refresh fails before the monitor has run.
     ExpiredThenFailedRefresh,
+    /// The peer ends the connection, and a refresh fails after it.
+    PeerClosedThenFailedRefresh,
     /// New connections leave the path (the listener ends), then the lease
     /// runs out.
     ListenerEndedThenExpired,
@@ -247,25 +259,32 @@ async fn a_withdrawal_says_why_and_on_which_path_the_link_was() {
         (Ending::Reply(Reply::Ready("{".into())), "invalid_offer", 2_000),
         // A changed selection is.
         (Ending::Reply(Reply::SelectionChanged), "superseded", 2_000),
-        // A link that had already lost its path says that loss, whichever
-        // of the refresh and the monitor removes it.
+        // A link with nothing left says the loss that was seen, whichever
+        // of the failed refresh and the monitor removes it.
         (Ending::ExpiredThenFailedRefresh, "expired", 31_000),
+        (Ending::PeerClosedThenFailedRefresh, "connection_ended", 500),
         (Ending::ListenerEndedThenExpired, "expired", 31_000),
     ] {
         timeout(Duration::from_secs(12), async {
             let (mut client, millis, server, ep, target) = fixture().await;
             let head = client.host.direct_head();
+            let end = Arc::new(tokio::sync::Notify::new());
+            let ended = end.clone();
             let peer = tokio::spawn(async move {
                 let conn = server.accept().await.unwrap().await.unwrap();
                 let (mut send, mut recv) = conn.accept_bi().await.unwrap();
                 let mut req = vec![0; head.len()];
                 recv.read_exact(&mut req).await.unwrap();
                 send.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
-                let _ = timeout(Duration::from_secs(5), conn.closed()).await;
+                tokio::select! {
+                    _ = ended.notified() => conn.close(0u32.into(), b"ended"),
+                    _ = timeout(Duration::from_secs(5), conn.closed()) => {}
+                }
                 server.close().await;
             });
             assert_eq!(client.probe_detailed(ep.clone(), target).await, Ok(()));
             let mut links = client.links.subscribe();
+            let link = client.links.borrow().clone().expect("a published link");
             match ending {
                 Ending::Reply(reply) => {
                     millis.fetch_add(2_000, Ordering::SeqCst);
@@ -273,6 +292,12 @@ async fn a_withdrawal_says_why_and_on_which_path_the_link_was() {
                 }
                 Ending::ExpiredThenFailedRefresh => {
                     millis.fetch_add(31_000, Ordering::SeqCst);
+                    client.refresh_reply(|_| async { Reply::Failed }).await;
+                }
+                Ending::PeerClosedThenFailedRefresh => {
+                    millis.fetch_add(500, Ordering::SeqCst);
+                    end.notify_one();
+                    link.conn.closed().await;
                     client.refresh_reply(|_| async { Reply::Failed }).await;
                 }
                 Ending::ListenerEndedThenExpired => {
@@ -285,6 +310,7 @@ async fn a_withdrawal_says_why_and_on_which_path_the_link_was() {
                     millis.fetch_add(31_000, Ordering::SeqCst);
                 }
             }
+            drop(link);
             links.wait_for(Option::is_none).await.unwrap();
             // Once, with its own reason, under the path the link was on.
             assert_eq!(withdrawn(&client), [(code.to_owned(), "lan".to_owned(), lived)]);
