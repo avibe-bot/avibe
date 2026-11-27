@@ -694,6 +694,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         "path": (
             "${{ runner.temp }}/AvibeTests.xcresult\n"
             "${{ runner.temp }}/AvibeTestsRerun.xcresult\n"
+            "${{ runner.temp }}/native-enumeration-retry.txt\n"
         ),
         "if-no-files-found": "ignore",
         "retention-days": 7,

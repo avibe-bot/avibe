@@ -162,6 +162,52 @@ def enumeration(report, target):
     return enabled, disabled
 
 
+# Only diagnostics from this enumeration process (or its own errors array),
+# never test identifiers, earlier build output or later execution failures.
+ENUM_HOST_DEATH = re.compile(
+    r"Mach error -308 - \(ipc/mig\) server died|"
+    r"\b(?:test runner(?: process)?|test host(?: process)?) (?:crashed|died|exited unexpectedly)\b|"
+    r"\blost connection to (?:the )?test (?:runner|host)\b",
+    re.I,
+)
+
+
+def enumerate_tests(common, target, temp):
+    for attempt in (1, 2):
+        with tempfile.TemporaryDirectory(dir=temp) as directory:
+            catalog = Path(directory) / "catalog.json"
+            cmd = [
+                *common,
+                "test-without-building",
+                "-enumerate-tests",
+                "-test-enumeration-style",
+                "flat",
+                "-test-enumeration-format",
+                "json",
+                "-test-enumeration-output-path",
+                str(catalog),
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+            print(proc.stdout, end="", flush=True)
+            diagnostic = proc.stdout
+            try:
+                report = json.loads(catalog.read_text()) if catalog.is_file() else None
+                if isinstance(report, dict) and isinstance(report.get("errors"), list):
+                    diagnostic += "\n" + json.dumps(report["errors"], ensure_ascii=False)
+                proc.check_returncode()
+                if not isinstance(report, dict):
+                    raise ValueError("Missing or invalid XCTest enumeration catalog")
+                return enumeration(report, target)
+            except (ValueError, subprocess.CalledProcessError):
+                signature = ENUM_HOST_DEATH.search(diagnostic)
+                if attempt != 1 or not signature:
+                    raise
+                note = f"{target}: enumeration host failure ({signature[0]}); retrying enumeration once before tests."
+                print(note, flush=True)
+                with (temp / "native-enumeration-retry.txt").open("a") as evidence:
+                    print(note, file=evidence)
+
+
 def selection(target, sources, enabled, disabled):
     required = {s for s in CONTRACTS if s.startswith(target + "/")}
     selectors = set(required)
@@ -275,22 +321,7 @@ def main():
         ]
         subprocess.run([*common, "build-for-testing"], check=True)
         verify_membership(target, sources, temp / "AvibeDerivedData")
-        catalog = temp / f"{target}-enumerated.json"
-        subprocess.run(
-            [
-                *common,
-                "test-without-building",
-                "-enumerate-tests",
-                "-test-enumeration-style",
-                "flat",
-                "-test-enumeration-format",
-                "json",
-                "-test-enumeration-output-path",
-                str(catalog),
-            ],
-            check=True,
-        )
-        enabled, disabled = enumeration(json.loads(catalog.read_text()), target)
+        enabled, disabled = enumerate_tests(common, target, temp)
         selectors, required = selection(target, sources, enabled, disabled)
         if not selectors:  # All touched fixture classes were genuinely deleted.
             continue

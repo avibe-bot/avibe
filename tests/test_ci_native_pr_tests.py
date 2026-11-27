@@ -11,6 +11,7 @@ from scripts.ci_native_pr_tests import (
     Owners,
     changed_sources,
     declared_classes,
+    enumerate_tests,
     enumeration,
     fixture_env,
     selection,
@@ -186,6 +187,69 @@ def test_unresolved_extension_cannot_hide_behind_known_class(tmp_path, swift_par
         verify(tree(dict.fromkeys(required - {method}, "Passed")), TARGET, required)
     with pytest.raises(ValueError, match="unavailable"):
         selection(TARGET, sources, catalog - {method}, {method})
+
+
+@pytest.mark.parametrize(
+    "mode,calls,passes",
+    [
+        ("success", 1, True),
+        ("mach", 2, True),
+        ("runner-exit", 2, True),
+        ("twice", 2, False),
+        ("missing-second", 2, False),
+        ("ordinary", 1, False),
+        ("unrelated-mach", 1, False),
+        ("bad-identity", 1, False),
+        ("nonzero", 1, False),
+    ],
+)
+def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypatch, mode, calls, passes):
+    catalog = {"errors": [], "values": [{"enabledTests": [{"identifier": PHONE + "()"}], "disabledTests": []}]}
+    mach = "IDELaunchReport: Launching AvibeTests Finished with error: Mach error -308 - (ipc/mig) server died"
+    seen = []
+
+    def run(cmd, **kwargs):
+        assert cmd[:-1] == [
+            "xcodebuild",
+            "test-without-building",
+            "-enumerate-tests",
+            "-test-enumeration-style",
+            "flat",
+            "-test-enumeration-format",
+            "json",
+            "-test-enumeration-output-path",
+        ]
+        path = Path(cmd[-1])
+        assert path not in seen and not path.exists()
+        seen.append(path)
+        rc, output, data = 0, "", catalog
+        if mode == "twice" or (len(seen) == 1 and mode in ("mach", "missing-second")):
+            data, output = {"errors": ["Unable to enumerate"], "values": []}, mach
+        elif mode == "runner-exit" and len(seen) == 1:
+            data, rc = {"errors": ["Test runner exited unexpectedly"], "values": []}, 65
+        elif mode == "missing-second":
+            data = None
+        elif mode in ("ordinary", "unrelated-mach"):
+            data, output = {"errors": ["scheme not found"]}, ("Mach error -305" if mode == "unrelated-mach" else "")
+        elif mode == "bad-identity":
+            data = {
+                "errors": [],
+                "values": [{"enabledTests": [{"identifier": "lost connection to test runner"}], "disabledTests": []}],
+            }
+        elif mode == "nonzero":
+            rc = 65
+        if data is not None:
+            path.write_text(json.dumps(data))
+        return subprocess.CompletedProcess(cmd, rc, output)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if passes:
+        assert enumerate_tests(["xcodebuild"], TARGET, tmp_path) == ({PHONE}, set())
+    else:
+        with pytest.raises((ValueError, subprocess.CalledProcessError)):
+            enumerate_tests(["xcodebuild"], TARGET, tmp_path)
+    assert len(seen) == calls
+    assert (tmp_path / "native-enumeration-retry.txt").exists() == (calls == 2)
 
 
 def test_native_capture_env_is_scoped(tmp_path):
