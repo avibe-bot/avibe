@@ -1860,6 +1860,8 @@ export const ChatPage: React.FC = () => {
     /** Sends already looked for through older history and not found there: a
      *  retry reads only the instance's latest rows and queue for them. */
     unheld: Set<string>;
+    /** Restored sends the live stream has brought since, drawn or not (an older stretch on screen draws none). */
+    streamed: Set<string>;
     /** The one scheduled retry, and how many reads in a row have failed (its backoff). */
     timer: number | null;
     failures: number;
@@ -1883,6 +1885,7 @@ export const ChatPage: React.FC = () => {
     if (!composerRef.current) return;
     let pass = restorePassRef.current;
     if (pass?.sessionId === sessionId) {
+      for (const clientId of pass.streamed) held.add(clientId);
       for (const [clientId, send] of pass.sends) {
         if (!held.has(clientId)) continue;
         // Voice owning the draft, say: look again once it is free.
@@ -1897,6 +1900,7 @@ export const ChatPage: React.FC = () => {
           continue;
         }
         pass.sends.delete(clientId);
+        pass.streamed.delete(clientId);
         composerRef.current.withdrawUnsent(send);
       }
       if (!pass.retry || pass.running) return;
@@ -1907,7 +1911,7 @@ export const ChatPage: React.FC = () => {
     if (!principal || readerProvisional) return;
     if (pass?.sessionId !== sessionId) {
       if (pass?.timer != null) window.clearTimeout(pass.timer);
-      pass = { sessionId, sends: new Map(), running: false, retry: false, unheld: new Set(), timer: null, failures: 0 };
+      pass = { sessionId, sends: new Map(), streamed: new Set(), running: false, retry: false, unheld: new Set(), timer: null, failures: 0 };
       restorePassRef.current = pass;
     }
     const current = pass;
@@ -2398,6 +2402,14 @@ export const ChatPage: React.FC = () => {
           return;
         }
         if (!isTranscriptMessage(msg)) return;
+        // A send this page gave back as a draft is recognised wherever the reader
+        // is in the transcript, so the draft can be taken back.
+        const streamedClientId = clientMessageIdOf(msg);
+        const restoring = restorePassRef.current;
+        if (streamedClientId && restoring?.sessionId === msg.session_id && restoring.sends.has(streamedClientId)) {
+          restoring.streamed.add(streamedClientId);
+          setRestoreRetry((n) => n + 1);
+        }
         if (historicalWindowRef.current) return;
         // Reader scrolled up in an already-capped window: don't grow the DOM with a
         // live row they aren't looking at — detach the live tail so jump-to-latest

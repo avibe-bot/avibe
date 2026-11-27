@@ -395,3 +395,47 @@ test('a draft given back leaves the composer when the conversation shows the mes
   expect(chat.sent).toHaveLength(1);
   expect(denied).toEqual([]);
 });
+
+test('a draft given back on an older stretch leaves the composer when the stream brings the message', async ({ page }) => {
+  const chat = instance({ receives: false });
+  const denied = await serveChat(page, chat);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await open(page, `/chat/${SESSION_ID}`);
+
+  await send(page, chat, 'Taken while reading back');
+  await tearDown(page);
+  // Opened from a link to an earlier answer: the page shows that stretch, not the
+  // live rows, so it draws no message the stream brings.
+  chat.older = [{
+    id: 'msg-linked', scope_id: null, session_id: SESSION_ID, platform: 'avibe', author: 'agent', type: 'result',
+    source: 'agent', author_id: null, author_name: null, native_message_id: null, parent_native_message_id: null,
+    text: 'The linked answer', content: {}, metadata: {}, created_at: '2026-11-01T00:00:00Z',
+    updated_at: '2026-11-01T00:00:00Z', delivered_at: null, read_at: null,
+  }];
+  chat.held.push({ ...chat.older[0], id: 'msg-latest', text: 'The latest answer', created_at: new Date().toISOString() });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const next = await page.context().newPage();
+  denied.push(...await serveChat(next, chat));
+  let streamed = false;
+  await next.route('**/api/events**', async (route) => {
+    const first = !streamed;
+    streamed = true;
+    if (first) await released;
+    const row = first ? receive(chat, chat.sent[0]) : null;
+    return route.fulfill({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+      body: row ? `event: message.new\ndata: ${JSON.stringify({ type: 'message.new', data: row })}\n\n` : ': idle\n\n',
+    });
+  });
+  await next.setViewportSize({ width: 1200, height: 800 });
+  await open(next, `/chat/${SESSION_ID}?msg=msg-linked`);
+  await expect(next.locator('main').getByText('The linked answer')).toBeVisible();
+  await expect(editor(next)).toHaveText('Taken while reading back');
+
+  release();
+  await expect(editor(next)).toHaveText('');
+  expect(chat.sent).toHaveLength(1);
+  expect(denied).toEqual([]);
+});
