@@ -7,6 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 
+vi.mock('../lib/workbenchEventSource', () => ({
+  // This suite exercises ApiContext's reconnect/catch-up owner. Transport
+  // negotiation and real sockets are covered by the adapter/browser suites.
+  createWorkbenchEventSource: (url: string) => new EventSource(url),
+}));
+
 vi.mock('../lib/apiFetch', () => ({ apiFetch }));
 vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('react-i18next', () => ({

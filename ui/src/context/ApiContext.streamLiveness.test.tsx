@@ -21,6 +21,12 @@ const localStore = vi.hoisted(() => ({
   wipeLocalStore: vi.fn(async () => {}),
 }));
 
+vi.mock('../lib/workbenchEventSource', () => ({
+  // This suite exercises ApiContext's reconnect/catch-up owner. Transport
+  // negotiation and real sockets are covered by the adapter/browser suites.
+  createWorkbenchEventSource: (url: string) => new EventSource(url),
+}));
+
 vi.mock('../lib/apiFetch', () => ({ apiFetch }));
 vi.mock('../lib/localStore', () => localStore);
 vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast }) }));

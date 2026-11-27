@@ -5,11 +5,9 @@ handler subscribes here. The REST routes that mutate messages / sessions /
 unread counts publish events back through ``broker.publish``; the broker fans
 them out to every subscriber.
 
-Why SSE over WebSocket (per Cloudflare Tunnel research, 2026-05-24):
-    SSE rides on plain HTTP, has automatic browser reconnect via
-    ``EventSource``, and Cloudflare proxies + tunnels handle it without
-    the WS upgrade handshake. A 15-second keep-alive comment line keeps
-    intermediaries from killing idle streams.
+    The same SSE generators also feed WebSocket subscribers, so multiple
+    documents do not exhaust the browser's HTTP/1.1 connection pool. Existing
+    SSE clients keep their wire format and automatic browser reconnect.
 
 Threading model:
     - Subscribers hold ``asyncio.Queue``; the SSE generator awaits them.

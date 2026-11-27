@@ -4429,6 +4429,48 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
         await websocket.close(code=1011)
 
 
+async def _event_websocket(websocket: WebSocket, handler: Callable):
+    from vibe.event_websocket import stream_event_response
+
+    # Reuse the exact-origin policy shared by Terminal and Show HMR. The
+    # permission gate below is the original event route's, never Terminal's.
+    if not await asyncio.to_thread(_terminal_origin_allowed, websocket):
+        await websocket.close(code=1008)
+        return
+
+    async def response():
+        scope = {
+            **websocket.scope,
+            "type": "http",
+            "method": "GET",
+            "scheme": "https" if websocket.scope["scheme"] == "wss" else "http",
+        }
+        return await app.dispatch_native_request(FastAPIRequest(scope), handler, parse_json=False)
+
+    await stream_event_response(websocket, response)
+
+
+@app.websocket("/api/events")
+async def workbench_events_websocket(websocket: WebSocket):
+    await _event_websocket(websocket, workbench_events)
+
+
+@app.websocket("/show/{session_id}/__show/events")
+async def show_events_websocket(websocket: WebSocket, session_id: str):
+    async def response():
+        return await serve_private_show_page(session_id, "__show/events")
+
+    await _event_websocket(websocket, response)
+
+
+@app.websocket("/p/{share_id}/__show/events")
+async def public_show_events_websocket(websocket: WebSocket, share_id: str):
+    async def response():
+        return await serve_public_show_page(share_id, "__show/events")
+
+    await _event_websocket(websocket, response)
+
+
 @app.websocket("/api/terminal/{session_id}")
 async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_enabled():
@@ -10377,6 +10419,7 @@ def api_session():
                 "instance_kind": instance_kind,
                 "instance_role": "owner",
                 "capabilities": context.capability_projection(),
+                "event_stream_transport": "websocket-sse-v1",
                 # The principal this browser's Chat rows are written as, so the
                 # UI can recognise them as its own. Only a direct loopback
                 # browser is ``local``; a LAN setup host is not remote either,
@@ -10438,6 +10481,7 @@ def api_session():
                         "instance_kind": instance_kind,
                         "instance_role": context.instance_role,
                         "capabilities": context.capability_projection(),
+                        "event_stream_transport": "websocket-sse-v1",
                         "authorization_state": "current",
                         "instance_id": config.remote_access.vibe_cloud.instance_id,
                         "authorization_policy": resolution.policy,
@@ -20141,6 +20185,7 @@ def _show_runtime_config_payload(
         "basePath": base_path,
         "eventsPath": events_path,
         "streamPath": f"{events_path}?stream=1",
+        "eventStreamTransport": "websocket-sse-v1",
         "annotation": {
             "authenticated": authenticated,
             "mePath": "__show/me",
