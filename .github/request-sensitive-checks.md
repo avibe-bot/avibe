@@ -1,1 +1,1 @@
-Run the browser lanes: this PR changes a WebKit motion spec (ui/e2e/chat-scroll/motion.spec.ts) that only they execute.
+Run desktop-shell: this PR changes the Desktop's direct path (desktop/src-tauri/src/direct), which only that job builds and tests, on macOS and Windows.

@@ -1,10 +1,18 @@
 name: ios-testflight
 
-# Builds the iOS app from master, signs it for App Store distribution, uploads
-# it to App Store Connect, and makes it available to the internal TestFlight
-# group. Internal testing needs no App Review. Started by hand only.
+# Builds the iOS app from an exact master commit, signs it for App Store
+# distribution, uploads it to App Store Connect, and makes it available to the
+# internal TestFlight group. Internal testing needs no App Review. Started by
+# hand only, from master, with the commit to build: the `source` job proves
+# that commit (on master, its own full master CI run green with the iOS
+# simulator job green) before anything signs or uploads.
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Full 40-character master commit to build; its own full master CI run must be green"
+        required: true
+        type: string
 
 concurrency:
   group: ios-testflight
@@ -19,7 +27,29 @@ env:
   DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
 
 jobs:
+  source:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_sha: ${{ steps.gate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prove the source commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/testflight_source_gate.py --repository "$GITHUB_REPOSITORY" --source-sha "$SOURCE_SHA"
+
   testflight:
+    needs: source
     if: github.ref == 'refs/heads/master'
     runs-on: xcode-27
     timeout-minutes: 120
@@ -28,6 +58,19 @@ jobs:
       BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.source_sha }}
+
+      - name: Confirm the proven source commit
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ -n "$SOURCE_SHA" ] && [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
+            echo "Checked out $(git rev-parse HEAD), not the proven source $SOURCE_SHA" >&2
+            exit 1
+          }
+          echo "Building $SOURCE_SHA"
 
       - name: Report pinned Apple toolchain
         run: |
