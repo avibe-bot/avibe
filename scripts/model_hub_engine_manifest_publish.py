@@ -40,16 +40,16 @@ def manifest(repo, rev):
     return payload, doc['rehearsals']
 
 
-def successor(previous, desired, *, published):
+def successor(previous, desired):
     if previous and previous.raw == desired.raw:
         return
     if previous and desired.sequence <= previous.sequence:
         raise Error('changed bytes require a higher sequence')
-    if published and previous:
+    if previous:
         channel.check_successor(producer._identities(previous), previous.revoked, desired)
         for release in previous.releases:
             if not desired.release(release.asset_release_tag) and not desired.tombstone(release.asset_release_tag):
-                raise Error('removing a published release requires an explicit withdrawal')
+                raise Error('removing a release requires an explicit withdrawal')
     for w in desired.revoked:
         if previous and previous.tombstone(w.asset_release_tag) == w:
             continue
@@ -79,7 +79,7 @@ def preflight(repo, base, head, *, harness):
         return
     if previous and previous.raw == desired.raw:
         return
-    successor(previous, desired, published=False)
+    successor(previous, desired)
     for release in desired.releases:
         tag = release.asset_release_tag
         if previous and previous.release(tag) == release:
@@ -97,7 +97,7 @@ def write_index(desired, envelope, *, bucket, roots, verifier, public, assert_cu
         raise Error('signed artifact does not match the master manifest')
     stored = bucket.read()
     previous = producer.authenticate(stored[0], roots=roots, verifier=verifier) if stored else None
-    successor(previous, desired, published=True)
+    successor(previous, desired)
     if previous is None or previous.raw != desired.raw:
         verify_assets(desired)
         assert_current()

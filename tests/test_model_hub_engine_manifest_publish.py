@@ -10,6 +10,35 @@ channel = publish.channel
 A, B = ('model-hub-engine-v8.0.63-1', 'model-hub-engine-v8.0.63-2')
 
 
+@pytest.mark.parametrize('change', ['omit', 'withdraw', 'drop tombstone'])
+def test_preflight_requires_explicit_permanent_retirement(tmp_path, monkeypatch, change):
+    import subprocess
+
+    a, b = [release_entry(manifest_bytes(build=i)) for i in (1, 2)]
+    path = tmp_path / publish.MANIFEST
+    path.parent.mkdir()
+    def revision(sequence, entries, revoked):
+        payload = payload_document(sequence, releases=entries, revoked=revoked)
+        path.write_text(json.dumps({'payload': payload, 'rehearsals': {}}))
+        publish.git(tmp_path, 'add', '.')
+        publish.git(tmp_path, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture')
+        return publish.git(tmp_path, 'rev-parse', 'HEAD').decode().strip()
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    withdrawal = [tombstone(B, A)]
+    retired = change == 'drop tombstone'
+    base = revision(1, [a] if retired else [a, b], withdrawal if retired else [])
+    head = revision(2, [a], withdrawal if change == 'withdraw' else [])
+    checked = []
+    monkeypatch.setattr(publish.q, 'require_published', lambda record, _: checked.append(record.name))
+    if change == 'withdraw':
+        publish.preflight(tmp_path, base, head, harness=tmp_path)
+        assert checked == [A]
+    else:
+        with pytest.raises((publish.Error, channel.ChannelError), match='withdrawal'):
+            publish.preflight(tmp_path, base, head, harness=tmp_path)
+        assert not checked
+
+
 class Origin:
     def __init__(self):
         self.stored = None

@@ -351,7 +351,8 @@ released-wheel context and baselines. The record from the hosted rehearsal is no
 a signature on an index and cannot publish anything. The separate asset-release workflow
 still requires owner approval before it publishes immutable release assets.
 
-A published release must retain its identity or be explicitly withdrawn. On withdrawal,
+An entry in the merged master manifest must retain its identity or be explicitly withdrawn,
+even if its upload was interrupted. On withdrawal,
 remove it from `releases`, retain a permanent record in `revoked` and name a listed,
 compatible rollback target. All offered packages, including that fallback, must verify
 at both download sources; a withdrawn archive need not be available. The asset guard
