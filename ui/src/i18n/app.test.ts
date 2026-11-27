@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from './en.json';
 import zh from './zh.json';
+import surfaces from './surfaces.json';
 
 // The Web UI downloads only the language it opens in (./app.ts). What that
 // must not cost: the first screen drawing before its copy is there, or a later
@@ -129,5 +130,60 @@ describe('the instance language an owner\'s browser adopts', () => {
     adoptPersistedLanguage(i18n, 'zh');
 
     expect(window.localStorage.getItem('i18nextLng')).toBeNull();
+  });
+});
+
+// Copy only Settings draws is its own chunk per language (scripts/localeSurfaces.ts),
+// loaded with the Settings pages (./settingsCopy.ts).
+type Tree = { [key: string]: unknown };
+const leaves = (tree: Tree, prefix = ''): Map<string, unknown> => new Map(Object.entries(tree).flatMap(([key, value]) => {
+  const path = prefix ? `${prefix}.${key}` : key;
+  return value && typeof value === 'object' && !Array.isArray(value) ? [...leaves(value as Tree, path)] : [[path, value] as const];
+}));
+const lookup = (tree: Tree, path: string): unknown => path.split('.').reduce<unknown>((node, key) => (node as Tree | undefined)?.[key], tree);
+// A sentence the Settings copy holds.
+const settingsKey = [...leaves(zh)].find(([path, value]) => typeof value === 'string'
+  && surfaces.settings.some((listed) => path === listed || path.startsWith(`${listed}.`)))![0];
+
+describe('the Settings copy', () => {
+  it.each([['en', en], ['zh', zh]] as const)('keeps every %s string, in exactly one surface', async (language, catalog) => {
+    const first = leaves((await import(`virtual:avibe-copy/${language}/first`)).default as Tree);
+    const settings = leaves((await import(`virtual:avibe-copy/${language}/settings`)).default as Tree);
+
+    expect(settings.size).toBeGreaterThan(0);
+    expect([...settings.keys()].filter((path) => first.has(path))).toEqual([]);
+    expect(new Map([...first, ...settings])).toEqual(leaves(catalog as Tree));
+  });
+
+  it('is not part of the first screen\'s download, and is in place once Settings loads', async () => {
+    const i18n = await open('zh');
+    expect(i18n.exists(settingsKey)).toBe(false);
+
+    const { loadSettingsCopy } = await import('./settingsCopy');
+    await loadSettingsCopy();
+
+    expect(i18n.t(settingsKey as never)).toBe(lookup(zh, settingsKey));
+  });
+
+  it('arrives in the other language before a switch shows it', async () => {
+    const i18n = await open('zh');
+    const { loadSettingsCopy } = await import('./settingsCopy');
+    await loadSettingsCopy();
+
+    await i18n.changeLanguage('en');
+
+    expect(i18n.t(settingsKey as never)).toBe(lookup(en, settingsKey));
+  });
+
+  it('arrives in the language a switch under way lands on', async () => {
+    const i18n = await open('zh');
+    const { loadSettingsCopy } = await import('./settingsCopy');
+    const switching = i18n.changeLanguage('en');
+    expect((i18n as typeof i18n & { isLanguageChangingTo?: string }).isLanguageChangingTo).toBe('en');
+    await loadSettingsCopy();
+    await switching;
+
+    expect(i18n.language).toBe('en');
+    expect(i18n.t(settingsKey as never)).toBe(lookup(en, settingsKey));
   });
 });

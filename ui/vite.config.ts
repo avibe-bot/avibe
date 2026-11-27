@@ -4,6 +4,7 @@ import { configDefaults, defineConfig } from 'vitest/config'
 
 import { emojiCatalog } from './scripts/emojiCatalog.ts'
 import { firstScreenPreload } from './scripts/firstScreenPreload.ts'
+import { localeSurfaces } from './scripts/localeSurfaces.ts'
 
 // Point the dev proxy at any running Avibe instance — e.g. the Incus regression
 // environment — with VIBE_UI_BACKEND=http://127.0.0.1:15130 npm run dev, so UI
@@ -45,7 +46,7 @@ export default defineConfig({
     execArgv: process.allowedNodeEnvironmentFlags.has('--no-experimental-webstorage')
       ? ['--no-experimental-webstorage'] : [],
   },
-  plugins: [react(), emojiCatalog(), firstScreenPreload()],
+  plugins: [react(), emojiCatalog(), localeSurfaces(), firstScreenPreload()],
   build: {
     rolldownOptions: {
       output: {
