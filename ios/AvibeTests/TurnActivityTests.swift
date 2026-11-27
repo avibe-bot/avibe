@@ -422,49 +422,62 @@ final class TurnActivityTests: XCTestCase {
     /// direct hand-over, so a hand-over may close the connection one of its
     /// requests was about to use. That request gets no answer at once and
     /// is made once more; the card is registered by the second.
-    func testARequestThatLostItsConnectionIsMadeOnceMore() async throws {
-        for lost in ["status", "thrown"] {
-            cards = []; calls = []
-            var puts = 0
-            let owner = coordinator(response: { _, method, path, _ in
-                if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
-                if method == "PUT" {
-                    puts += 1
-                    if puts == 1 {
-                        if lost == "thrown" { throw VoiceCaptureInstanceClient.Failure.offline }
-                        return .init(status: 0, json: nil, redirected: false)
-                    }
-                }
-                return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
-            })
-            await start(owner)
-            XCTAssertEqual(calls.map { $0.0 }.filter { $0 == "PUT" }.count, 2, lost)
-            // Registered: the next foreground reads the row, it does not
-            // register again.
-            calls.removeAll()
-            await owner.reconcile(target: target)
-            XCTAssertEqual(calls.map { $0.0 }, ["GET"], lost)
-            await owner.endAll(reason: "logout")
-        }
+    func testARequestThatGotNoAnswerAtOnceIsMadeOnceMore() async throws {
+        try await registersOnTheSecondRequest(afterTheFirst: { .init(status: 0, json: nil, redirected: false) })
+    }
+
+    func testARequestWhoseDocumentWasLostAtOnceIsMadeOnceMore() async throws {
+        try await registersOnTheSecondRequest(afterTheFirst: { throw VoiceCaptureInstanceClient.Failure.offline })
+    }
+
+    private func registersOnTheSecondRequest(
+        afterTheFirst lost: @escaping @MainActor () throws -> VoiceCaptureInstanceClient.Response
+    ) async throws {
+        var puts = 0
+        let owner = coordinator(response: { _, method, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            if method == "PUT" {
+                puts += 1
+                if puts == 1 { return try lost() }
+            }
+            return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
+        })
+        await start(owner)
+        XCTAssertEqual(puts, 2)
+        // Registered: the next foreground reads the row, it does not
+        // register again.
+        calls.removeAll()
+        await owner.reconcile(target: target)
+        XCTAssertEqual(calls.map { $0.0 }, ["GET"])
+        await owner.endAll(reason: "logout")
     }
 
     /// A request that waited out its deadline is not made again: the
     /// instance is not answering, and a second wait helps nobody.
-    func testARequestThatRanOutOfTimeIsNotMadeAgain() async throws {
-        for lost in ["status", "thrown"] {
-            cards = []; calls = []
-            var clock = Date(timeIntervalSince1970: 1795001000)
-            let owner = coordinator(now: { clock }, response: { _, method, path, _ in
-                if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
-                guard method == "PUT" else { return .init(status: 200, json: nil, redirected: false) }
-                clock += TurnActivityCoordinator.lostConnectionWithin
-                if lost == "thrown" { throw VoiceCaptureInstanceClient.Failure.offline }
-                return .init(status: 0, json: nil, redirected: false)
-            })
-            await start(owner)
-            XCTAssertEqual(calls.map { $0.0 }.filter { $0 == "PUT" }.count, 1, lost)
-            await owner.endAll(reason: "logout")
-        }
+    func testARequestThatRanOutOfTimeWithNoAnswerIsNotMadeAgain() async throws {
+        try await registersOnce(whenEvery: { .init(status: 0, json: nil, redirected: false) })
+    }
+
+    func testARequestWhoseDocumentWasLostAfterItsWaitIsNotMadeAgain() async throws {
+        try await registersOnce(whenEvery: { throw VoiceCaptureInstanceClient.Failure.offline })
+    }
+
+    private func registersOnce(
+        whenEvery slow: @escaping @MainActor () throws -> VoiceCaptureInstanceClient.Response
+    ) async throws {
+        var clock = Date(timeIntervalSince1970: 1795001000)
+        var puts = 0
+        let owner = coordinator(now: { clock }, response: { _, method, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            guard method == "PUT" else { return .init(status: 200, json: nil, redirected: false) }
+            puts += 1
+            // The request took as long as a lost connection never does.
+            clock += TurnActivityCoordinator.lostConnectionWithin
+            return try slow()
+        })
+        await start(owner)
+        XCTAssertEqual(puts, 1)
+        await owner.endAll(reason: "logout")
     }
 
     /// A voice take's hidden WebView holds off the instance page's direct
