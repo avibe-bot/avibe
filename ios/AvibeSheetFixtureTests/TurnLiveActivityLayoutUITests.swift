@@ -211,12 +211,14 @@ final class VoiceLiveActivityLayoutUITests: XCTestCase {
     }
 
     /// One snapshot of SpringBoard, read here: its query engine does not
-    /// match the clock's label by pattern.
+    /// match the clock's label by pattern. The status bar's own time reads
+    /// like the take's clock (`3:29`), so the status bar is left out.
     private func elements() -> [Shown] {
         guard let root = try? springboard.snapshot() else { return [] }
         var found: [Shown] = []
         var pending: [XCUIElementSnapshot] = [root]
         while let element = pending.popLast() {
+            if element.elementType == .statusBar { continue }
             pending.append(contentsOf: element.children)
             let label = element.label
             if label.range(of: clockPattern, options: .regularExpression) != nil {
