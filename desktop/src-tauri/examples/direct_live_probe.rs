@@ -58,21 +58,42 @@
 //!    session: the page then asks the instance's own `/api/session`, and
 //!    the probe goes on only if that says remote and signed in (it prints
 //!    those two facts and whether the role is Owner, nothing else of it).
-//! 3. The native qualification, which asks that document for the rendezvous
-//!    answer through the shipping adapter (`webview_macos::fetch_rendezvous`).
-//! 4. The live-store leg, alone and first: the first store, which is
-//!    connected to the host on WebKit's own path, gets the route to the
-//!    qualified client's listener while it is live, as a window that was
-//!    open before the first answer does. No other store has been routed
-//!    yet, and this store's credential is a registration of its own at the
-//!    listener. The page is then asked for work of several kinds: a fetch,
+//! 3. The moved store, before any direct link exists: a store that has
+//!    never connected to the host gets the session and the route to the
+//!    client's listener, with a registration of its own and no failover,
+//!    and then loads. The listener has no link yet, so it carries the store
+//!    on its public leg, as a window of the shipped app that is routed from
+//!    its first load; the store's event stream must be labelled `other`
+//!    with a public commit on its registration. If a step of this fails,
+//!    the run goes on without the moved-store leg.
+//! 4. The native qualification, which asks the session's document for the
+//!    rendezvous answer through the shipping adapter
+//!    (`webview_macos::fetch_rendezvous`).
+//! 5. The moved-store leg: with the link up, the store's event stream is
+//!    asked again (still `other`), new connections are set to race both
+//!    legs as in the shipped automatic mode, and the core is asked what the
+//!    shell asks it for a page's `direct.handover`: to close that store's
+//!    quiet public connections. The stream and a fetch are then asked once
+//!    more, with no reload. `moved_store_route` is `moved` when the
+//!    instance now labels the stream `direct` after a leg was closed;
+//!    `not_moved` when it still says `other`; `handover_not_usable` when
+//!    the core refused, as it does by design on a relayed path;
+//!    `already_direct` when the store had moved before it was asked. Not
+//!    run here: the page's own trigger and the shell's bridge, a request in
+//!    flight, typed text. The listener is direct-only again afterwards.
+//! 6. The live-store leg: the first store, which is connected to the host
+//!    on WebKit's own path, gets the route to the qualified client's
+//!    listener while it is live, as a window that was open before the first
+//!    answer does. Its credential is a registration of its own at the
+//!    listener, so its counts are its own; the moved store still exists and
+//!    is quiet. The page is then asked for work of several kinds: a fetch,
 //!    a fetch without credentials, its event stream, a WebSocket, a reload,
 //!    and after it a fetch and the event stream again.
-//! 5. The fresh-store leg, the positive control of the same payloads: a
+//! 7. The fresh-store leg, the positive control of the same payloads: a
 //!    second store that has never connected to the host gets the session,
 //!    then the route with a registration of its own and no failover, then
 //!    its first load and the same work in the same order.
-//! 6. Whether any committed stream is on the link, every change of the
+//! 8. Whether any committed stream is on the link, every change of the
 //!    path's status and every withdrawal of the link, as they happen. The
 //!    `direct_stream_opened` and `direct_stream_closed` lines are presence
 //!    only: they are sampled, they do not count streams, and they attribute
@@ -101,8 +122,10 @@
 //!
 //! The live store's verdict (`live_store_route`) is `taken` when a payload
 //! of its is `direct`; `not_taken` when its payloads were answered, no
-//! CONNECT presented its credential and nothing was left unadmitted while
-//! it alone was routed; `not_admitted` or `unknown` otherwise. It means
+//! CONNECT presented its credential and nothing was left unadmitted during
+//! its leg; `not_admitted` or `unknown` otherwise (`unadmitted` is the
+//! listener's, not a store's: a connection the moved store opens during
+//! this leg is in it too, and then the verdict is the weaker one). It means
 //! something only if the control (`fresh_store_route`) holds: every payload
 //! of the routed store attributed to its registration. The WebSocket is not
 //! upgraded by the instance at `/health`, so it is expected to end before
@@ -122,7 +145,8 @@
 //! document did not load or the instance did not take the session; 4 the
 //! native qualification failed; 5 the fresh-store control did not hold;
 //! 6 the live store did not take the route (the listener was never asked);
-//! 7 the live store's route is not known.
+//! 7 the live store's route is not known. The moved-store leg does not
+//! change the exit code: its verdict is its line.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -370,7 +394,8 @@ mod probe {
     use avibe_desktop_lib::direct::{
         rendezvous::{origin_of, Reply, Request},
         webview_macos::{fetch_rendezvous, install_route},
-        Fault, FaultCode, PathStatus, PreferredPath, SelectedPath, Stage, WindowCounts, WindowRegistration,
+        Fault, FaultCode, HandoverResult, PathStatus, PreferredPath, SelectedPath, Stage, WindowCounts,
+        WindowRegistration,
     };
     use block2::{DynBlock, RcBlock};
     use objc2::{
@@ -386,7 +411,10 @@ mod probe {
     };
     use serde_json::json;
 
-    use crate::{control, direct_transport_diag::qualify};
+    use crate::{
+        control,
+        direct_transport_diag::{prepare, qualify},
+    };
 
     /// The instance's session cookie (`vibe/remote_access.py`). `__Host-`:
     /// secure, for the whole host, and for that host alone.
@@ -410,6 +438,11 @@ mod probe {
     /// bytes).
     const EVENTS: &str = "/api/events";
     const STREAM_BYTES: usize = 4096;
+    /// How long the client may take to bind its listener.
+    const PREPARATION: Duration = Duration::from_secs(10);
+    /// The shell waits up to three seconds for a window's public
+    /// connections to go quiet; this is how long its answer is waited for.
+    const HANDOVER: Duration = Duration::from_secs(6);
     /// How long the link is watched after the last leg.
     const AFTERWARDS: Duration = Duration::from_secs(5);
 
@@ -1295,6 +1328,9 @@ mod probe {
         /// The rendezvous answer for this client endpoint, from the session's
         /// own document.
         Rendezvous(String, tokio::sync::oneshot::Sender<Reply>),
+        /// The client's listener is up, before any rendezvous: its address
+        /// and the moved store's credential. `None` if it could not give one.
+        Prepared(Option<(SocketAddrV4, Login)>),
         /// The qualified client's listener and its window credential.
         Qualified(Result<Leg, Fault>),
     }
@@ -1305,14 +1341,28 @@ mod probe {
         StreamOpen(mpsc::Sender<bool>),
         /// The listener's own exact counts, so far, for this store.
         Counts(Store, mpsc::Sender<Option<Counted>>),
+        /// The moved store has loaded through the listener: qualify now.
+        Qualify,
+        /// Whether new connections may use only the direct path and the
+        /// relay (as during the qualification), or race both legs (the
+        /// shipped automatic mode).
+        DirectOnly(bool),
+        /// What the shell does for a page's `direct.handover`: close the
+        /// moved store's quiet public connections.
+        Handover(mpsc::Sender<HandoverResult>),
         Stop,
     }
 
-    /// The two stores a route is given to. Each has a registration of its
+    /// The stores a route is given to. Each has a registration of its
     /// own at the listener, so a CONNECT is counted for the store whose
     /// credential it presented and for no other.
     #[derive(Clone, Copy, PartialEq)]
     enum Store {
+        /// A store that is given the route before its first connection and
+        /// before any direct link exists: the listener carries it on its
+        /// public leg, as a window of the shipped app that is routed from
+        /// its first load. Later its quiet public connections are closed.
+        Moved,
         /// The session's document: connected to the host on WebKit's own
         /// path before it is given the route.
         Live,
@@ -1402,7 +1452,41 @@ mod probe {
                     }
                     answered.await.unwrap_or(Reply::Failed)
                 };
-                let mut live = match qualify(&host, instance, fetch).await {
+                let client = match prepare(&host, instance).await {
+                    Ok(client) => client,
+                    Err(fault) => {
+                        let _ = to_main.send(FromNative::Qualified(Err(fault)));
+                        return;
+                    }
+                };
+                // The moved store's registration, taken before any link
+                // exists, and the listener's address for its route.
+                let moved = client.handover().window_credential("moved-store");
+                let prepared = client
+                    .route()
+                    .map(|route| route.proxy)
+                    .zip(moved.as_ref().map(Login::of));
+                let _ = to_main.send(FromNative::Prepared(prepared));
+                // Until the main thread has loaded that store: the listener
+                // serves it meanwhile, and its counts may be asked.
+                loop {
+                    match commands.recv().await {
+                        Some(ToNative::Qualify) => break,
+                        Some(ToNative::Counts(Store::Moved, answer)) => {
+                            let handover = client.handover();
+                            let counted = moved
+                                .as_ref()
+                                .and_then(|of| handover.window_counts(of))
+                                .zip(handover.unadmitted())
+                                .map(|(of_store, unadmitted)| Counted { of_store, unadmitted });
+                            let _ = answer.send(counted);
+                        }
+                        Some(ToNative::Stop) | None => return,
+                        // Nothing else is asked before the qualification.
+                        Some(_) => {}
+                    }
+                }
+                let mut live = match qualify(client, &host, fetch).await {
                     Ok(live) => live,
                     Err(fault) => {
                         let _ = to_main.send(FromNative::Qualified(Err(fault)));
@@ -1440,16 +1524,29 @@ mod probe {
                                 let _ = answer.send(stream_open);
                             }
                             Some(ToNative::Counts(store, answer)) => {
-                                let registration = stores.as_ref().map(|(of_live, of_fresh)| match store {
-                                    Store::Live => of_live,
-                                    Store::Fresh => of_fresh,
-                                });
+                                let registration = match store {
+                                    Store::Moved => moved.as_ref(),
+                                    Store::Live => stores.as_ref().map(|(of_live, _)| of_live),
+                                    Store::Fresh => stores.as_ref().map(|(_, of_fresh)| of_fresh),
+                                };
                                 let counted = registration
                                     .and_then(|of| handover.window_counts(of))
                                     .zip(handover.unadmitted())
                                     .map(|(of_store, unadmitted)| Counted { of_store, unadmitted });
                                 let _ = answer.send(counted);
                             }
+                            Some(ToNative::DirectOnly(only)) => handover.set_direct_only(only),
+                            Some(ToNative::Handover(answer)) => {
+                                // The same call the shell makes for the
+                                // window's own registration. It waits up to
+                                // three seconds for the legs to go quiet.
+                                let result = match moved.as_ref() {
+                                    Some(of_moved) => handover.close_quiet_public_for_window(&host, of_moved).await,
+                                    None => HandoverResult::NotUsable,
+                                };
+                                let _ = answer.send(result);
+                            }
+                            Some(ToNative::Qualify) => {}
                             Some(ToNative::Stop) | None => break,
                         },
                         retired = live.retirements.recv(), if retirements_live => match retired {
@@ -1498,6 +1595,7 @@ mod probe {
                     json!({
                         "unadmitted": handover.unadmitted(),
                         "native": at_end(Some(&live.registration)),
+                        "moved_store": at_end(moved.as_ref()),
                         "live_store": at_end(stores.as_ref().map(|(of_live, _)| of_live)),
                         "fresh_store": at_end(stores.as_ref().map(|(_, of_fresh)| of_fresh)),
                     }),
@@ -1564,6 +1662,8 @@ mod probe {
     ///   (the stream payload). `direct` stands only if this registration has
     ///   a direct commit, and `other` only if it has no public one: anything
     ///   else contradicts the listener and is `unknown`.
+    ///   In a store whose every connection goes through the listener,
+    ///   `other` with a public commit is `listener_public`.
     /// - `ok` (a payload the instance does not label): `own_path` when no
     ///   CONNECT has ever presented this store's credential, because the
     ///   listener then carried nothing of this store; `direct` only in a
@@ -1578,6 +1678,9 @@ mod probe {
         match word {
             "direct" if so_far.direct > 0 => "direct",
             "other" if so_far.public == 0 => "own_path",
+            // Not through the direct ingress, in a store whose every
+            // connection goes through the listener: on its public leg.
+            "other" if routed_from_birth => "listener_public",
             "ok" if so_far.connects == 0 => "own_path",
             "ok" if routed_from_birth && so_far.direct > 0 && so_far.public == 0 => "direct",
             "ok" | "direct" | "other" => "unknown",
@@ -1610,7 +1713,7 @@ mod probe {
         pump_until(SETTLE, || false);
         let after = counts(native, store);
         let (word, close) = answer_of(answer.as_deref());
-        let via = via(word, store == Store::Fresh, after);
+        let via = via(word, store != Store::Live, after);
         let mut fields = json!({
             "ok": matches!(word, "ok" | "opened" | "direct" | "other"),
             "result": word,
@@ -1825,6 +1928,139 @@ try {
         }
     }
 
+    // MARK: The moved store
+
+    /// A store that is routed to the client's listener before its first
+    /// connection and before any direct link exists, as a window of the
+    /// shipped app that is routed from its first load: the session, then
+    /// the route (this store's own credential, no failover), then its first
+    /// load. The listener has no link yet, so it carries the store on its
+    /// public leg, and the instance says so itself: the store's event stream
+    /// is labelled `other` while its registration has public commits.
+    /// `None`, with the failed step printed, when that baseline is not met.
+    #[allow(clippy::too_many_arguments)]
+    fn moved_store(
+        mtm: MainThreadMarker,
+        origin: &str,
+        host: &str,
+        session: &str,
+        proxy: SocketAddrV4,
+        login: &Login,
+        native: &tokio::sync::mpsc::UnboundedSender<ToNative>,
+        report: &Report,
+    ) -> Option<View> {
+        let page = View::new(mtm, origin);
+        let held = page.seed_session(SESSION_COOKIE, session);
+        if !report_seeded(report, "moved_session_seeded", held, true) {
+            return None;
+        }
+        if !install_route(&page.webview, mtm, host, proxy, &login.username, &login.password, false) {
+            report.failed("moved_route_installed", "refused_by_system");
+            return None;
+        }
+        report.ok("moved_route_installed");
+        let loaded = page.load("/", report, "moved_answered", "moved_committed");
+        if !report_load(report, "moved_loaded", loaded) || !page.shows_its_origin() {
+            return None;
+        }
+        if !session_accepted(&page, mtm, report, "moved_session_accepted") {
+            return None;
+        }
+        let stream = attempt(
+            &page,
+            mtm,
+            native,
+            report,
+            Store::Moved,
+            "moved_stream_on_public_leg",
+            &stream_script(EVENTS),
+        );
+        if stream.via != "listener_public" {
+            report.failed("moved_store_baseline", "not_on_the_public_leg");
+            return None;
+        }
+        report.ok("moved_store_baseline");
+        Some(page)
+    }
+
+    /// The moved store's leg, once the direct link is up. The page is not
+    /// reloaded and nothing is navigated. In order: its event stream is
+    /// asked again (it must still be on the public leg: during the
+    /// qualification a connection the page opened by itself could only go
+    /// direct); new connections are set to race both legs, as in the shipped
+    /// automatic mode; the core is asked what the shell asks it for a page's
+    /// `direct.handover`, to close this store's quiet public connections;
+    /// and the event stream and a fetch are asked once more. `moved` when
+    /// the instance then labels the stream `direct` after a leg was closed.
+    ///
+    /// What this leg does not run: the page's own trigger and the shell's
+    /// bridge (the views here have no bridge), a request in flight during
+    /// the hand-over, and typed text. The hand-over needs a local or
+    /// hole-punched path: over the relay the core answers `not_usable`, by
+    /// design, and the verdict says so.
+    fn moved_leg(
+        page: &View,
+        mtm: MainThreadMarker,
+        native: &tokio::sync::mpsc::UnboundedSender<ToNative>,
+        report: &Report,
+    ) {
+        let began = counts(native, Store::Moved);
+        let verdict = |ok: bool, reason: &'static str| {
+            let in_leg = counts(native, Store::Moved)
+                .zip(began)
+                .map(|(now, began)| (now.of_store, now.unadmitted.saturating_sub(began.unadmitted)));
+            counts_line(report, "moved_store_route", ok, reason, in_leg);
+        };
+        let ask =
+            |boundary: &'static str, script: &str| attempt(page, mtm, native, report, Store::Moved, boundary, script);
+        let before = ask("moved_stream_before_handover", &stream_script(EVENTS));
+        if before.via != "listener_public" {
+            verdict(
+                false,
+                if before.via == "direct" {
+                    "already_direct"
+                } else {
+                    "unknown"
+                },
+            );
+            return;
+        }
+        let _ = native.send(ToNative::DirectOnly(false));
+        let (answer, answered) = mpsc::channel();
+        let mut result = None;
+        if native.send(ToNative::Handover(answer)).is_ok() {
+            pump_until(HANDOVER, || {
+                result = answered.try_recv().ok();
+                result.is_some()
+            });
+        }
+        let (word, closed, kept) = match result {
+            Some(HandoverResult::Done { closed, kept }) => ("done", closed, kept),
+            Some(HandoverResult::NotUsable) => ("not_usable", 0, 0),
+            Some(HandoverResult::OtherDocuments) => ("other_documents", 0, 0),
+            None => ("no_answer", 0, 0),
+        };
+        report.line(
+            "moved_handover",
+            json!({ "ok": word == "done" && closed > 0, "result": word, "closed": closed, "kept": kept }),
+        );
+        // The page's own stream was on a closed connection: it connects
+        // again by itself, and so does what is asked here.
+        pump_until(SETTLE, || false);
+        let after = ask("moved_stream_after_handover", &stream_script(EVENTS));
+        let nonce = report.start.elapsed().as_nanos();
+        let _ = ask("moved_fetch_after_handover", &health_script(nonce, "same-origin"));
+        // The legs that follow rely on the direct-only listener again.
+        let _ = native.send(ToNative::DirectOnly(true));
+        match (word, after.via) {
+            ("done", "direct") if closed > 0 => verdict(true, "moved"),
+            ("done", "direct") => verdict(false, "direct_without_a_closed_leg"),
+            ("done", "listener_public") => verdict(false, "not_moved"),
+            ("not_usable", _) => verdict(false, "handover_not_usable"),
+            _ => verdict(false, "unknown"),
+        }
+    }
+
     /// A leg's verdict, with its store's counts so far and the connections
     /// the listener did not admit since the leg began.
     fn counts_line(
@@ -1919,11 +2155,29 @@ try {
 
         let (to_main, from_native) = mpsc::channel();
         let (native, commands) = tokio::sync::mpsc::unbounded_channel();
-        report.ok("native_qualification_start");
         let worker = start_native(host.clone(), instance, report, to_main, commands);
         let mut qualified = None;
+        // The moved store, before any direct link exists: routed to the
+        // client's listener from its first load, which then carries it on
+        // its public leg. If any step of it fails, the run goes on without
+        // that leg.
+        let mut prepared = None;
+        pump_until(PREPARATION, || {
+            match from_native.try_recv() {
+                Ok(FromNative::Prepared(listener)) => prepared = Some(listener),
+                Ok(FromNative::Qualified(result)) => qualified = Some(result),
+                _ => {}
+            }
+            prepared.is_some() || qualified.is_some()
+        });
+        let moved = prepared
+            .flatten()
+            .and_then(|(proxy, login)| moved_store(mtm, &origin, &host, &session, proxy, &login, &native, &report));
+        report.ok("native_qualification_start");
+        let _ = native.send(ToNative::Qualify);
         pump_until(QUALIFICATION, || {
             match from_native.try_recv() {
+                Ok(FromNative::Prepared(_)) => {}
                 Ok(FromNative::Rendezvous(client_endpoint_id, answer)) => {
                     report.ok("rendezvous_asked");
                     let Some(request) = Request::new(&origin, &client_endpoint_id) else {
@@ -1983,10 +2237,16 @@ try {
             report.failed("native_stream_released", "stream_still_open");
         }
 
-        // The live-store leg, alone and first: the session's document is
-        // connected to the host on WebKit's own path, and no other store has
-        // been routed yet. It gets the route now, while it is live, with a
-        // credential no one else holds, and is asked for its work.
+        // The moved-store leg, before any other store is routed: what the
+        // shell does when a page asks to be handed over.
+        if let Some(page) = moved.as_ref() {
+            moved_leg(page, mtm, &native, &report);
+        }
+
+        // The live-store leg: the session's document is connected to the
+        // host on WebKit's own path. It gets the route now, while it is
+        // live, with a credential no one else holds, and is asked for its
+        // work.
         if !install_route(
             &document.webview,
             mtm,

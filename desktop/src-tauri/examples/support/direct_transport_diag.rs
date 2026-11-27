@@ -48,15 +48,20 @@ fn failure(start: Instant, kind: &'static str, fault: Fault) {
     );
 }
 
-pub async fn qualify<F, Fut>(host: &str, instance: String, fetch: F) -> Result<Live, Fault>
+/// The client and its listener, before any rendezvous: the listener
+/// carries a routed window on its public leg only.
+pub async fn prepare(host: &str, instance: String) -> Result<Client, Fault> {
+    Client::new(host, instance)
+        .await
+        .ok_or(Fault(Stage::Handover, FaultCode::ListenerClosed))
+}
+
+pub async fn qualify<F, Fut>(mut client: Client, host: &str, fetch: F) -> Result<Live, Fault>
 where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Reply>,
 {
     let start = Instant::now();
-    let mut client = Client::new(host, instance)
-        .await
-        .ok_or(Fault(Stage::Handover, FaultCode::ListenerClosed))?;
     let mut retirements = client.retirements();
     let mut steps = client.qualification_steps();
     report(start, "rendezvous_start", None);
