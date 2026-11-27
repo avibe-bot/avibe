@@ -175,11 +175,10 @@ def test_only_an_answer_no_cache_may_keep_says_how_its_request_arrived(
         asset = get("/logo-unread.png")
         assert asset.status_code == 200 and "max-age" in asset.headers["Cache-Control"]
         assert header not in asset.headers
-        # An API answer that declares nothing about caching: a cache may work
-        # out a lifetime for it, so it does not carry the word either.
+        # An ordinary gated API answer now gets the default before the word is decided.
         plain = get("/api/inbox")
-        assert plain.status_code == 200 and "Cache-Control" not in plain.headers
-        assert header not in plain.headers
+        assert plain.status_code == 200 and plain.headers["Cache-Control"] == "private, no-store"
+        assert plain.headers.get(header) == "direct"
         # The page's session check says no-store, and says the word.
         check = get("/api/session")
         assert "no-store" in check.headers["Cache-Control"]

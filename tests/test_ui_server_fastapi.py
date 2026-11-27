@@ -35,6 +35,23 @@ def _clear_web_push_delivery_dispositions():
     yield
 
 
+def test_api_cache_default_covers_answers_outside_request_hooks():
+    from fastapi.testclient import TestClient
+
+    probe = ui_server._UIApp()
+
+    @probe.get("/api/broken")
+    async def broken():
+        raise RuntimeError("test server error")
+
+    with TestClient(probe, raise_server_exceptions=False) as client:
+        for path, status in (("/api/broken", 500), ("/api/missing", 404)):
+            response = client.get(path)
+            assert response.status_code == status
+            assert response.headers.get_list("cache-control") == ["private, no-store"]
+        assert "cache-control" not in client.get("/missing").headers
+
+
 @pytest.mark.parametrize("dispatch", [False, True])
 def test_compat_exception_log_preserves_error_and_request_metadata(caplog, dispatch):
     error = RuntimeError("diagnostic failure")
