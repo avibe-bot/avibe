@@ -22,11 +22,12 @@ from vibe.authorization import AuthorizationContext
 
 
 def test_scoped_page_title_label_and_retention(isolated_state, install):
+    # Keep the three-way tie older than sign-in, regardless of setup duration.
+    stamp = int(time.time()) - 2
     _, viewer, key = phone(install, "feed")
     store = MobileStore()
     identity, payload = code_for(store, viewer)
     mid = health.pair(store, payload, identity)["device_id"]
-    stamp = int(time.time()) - 2
     at = datetime.fromtimestamp(stamp, timezone.utc)
     engine = get_cached_sqlite_engine()
     _create()
