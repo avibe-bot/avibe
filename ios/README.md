@@ -1888,13 +1888,13 @@ production instance is used.
 
 ## Turn Live Activities
 
-**Switched off pending a redesign (11-26).** The shell does not announce
-`lockScreenProgress`, so no page shows the setting; the stored setting is forced
-off, nothing starts a card, and a card an earlier build left ends at launch and
-when the App comes to the front (`TurnActivityCoordinator.shipsLockScreenProgress`).
-The code below stays and is tested behind that switch.
+`TurnActivityCoordinator.shipsLockScreenProgress` is the switch (on since
+11-27, after the black-card fix; it was off from 11-26). Off, the shell drops
+`lockScreenProgress` from its capabilities, the stored setting is forced off,
+nothing starts a card, and a card an earlier build left ends at launch and when
+the App comes to the front.
 
-When shipped, the shell announces `lockScreenProgress: 1`: `liveActivity.setting`,
+The shell announces `lockScreenProgress: 1`: `liveActivity.setting`,
 `setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
 `stop` calls return `unsupported`. The shell never announces `liveActivities`,
 so older Web bundles do not activate the retired entry's bridge observers. The

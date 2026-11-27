@@ -542,10 +542,8 @@ final class TurnActivityTests: XCTestCase {
     }
 
 
-    /// Switched off pending a redesign (11-26): the shell announces neither
-    /// capability, so no page shows the setting; the methods stay recognized.
     func testLockScreenProgressCapabilityReplacesLegacyCapability() {
-        XCTAssertNil(NativeShellMetadata.capabilities["lockScreenProgress"])
+        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
         XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         for method in ["setting", "setSetting", "observe", "openSettings", "status", "start", "stop"] {
             guard case .success(let request) = NativeBridgeRequest.parse(["method": "liveActivity." + method, "params": [:]]) else {
@@ -610,13 +608,27 @@ final class TurnActivityTests: XCTestCase {
     }
 
 
-    /// The shipped coordinator: a setting an earlier build stored on reads off
-    /// and is stored off; turning it on, an observation and a departure start
-    /// nothing and send nothing.
-    func testTheShippedCoordinatorRefusesEveryStart() async {
-        XCTAssertFalse(TurnActivityCoordinator.shipsLockScreenProgress)
+    /// The shipped coordinator is the feature: a setting stored on stays on,
+    /// and leaving the App while an observed Turn runs starts its card.
+    func testTheShippedCoordinatorStartsACard() async {
+        XCTAssertTrue(TurnActivityCoordinator.shipsLockScreenProgress)
         defaults.set(true, forKey: "avibe.liveActivities.enabled")
         let owner = shippedCoordinator()
+        XCTAssertTrue(owner.deviceEnabled)
+        XCTAssertTrue(defaults.bool(forKey: "avibe.liveActivities.enabled"))
+        XCTAssertEqual(owner.setting()["enabled"] as? Bool, true)
+        await observe(owner)
+        await owner.willDeactivate(registrationID: "registration-1")?.value
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.state, .active)
+    }
+
+    /// Switched off (`available: false`): a setting an earlier build stored on
+    /// reads off and is stored off; turning it on, an observation and a
+    /// departure start nothing and send nothing.
+    func testSwitchedOffTheCoordinatorRefusesEveryStart() async {
+        defaults.set(true, forKey: "avibe.liveActivities.enabled")
+        let owner = shippedCoordinator(available: false)
         XCTAssertFalse(owner.deviceEnabled)
         XCTAssertFalse(defaults.bool(forKey: "avibe.liveActivities.enabled"))
         await owner.setSetting(true)
@@ -630,15 +642,16 @@ final class TurnActivityTests: XCTestCase {
         XCTAssertTrue(calls.isEmpty)
     }
 
-    /// A card an earlier build started ends at launch (what the App runs with
-    /// the setting off) and, if one shows again, when the App comes to the front.
-    func testTheShippedCoordinatorEndsRunningCardsAtLaunchAndInTheForeground() async {
+    /// Switched off: a card an earlier build started ends at launch (what the
+    /// App runs with the setting off) and, if one shows again, when the App
+    /// comes to the front.
+    func testSwitchedOffTheCoordinatorEndsRunningCardsAtLaunchAndInTheForeground() async {
         let earlier = coordinator()
         await start(earlier)
         XCTAssertEqual(cards.count, 1)
         XCTAssertEqual(cards.first?.state, .active)
 
-        let relaunched = shippedCoordinator()
+        let relaunched = shippedCoordinator(available: false)
         XCTAssertFalse(relaunched.deviceEnabled)
         await relaunched.endAllLocally()
         XCTAssertEqual(cards.first?.state, .dismissed)
@@ -649,7 +662,9 @@ final class TurnActivityTests: XCTestCase {
         XCTAssertNotEqual(later.state, .active)
     }
 
-    private func shippedCoordinator() -> TurnActivityCoordinator {
+    /// The coordinator as the App builds it: no `available` argument, so it
+    /// follows `shipsLockScreenProgress`, unless a test passes one.
+    private func shippedCoordinator(available: Bool? = nil) -> TurnActivityCoordinator {
         let owner = TurnActivityCoordinator(defaults: defaults, enabled: { true }, activities: { self.cards }, create: { attributes, state in
             let card = FakeTurnActivity(attributes: attributes, content: state)
             self.cards.append(card)
@@ -657,7 +672,8 @@ final class TurnActivityTests: XCTestCase {
         }, request: { _, method, path, body in
             self.calls.append((method, path, body))
             return .init(status: 200, json: ["turn": self.initial], redirected: false)
-        }, mayRequest: { _ in true }, isActive: { true }, beginBackgroundTask: { _ in {} })
+        }, mayRequest: { _ in true }, available: available ?? TurnActivityCoordinator.shipsLockScreenProgress,
+           isActive: { true }, beginBackgroundTask: { _ in {} })
         owner.selectTarget(target)
         return owner
     }

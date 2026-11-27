@@ -2213,8 +2213,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
         XCTAssertEqual(NativeShellMetadata.capabilities["device"], 1)
         // Withdrawn (11-21): the methods stay recognized but refuse.
-        // Lock Screen progress is switched off pending a redesign (11-26).
-        XCTAssertNil(NativeShellMetadata.capabilities["lockScreenProgress"])
+        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
         XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
