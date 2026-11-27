@@ -52,7 +52,6 @@ PYTHON_DECLARATIONS = {
     ("core/handlers/model_hub/migration_journal.py", "Set", frozenset({"claude", "codex"})): (2, "native_subset", "OAuth journal providers."),
     ("core/handlers/model_hub/migration_persisted.py", "Dict", HUB_NATIVE): (2, "native_subset", "Model Hub native persisted credential snapshots."),
     ("core/handlers/model_hub/service.py", "Dict", frozenset({"claude", "codex"})): (2, "native_subset", "Native API-key environment and OAuth event reasons."),
-    ("core/handlers/model_hub/service.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Backends with bundled model lists."),
     ("core/handlers/model_hub/provenance.py", "Set", frozenset({"codex", "opencode"})): (2, "native_subset", "Request-scoped native gateway attribution for Codex and OpenCode multiplexing."),
     ("core/services/session_fork.py", "Set", frozenset({"codex", "opencode"})): (1, "native_subset", "Native forks that can trim a running turn."),
     ("modules/agents/model_hub.py", "Set", frozenset({"codex", "opencode"})): (2, "native_subset", "Request-scoped native gateway attribution for Codex and OpenCode multiplexing."),

@@ -214,6 +214,9 @@ class ModelHubRemoteService:
     def get_agent_sources(self, backend: str) -> dict:
         return _rpc_sync("get_agent_sources", {"backend": backend})
 
+    def vibey_hint_candidates(self) -> list[dict]:
+        return _rpc_sync("vibey_hint_candidates")
+
     def agent_model_candidates(self, backend: str) -> dict:
         return _rpc_sync("agent_model_candidates", {"backend": backend})
 

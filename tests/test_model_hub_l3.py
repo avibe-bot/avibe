@@ -2437,8 +2437,9 @@ def test_runtime_resolution_sees_controller_reconcile_after_remote_catalog_refre
             "Refresh provider",
             model_id=model_id,
         )
-        source.last_discovered_at = "2026-11-27T10:00:00Z"
+        source.last_discovered_at = source.models[0].discovered_at = "2026-11-27T10:00:00Z"
         service = _service(tmp_path, sources=[source])
+        await service._publish_complete_listing(source, [DiscoveredModel(id=model_id)])
         for backend in ("claude", "codex"):
             fixed_agent = service.store.config.agents[backend]
             fixed_agent.routes = {

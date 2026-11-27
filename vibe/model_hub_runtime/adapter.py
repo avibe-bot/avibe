@@ -4554,15 +4554,15 @@ def _discovered_models(
 ) -> tuple[DiscoveredModel, ...]:
     models = payload.get("models")
     if not isinstance(models, list):
-        return ()
+        raise EngineClientError("model inventory has no models list", error_type="invalid_json")
     coalesced: dict[str, tuple[str, ...] | None] = {}
     # Which spellings the engine used for each name, so a row it listed twice
     # under one name stays distinguishable from two rows that became one here.
     spellings: dict[str, set[str]] = {}
     for item in models:
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
-        if not isinstance(value, str) or not value:
-            continue
+        if not isinstance(value, str) or not value.strip():
+            raise EngineClientError("model inventory has an unidentified row", error_type="invalid_json")
         answered = value
         # This is the one place an address enters the product: the engine answers
         # with the name it addresses this credential by. It is removed here, at
@@ -4571,7 +4571,7 @@ def _discovered_models(
         # own name is spelled like one is left as upstream named it.
         value = model_id_without_credential_address(value, prefix)
         if not value:
-            continue
+            raise EngineClientError("model inventory has an unidentified row", error_type="invalid_json")
         supported_parameters = None
         if isinstance(item, dict) and isinstance(item.get("supported_parameters"), list):
             parameters = item["supported_parameters"]

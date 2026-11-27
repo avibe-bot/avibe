@@ -201,6 +201,15 @@ def test_discovery_keeps_a_name_it_cannot_prove_is_an_address() -> None:
     assert [model.id for model in models] == [f"{OTHER_ADDRESS}/gpt-5.5", "x-ai/grok-4.6-latest"]
 
 
+def test_invalid_oauth_inventory_is_not_a_withdrawal() -> None:
+    from vibe.model_hub_runtime.client import EngineClientError
+
+    assert _discovered_models({"models": []}) == ()
+    for malformed in ({}, {"models": None}, {"models": ["listed", {}]}):
+        with pytest.raises(EngineClientError):
+            _discovered_models(malformed)
+
+
 def test_discovery_without_a_known_address_falls_back_to_the_minted_shape() -> None:
     """A credential whose metadata carries no prefix still yields bare names."""
 

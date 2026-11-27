@@ -2576,6 +2576,10 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
     assert refreshed == [backend, backend]
 
 
+def _publish_test_listing(service, source, *ids):
+    asyncio.run(service._publish_complete_listing(source, [DiscoveredModel(id=mid) for mid in ids]))
+
+
 def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     monkeypatch,
     tmp_path,
@@ -2634,6 +2638,10 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     )
     store.config.sources = [first, second]
     agent = store.config.agents["codex"]
+    existing_builtin_id = agent.models[0].id
+    first.models.append(ModelHubModelConfig(id=existing_builtin_id, provenance="discovered"))
+    _publish_test_listing(service, first, "shared-provider-model", "new-provider-model", existing_builtin_id)
+    _publish_test_listing(service, second, "shared-provider-model", "new-provider-model")
     agent.sources.order = [second.id, first.id]
     agent.models.append(
         ModelHubBackendModelConfig(
@@ -2652,7 +2660,6 @@ def test_backend_catalog_candidates_project_builtin_provider_and_current_rows(
     agent.routes["shared-provider-model"] = ModelHubRouteConfig()
     agent.routes[legacy_overlong_id] = ModelHubRouteConfig()
     agent.removed_model_ids.extend(["gpt-restorable", "gpt-withdrawn"])
-    existing_builtin_id = agent.models[0].id
     monkeypatch.setattr(
         service,
         "_current_builtin_models",
@@ -2785,6 +2792,8 @@ def test_opencode_candidates_collapse_suppliers_into_one_bare_identity(tmp_path)
         for index, vendor in enumerate(("relay-a", "relay-b"), start=1)
     ]
     store.config.sources = sources
+    for source in sources:
+        _publish_test_listing(service, source, "shared-model")
     store.config.agents["opencode"].sources.order = [source.id for source in sources]
 
     candidates = service.agent_model_candidates("opencode")
@@ -2816,6 +2825,7 @@ def test_candidate_protocol_projection_is_total_only_for_opencode(tmp_path):
         ],
         credential_ref="cred_protocol1",
     )
+    _publish_test_listing(service, source, "claude-protocol-fixture", "gpt-protocol-fixture")
     store.config.sources = [source]
     for agent in store.config.agents.values():
         agent.sources.order = [source.id]
@@ -2865,6 +2875,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
         ],
         credential_ref="cred_enrich001",
     )
+    _publish_test_listing(service, source, *(row.id for row in source.models))
     store.config.sources = [source]
     for agent in store.config.agents.values():
         agent.sources.order = [source.id]
@@ -2951,6 +2962,7 @@ def test_provider_candidates_survive_an_unreadable_models_dev_catalog(tmp_path):
         models=[ModelHubModelConfig(id="gpt-described", provenance="discovered")],
         credential_ref="cred_enrich002",
     )
+    _publish_test_listing(service, source, "gpt-described")
     store.config.sources = [source]
     store.config.agents["codex"].sources.order = [source.id]
 
@@ -2984,6 +2996,7 @@ def test_candidates_exclude_only_noncanonical_ids(monkeypatch, tmp_path):
         ],
         credential_ref="cred_invalid001",
     )
+    _publish_test_listing(service, source, invalid_claude_id)
     store.config.sources = [source]
     store.config.agents["claude"].sources.order = [source.id]
     monkeypatch.setattr(
@@ -3036,6 +3049,8 @@ def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
     ]
     store.config.sources = sources
     agent = store.config.agents["codex"]
+    for source in sources:
+        _publish_test_listing(service, source, model_id)
     agent.sources.order = [source.id for source in reversed(sources)]
     baseline = service.backend_catalog_models("codex")
     added = {
@@ -3098,10 +3113,12 @@ def test_backend_catalog_supplier_change_refuses_without_committing(tmp_path):
         models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
         credential_ref="cred_stale0001",
     )
+    _publish_test_listing(service, source, model_id)
     store.config.sources = [source]
     store.config.agents["codex"].sources.order = [source.id]
     baseline = service.backend_catalog_models("codex")
-    added = {**baseline[0], "id": model_id, "origin": "provider"}
+    assert baseline == []  # no bundled fallback after the first complete listing
+    added = ModelHubBackendModelConfig(id=model_id, origin="provider").to_payload()
     before = store.config.to_payload()
 
     with pytest.raises(ModelHubError) as raised:
@@ -3162,14 +3179,15 @@ def test_concurrent_same_id_add_keeps_the_route_matched_by_the_first_writer(tmp_
     ]
 
 
-def _discovered_chat_supply(service, backend, ids, *, label=None):
+def _discovered_chat_supply(service, backend, ids, *, label=None, protocol_override=None, listed_ids=None):
     """Independent inputs: the assigned Source lists IDs; first-party catalog describes capability."""
     vendor, protocol = {"codex": ("openai", "openai_responses"), "claude": ("anthropic", "anthropic")}[backend]
     source = ModelHubSourceConfig(
         id="src_observed01", kind="api_key", vendor=vendor, display_name="Discovered supplier",
-        protocol=protocol, supply_channel="hub", billing="metered", credential_ref="cred_observed01",
+        protocol=protocol_override or protocol, supply_channel="hub", billing="metered", credential_ref="cred_observed01",
         state=ModelHubSourceStateConfig(status="standby"), last_discovered_at="2026-11-27T10:00:00Z",
-        models=[ModelHubModelConfig(id=mid, provenance="discovered", display_name=label) for mid in ids],
+        models=[ModelHubModelConfig(id=mid, provenance="discovered", display_name=label,
+                                    discovered_at="2026-11-27T10:00:00Z") for mid in ids],
     )
     config = service.store.config
     config.sources = [source]
@@ -3177,6 +3195,7 @@ def _discovered_chat_supply(service, backend, ids, *, label=None):
     rows = {mid: {"name": label or mid, "tool_call": True,
                   "modalities": {"input": ["text"], "output": ["text"]}} for mid in ids}
     service.models_dev_catalog = lambda: {vendor: {"name": vendor, "models": rows}}
+    asyncio.run(service._publish_complete_listing(source, [DiscoveredModel(id=mid) for mid in (ids if listed_ids is None else listed_ids)]))
     return source
 
 
@@ -3410,6 +3429,7 @@ def test_a_native_source_cannot_reoffer_a_hidden_retired_builtin(tmp_path):
         credential_ref="cred_native0001",
     )
     store.config.sources = [source]
+    _publish_test_listing(service, source, "claude-opus-4", "claude-opus-4-8")
     agent = store.config.agents["claude"]
     agent.sources.order = [source.id]
     agent.models = [
@@ -3439,6 +3459,7 @@ def test_a_native_source_cannot_reoffer_a_removed_retired_builtin(tmp_path):
         credential_ref="cred_native0002",
     )
     store.config.sources = [source]
+    _publish_test_listing(service, source, "claude-opus-4")
     agent = store.config.agents["claude"]
     agent.sources.order = [source.id]
     agent.models = [ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin")]
@@ -3577,6 +3598,7 @@ def test_model_producers_emit_admissible_backend_payloads(
             credential_ref="cred_metadata01",
         )
         store.config.sources = [source]
+        _publish_test_listing(service, source, admitted_id)
         store.config.agents["codex"].sources.order = [source.id]
         monkeypatch.setattr(
             service,
@@ -3739,15 +3761,18 @@ def test_claude_reconcile_ignores_cli_overrides_without_matching_hub_supply(monk
 def test_hub_offers_use_assigned_observed_supply_and_opencode_wire_protocol(tmp_path):
     service, store, _ = _service(tmp_path)
     eligible, unfit, manual = "gpt-source-chat", "gpt-embedding-only", "gpt-manual-only"
-    source = _discovered_chat_supply(service, "codex", [eligible, unfit, manual])
-    source.protocol = "anthropic"  # A relay listing an OpenAI model on Messages.
+    source = _discovered_chat_supply(service, "codex", [eligible, unfit, manual],
+                                     protocol_override="anthropic", listed_ids=[eligible, unfit])
     source.models[-1].provenance = "manual"
+    source.models[-1].discovered_at = None
     catalog = service.models_dev_catalog()
     catalog["openai"]["models"][unfit]["tool_call"] = False
     for backend in ("opencode", "claude", "vibey"):
         store.config.agents[backend].sources.order = [source.id]
     original_vibey = [m.id for m in store.config.agents["vibey"].models]
-    assert [m["id"] for m in service.vibey_hint_candidates()] == [eligible]
+    [hint] = service.vibey_hint_candidates()
+    assert hint["id"] == eligible
+    assert hint["expected_suppliers"] == {eligible: [{"source_id": source.id, "model_id": eligible}]}
     before_claude = [m.id for m in store.config.agents["claude"].models]
     asyncio.run(service.reconcile_builtin_models())
     config = store.config
@@ -3755,12 +3780,232 @@ def test_hub_offers_use_assigned_observed_supply_and_opencode_wire_protocol(tmp_
     assert [m.id for m in config.agents["vibey"].models] == original_vibey
     opencode = {m.id: m.native_protocol for m in config.agents["opencode"].models}
     assert opencode[eligible] == "anthropic"
+    in_list = service.agent_model_candidates("opencode")["in_list"]
+    assert next(m for m in in_list if m["id"] == eligible)["native_protocol"] == "anthropic"
     assert unfit not in opencode and manual not in opencode
     assert eligible not in {m.id for m in config.agents["claude"].models}
     config.sources[0].protocol = "openai_chat"
     config.agents["opencode"].models.clear()
     assert asyncio.run(service.reconcile_builtin_models(("opencode",))) == []
     assert not config.agents["opencode"].models
+
+
+def test_unreadable_evidence_does_not_reclassify_auto_rows_or_overwrite_recovery_bytes(tmp_path):
+    service, store, _ = _service(tmp_path)
+    mid = "gpt-source-owned"
+    source = _discovered_chat_supply(service, "codex", [mid])
+    store.config.agents["codex"].models = [ModelHubBackendModelConfig(id="manual-choice", origin="manual")]
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+    damaged = tmp_path / "model_hub_menu_evidence.json"
+    damaged.write_bytes(b"{unreadable test fixture")
+    restarted, _, _ = _service(tmp_path)
+    restarted.store = store
+    assert [row["id"] for row in restarted.backend_catalog_models("codex")] == ["manual-choice"]
+    assert mid in {row.id for row in store.config.agents["codex"].models}
+    assert restarted.list_sources()[0]["models"] == []
+    assert asyncio.run(restarted.reconcile_builtin_models(("codex",))) == []
+    _publish_test_listing(restarted, source, mid)
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(restarted.set_agent_models("codex", [], []))
+    assert refusal.value.code == "config_recovery"
+    assert damaged.read_bytes() == b"{unreadable test fixture"
+
+
+@pytest.mark.parametrize("change", ["replace", "retarget"])
+def test_new_generation_without_listing_keeps_routes_but_not_the_old_accounts_menu(tmp_path, change):
+    service, store, adapter = _service(tmp_path)
+    old_id = "gpt-account-a-only"
+    source = _discovered_chat_supply(service, "codex", [old_id])
+    store.config.agents["vibey"].sources.order = [source.id]
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+    assert old_id in {row["id"] for row in service.backend_catalog_models("codex")}
+    assert old_id in {row["id"] for row in service.vibey_hint_candidates()}
+
+    async def unlistable(*args, **kwargs):
+        return ApiKeyModelsCheck(authenticated=True, models=None)
+
+    adapter.check_api_key_models = unlistable
+    result = asyncio.run(service.replace_credential(source.id, {"key": "fixture-new-key"}) if change == "replace"
+                         else service.patch_source(source.id, {"base_url": "https://other.example.test/v1"}))
+    assert result["source"]["models"] == []
+    current = store.load().sources[0]
+    assert current.credential_generation != source.credential_generation
+    assert [row.id for row in current.models] == [old_id]
+    assert old_id not in {row["id"] for row in service.backend_catalog_models("codex")}
+    assert old_id not in {row["id"] for row in service.vibey_hint_candidates()}
+    assert current.credential_ref not in adapter.revoked
+
+
+@pytest.mark.parametrize("change", ["replace", "retarget"])
+def test_menu_evidence_write_failure_never_revokes_a_committed_credential(tmp_path, monkeypatch, change):
+    from core.handlers.model_hub.menu_evidence import MenuEvidence
+
+    service, store, adapter = _service(tmp_path)
+    source = _discovered_chat_supply(service, "codex", ["gpt-same-listed-id"])
+
+    async def same_listing(*args, **kwargs):
+        return ApiKeyModelsCheck(authenticated=True, models=(DiscoveredModel(id="gpt-same-listed-id"),))
+
+    def fail_sidecar(*args):
+        raise OSError("test-owned sidecar unavailable")
+
+    adapter.check_api_key_models = same_listing
+    monkeypatch.setattr(MenuEvidence, "save", fail_sidecar)
+    with pytest.raises(OSError, match="test-owned sidecar"):
+        asyncio.run(service.replace_credential(source.id, {"key": "fixture-new-key"}) if change == "replace"
+                    else service.patch_source(source.id, {"base_url": "https://other.example.test/v1"}))
+    current = store.load().sources[0]
+    assert current.credential_ref != source.credential_ref
+    assert current.credential_ref not in adapter.revoked
+    assert source.credential_ref in adapter.revoked
+    assert service.list_sources()[0]["models"] == []
+
+
+def test_hint_supplier_echo_rejects_withdrawal_even_when_route_still_exists(tmp_path):
+    service, store, _ = _service(tmp_path)
+    mid = "gpt-hint-guard"
+    source = _discovered_chat_supply(service, "codex", [mid])
+    store.config.agents["vibey"].sources.order = [source.id]
+    [hint] = service.vibey_hint_candidates()
+    expected = hint.pop("expected_suppliers")
+    assert expected == {mid: [{"source_id": source.id, "model_id": mid}]}
+    _publish_test_listing(service, source)
+    assert [row.id for row in source.models] == [mid]
+    before = service.backend_catalog_models("vibey")
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.set_agent_models("vibey", before, [*before, hint], expected_suppliers=expected))
+    assert refusal.value.code == "candidate_suppliers_changed"
+    assert refusal.value.data == {"changed": {mid: []}}
+    assert service.backend_catalog_models("vibey") == before
+
+
+def test_opencode_auto_import_checks_the_dormant_route_before_choosing_protocol(tmp_path):
+    service, store, _ = _service(tmp_path)
+    mid = "gpt-multi-wire"
+    first = _discovered_chat_supply(service, "codex", [mid])
+    second = copy.deepcopy(first)
+    second.id, second.credential_ref, second.protocol = "src_alternate01", "cred_alternate01", "anthropic"
+    store.config.sources.append(second)
+    agent = store.config.agents["opencode"]
+    agent.sources.order = [first.id, second.id]
+    agent.routes[mid] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(second.id, mid),))
+    assert service._source_menu_offers(store.config, "opencode") == []  # only first is confirmed
+    _publish_test_listing(service, second, mid)
+    [offer] = service._source_menu_offers(store.config, "opencode")
+    assert (offer.id, offer.native_protocol) == (mid, "anthropic")
+    asyncio.run(service.reconcile_builtin_models(("opencode",)))
+    current = next(row for row in service.agent_model_candidates("opencode")["in_list"] if row["id"] == mid)
+    assert current["native_protocol"] == "anthropic"
+    assert [item["source_id"] for item in current["suppliers"]] == [second.id]
+
+
+def test_confirmed_withdrawal_notifies_runtime_without_removing_saved_row(tmp_path):
+    service, store, _ = _service(tmp_path)
+    source = _discovered_chat_supply(service, "codex", ["gpt-notified"])
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+    calls = []
+    service.source_inventory_changed = lambda: calls.append("schedule")
+
+    async def refresh(backend):
+        calls.append(backend)
+
+    service.backend_catalog_changed = refresh
+    _publish_test_listing(service, source)
+    assert calls == ["schedule"]
+    assert asyncio.run(service.reconcile_builtin_models(("codex",))) == []
+    assert calls == ["schedule", "codex"]
+    assert "gpt-notified" in {row.id for row in store.config.agents["codex"].models}
+    assert "gpt-notified" not in {row["id"] for row in service.backend_catalog_models("codex")}
+    _publish_test_listing(service, source)
+    assert calls == ["schedule", "codex"]
+
+
+def test_offline_opencode_menu_uses_same_withdrawal_as_controller(tmp_path, monkeypatch):
+    from config import paths
+    from core.handlers.model_hub.service import load_opencode_public_models
+
+    service, store, _ = _service(tmp_path)
+    source = _discovered_chat_supply(service, "codex", ["gpt-tool-model"])
+    store.config.agents["opencode"].sources.order = [source.id]
+    monkeypatch.setattr(paths, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: tmp_path / "absent.sqlite")
+    asyncio.run(service.reconcile_builtin_models(("opencode",)))
+    assert "gpt-tool-model" in load_opencode_public_models(store.config)
+    _publish_test_listing(service, store.config.sources[0])
+    assert "gpt-tool-model" not in service.opencode_public_models()
+    assert load_opencode_public_models(store.config) == service.opencode_public_models()
+    assert "gpt-tool-model" in {row.id for row in store.config.agents["opencode"].models}
+    assert not (tmp_path / "absent.sqlite").exists()
+
+
+def test_explicit_restore_of_a_bundled_fallback_survives_empty_inventory_and_restart(tmp_path):
+    service, store, _ = _service(tmp_path)
+    source = _discovered_chat_supply(service, "codex", [])
+    saved_row = store.config.agents["codex"].models[0]
+    assert saved_row.origin == "builtin"
+    assert service.backend_catalog_models("codex") == []
+    asyncio.run(service.set_agent_models("codex", [], [saved_row.to_payload()]))
+    assert [row["id"] for row in service.backend_catalog_models("codex")] == [saved_row.id]
+    # Publishing a new complete listing must not reset ownership to automatic.
+    _publish_test_listing(service, source, "gpt-another")
+    _publish_test_listing(service, source)
+    restarted, _, _ = _service(tmp_path)
+    restarted.store = store
+    assert [row["id"] for row in restarted.backend_catalog_models("codex")] == [saved_row.id]
+
+
+def test_automatic_rows_follow_current_generation_without_destroying_choices(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "gpt-current-generation"
+    _discovered_chat_supply(service, "codex", [model_id])
+    manual = ModelHubBackendModelConfig(id="manual-choice", origin="manual")
+    store.config.agents["codex"].models = [manual]
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    def visible():
+        return [row["id"] for row in service.backend_catalog_models("codex")]
+
+    source = store.config.sources[0]
+    source.state = ModelHubSourceStateConfig(status="error", detail_key="models.source.error.unclassified")
+    assert visible() == [manual.id, model_id]  # failure is not an empty listing
+    asyncio.run(service._publish_complete_listing(source, []))
+    assert visible() == [manual.id]
+    assert [row.id for row in store.config.agents["codex"].models] == [manual.id, model_id]
+    service.named_agents_override = lambda _: [("research", model_id)]
+    assert visible() == [manual.id, model_id]
+    service.named_agents_override = None
+    asyncio.run(service._publish_complete_listing(source, [DiscoveredModel(id=model_id)]))
+    assert visible() == [manual.id, model_id]
+    restarted, _, _ = _service(tmp_path)
+    restarted.store = store
+    assert [r["id"] for r in restarted.backend_catalog_models("codex")] == visible()
+    source.credential_generation = "vp_" + "b" * 32
+    assert [r["id"] for r in restarted.backend_catalog_models("codex")] == [manual.id]
+    assert [row.id for row in source.models] == [model_id]  # compatibility, never cross-account evidence
+
+
+def test_partial_rediscovery_does_not_promote_legacy_routes_to_inventory(tmp_path):
+    service, store, _ = _service(tmp_path)
+    old, live = "gpt-routing-only", "gpt-actually-listed"
+    source = _discovered_chat_supply(service, "codex", [old, live])
+    source.kind, source.billing = "subscription", "monthly"
+    source.created_at = source.last_discovered_at
+    source.models = source.models[:1]
+    source.models[0].discovered_at = source.created_at  # released migration stamp
+    store.config.agents["vibey"].sources.order = [source.id]
+    # This is the additive background path, not the manual complete replacement.
+    store.config.enabled = True
+    async def list_current(_source, *, start_engine):
+        assert not start_engine
+        return [DiscoveredModel(id=live)]
+
+    service._discover = list_current
+    asyncio.run(service._refresh_source_in_background(source.id))
+    assert [row.id for row in store.config.sources[0].models] == [old, live]  # route still exists
+    assert [row["id"] for row in service.vibey_hint_candidates()] == [live]
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+    ids = {row.id for row in store.config.agents["codex"].models}
+    assert live in ids and old not in ids
 
 
 def test_hub_menu_changes_on_source_discovery_not_builtin_generation(monkeypatch, tmp_path):
@@ -5421,7 +5666,7 @@ async def _shorten_chain_past_a_newer_family_member(service):
 async def _reconcile_builtin_supplied_model(service):
     service.store.config.sources[0].last_discovered_at = "2026-11-27T10:00:00Z"
     service.store.config.sources[0].models.append(
-        ModelHubModelConfig(id="claude-extra-model", provenance="discovered")
+        ModelHubModelConfig(id="claude-extra-model", provenance="discovered", discovered_at="2026-11-27T10:00:00Z")
     )
     service.models_dev_catalog = lambda: {"anthropic": {"models": {"claude-extra-model": {
         "name": "New chat", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
@@ -7572,6 +7817,7 @@ def test_discovered_source_model_delete_persists_retirement_tombstone(
         credential_ref="cred_discovered01",
     )
     store.config.sources.append(source)
+    _publish_test_listing(service, source, "gpt-5")
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -7904,7 +8150,8 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
         assert persisted.state.status == "standby"
         committed = store.load().sources[0]
         assert committed.state.status == "needs_action"
-        assert committed.models == []
+        assert [row.id for row in committed.models] == ["claude-opus-4-6"]
+        assert service.list_sources()[0]["models"] == []
         return await original_start_reauth(source_id, vendor)
 
     adapter.start_reauth = assert_source_unavailable_before_logout
@@ -7919,7 +8166,11 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
     assert flow["intent"] == "reauth"
     assert adapter.oauth_start_calls == [(native.id, "anthropic")]
     assert store.config.sources[0].state.status == "needs_action"
-    assert store.config.sources[0].models == []
+    from core.handlers.model_hub.resolver import inspect_exact_hop
+
+    hop = ModelHubRouteHopConfig(native.id, "claude-opus-4-6")
+    assert not inspect_exact_hop(store.load(), "claude", hop.model_id, hop).runnable
+    assert service.list_sources()[0]["models"] == []
 
     adapter.native_account_label = "claude@example.test"
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
@@ -7945,6 +8196,9 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
     assert completed["recovered"] is False
     assert completed["source"]["account_label"] == "claude@example.test"
     assert completed["source"]["state"]["status"] == "standby"
+    assert completed["source"]["models"] == []
+    assert [row.id for row in store.load().sources[0].models] == ["claude-opus-4-6"]
+    assert inspect_exact_hop(store.load(), "claude", hop.model_id, hop).runnable
 
 
 def test_native_reauth_reuses_pending_flow_per_source(tmp_path):
@@ -7995,6 +8249,10 @@ def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path
         ],
     )
     store.config.sources.append(source)
+    # Pin the fixture's menu; neither the active release catalog nor a future
+    # new alias should change which interrupted selections this test checks.
+    store.config.agents["claude"].models = [ModelHubBackendModelConfig(id=mid, origin="builtin")
+                                          for mid in ("claude-opus-4-6", "opus", "opus[1m]")]
     _refresh_fixture_routes(store.config)
     store.requested_model = lambda backend: ("claude-opus-4-6" if backend == "claude" else "")
     service.named_agents_override = lambda backend: ([("claude", "claude-opus-4-6")] if backend == "claude" else [])
@@ -8024,9 +8282,12 @@ def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path
             "backend": "claude",
             "model_id": "claude-opus-4-6",
             "agents": ["claude"],
-        }
+        },
+        {"backend": "claude", "model_id": "opus", "agents": []},
+        {"backend": "claude", "model_id": "opus[1m]", "agents": []},
     ]
-    assert store.config.sources[0].models == []
+    assert [row.id for row in store.config.sources[0].models] == ["claude-opus-4-6"]
+    assert service.list_sources()[0]["models"] == []
     assert store.config.sources[0].state.status == "error"
 
 
@@ -8067,7 +8328,8 @@ def test_native_reauth_registry_failure_keeps_irreversible_state_honest(
 
     assert exc_info.value.code == "engine_down"
     assert adapter.oauth_start_calls == [(source.id, "anthropic")]
-    assert store.config.sources[0].models == []
+    assert [row.id for row in store.config.sources[0].models] == ["claude-opus-4-6"]
+    assert service.list_sources()[0]["models"] == []
     assert store.config.sources[0].state.status == "needs_action"
     assert adapter.cancelled == [next(iter(adapter.flows))]
 

@@ -124,6 +124,8 @@ async def dispatch_model_hub_rpc(
             service.get_agent_sources,
             backend,
         )
+    if operation == "vibey_hint_candidates":
+        return await asyncio.to_thread(service.vibey_hint_candidates)
     if operation == "agent_model_candidates":
         service.request_inventory_refresh()
         # Opening Add is a read, not a native CLI probe or a catalog write.

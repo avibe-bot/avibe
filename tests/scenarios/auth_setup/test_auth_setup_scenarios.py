@@ -3039,7 +3039,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             harness.store.config.sources[0].state.detail_key,
             "models.source.needs_action.oauth_expired",
         )
-        self.assertEqual(harness.store.config.sources[0].models, [])
+        self.assertIsNone(harness.store.config.sources[0].last_discovered_at)
+        self.assertEqual([row.id for row in harness.store.config.sources[0].models], ["claude-opus-4-6"])
+        self.assertEqual(harness.service.get_agent_sources("claude")["supply_status"], "interrupted")
 
         harness.agent_auth.timeout(flow_id)
         failed = await harness.service.oauth_status(flow_id)
@@ -3104,7 +3106,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         flow_id = first["flow"]["flow_id"]
         self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
         self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
-        self.assertEqual(harness.store.config.sources[0].models, [])
+        self.assertIsNone(harness.store.config.sources[0].last_discovered_at)
+        self.assertEqual([row.id for row in harness.store.config.sources[0].models], ["claude-opus-4-6"])
+        self.assertEqual(harness.service.get_agent_sources("claude")["supply_status"], "interrupted")
 
         reused = await harness.service.reauth_source(source.id, ack)
         self.assertEqual(reused["flow"]["flow_id"], flow_id)
@@ -3126,7 +3130,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             [("claude", True), ("claude", True)],
         )
         self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
-        self.assertEqual(harness.store.config.sources[0].models, [])
+        self.assertIsNone(harness.store.config.sources[0].last_discovered_at)
+        self.assertEqual([row.id for row in harness.store.config.sources[0].models], ["claude-opus-4-6"])
+        self.assertEqual(harness.service.get_agent_sources("claude")["supply_status"], "interrupted")
 
         # 3. The same call against a FINISHED flow is not a cancel at all: it
         #    materializes the re-auth. Nothing polls the status first, so this call

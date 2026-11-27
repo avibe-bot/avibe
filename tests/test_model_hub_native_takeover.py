@@ -152,7 +152,11 @@ def test_takeover_seeds_a_pending_vibey_entry_from_its_whole_batch(monkeypatch, 
         # Placed like a new Source; the user's catalog is not seeded again.
         assert (vibey.sources.order, vibey.models, announced) == (serving, [], [])
         return
-    assert (vibey.sources.order, [model.id for model in vibey.models]) == (serving, starting)
+    # Takeover imports routes for compatibility, not an account inventory.
+    # Assert the retained targets separately: neither those targets nor a
+    # saved native selection authorizes putting a model in Vibey's menu.
+    assert set(starting) <= {row.id for source in store.config.sources for row in source.models}
+    assert (vibey.sources.order, vibey.models) == (serving, [])
     assert announced == ["vibey"]
 
 

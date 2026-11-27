@@ -3520,6 +3520,47 @@ def test_long_inventory_identity_reaches_runtime_config_and_http_consumer(
         asyncio.run(run(base_url, handler))
 
 
+@pytest.mark.parametrize("tail", [None, {"data": [{"id": "second"}, {}]}, {"data": [], "has_more": True, "last_id": "first"}])
+def test_anthropic_inventory_only_returns_after_the_last_complete_page(monkeypatch, tail):
+    from contextlib import asynccontextmanager
+
+    seen = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        @asynccontextmanager
+        async def get(self, url, *, params, headers, allow_redirects, timeout):
+            assert not allow_redirects
+            seen.append((url, params))
+            body = ({"data": [{"id": "first"}], "has_more": True, "last_id": "first"}
+                    if not params else tail or {"data": [{"id": "second"}], "has_more": False})
+            buffer = io.BytesIO(json.dumps(body).encode())
+
+            class Response:
+                status = 200
+                content = property(lambda self: self)
+
+                async def read(self, size):
+                    return buffer.read(size)
+
+            yield Response()
+
+    monkeypatch.setattr(client_module.aiohttp, "ClientSession", Session)
+    call = client_module.probe_models(vendor="custom", protocol="anthropic", base_url="https://api.example.test/v1", secret="fixture")
+    if tail is None:
+        assert [m.id for m in asyncio.run(call)] == ["first", "second"]
+    else:
+        with pytest.raises(client_module.EngineClientError):
+            asyncio.run(call)
+    assert [params for _, params in seen] == [{}, {"after_id": "first"}]
+    assert seen[0][0] == seen[1][0]
+
+
 def test_model_inventory_duplicate_top_level_members_replace_earlier_values() -> None:
     projected = client_module._project_model_inventory(
         io.BytesIO(

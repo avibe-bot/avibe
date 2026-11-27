@@ -32,7 +32,7 @@ from config.v2_config import (
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
-from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.adapter import DiscoveredModel, RawOutcomeKind
 from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
@@ -551,6 +551,7 @@ async def test_vibey_candidate_capabilities_survive_catalog_admission_without_gu
     if metadata == "source":
         source.models[0].reasoning_efforts = ["high"]
     service = _vibey_service(tmp_path, [source])
+    await service._publish_complete_listing(source, [DiscoveredModel(id="claude-unknown")])
     service.store.config.agents["vibey"].models = []
     service.store.config.agents["vibey"].routes = {}
     service.models_dev_catalog = lambda: (
@@ -1033,6 +1034,19 @@ SEED_CATALOG = {"anthropic": {"name": "Anthropic", "models": {
 }}}
 
 
+async def _commit_listed_seed_source(service, source):
+    source = copy.deepcopy(source)
+    listing = [DiscoveredModel(id=row.id) for row in source.models]
+    await service._commit_new_source_locked(source, discovered=listing)
+    await service._publish_complete_listing(source, listing)
+
+
+async def _observe_seed_listings(service, answers):
+    for source in service.store.load().sources:
+        if source.id in answers:
+            await service._publish_complete_listing(source, [DiscoveredModel(id=mid) for mid in answers[source.id]])
+
+
 def _seed_service(tmp_path, payload, selections):
     """A service over persisted state, with the controller's two Agent-row hooks."""
     service = _service(tmp_path, sources=[])
@@ -1083,6 +1097,10 @@ async def test_vibey_agent_predating_its_supply_starts_with_the_users_providers_
         "sources": [source.to_payload() for source in sources],
         "agents": {backend: agent.to_payload() for backend, agent in agents.items()},
     }, selections)
+    await _observe_seed_listings(service, {
+        SEED_ANTHROPIC.id: ["claude-opus-5-5", "claude-sonnet-5-5"], SEED_RESPONSES.id: ["gpt-5.6-sol"],
+        SEED_CHAT.id: ["模型/β"], SEED_SUBSCRIPTION.id: ["gpt-5.6-sol"],
+    })
     # An unrelated write ahead of the seed (a startup reconcile, a settings
     # save) must not record the empty placeholder as the user's entry.
     store.save(store.load())
@@ -1145,7 +1163,7 @@ async def test_fresh_install_seeds_vibey_with_its_first_source(tmp_path, first, 
     assert "vibey" not in store.payload["agents"]
     assert announced == []
 
-    await service._commit_new_source_locked(copy.deepcopy(first))
+    await _commit_listed_seed_source(service, first)
     vibey = store.payload["agents"]["vibey"]
     assert vibey["sources"]["order"] == [first.id]
     assert [model["id"] for model in vibey["models"]] == seeded
@@ -1155,7 +1173,7 @@ async def test_fresh_install_seeds_vibey_with_its_first_source(tmp_path, first, 
     )
 
     # Seeded once: a later Source is placed like any other, and nothing re-seeds.
-    await service._commit_new_source_locked(copy.deepcopy(SEED_CHAT))
+    await _commit_listed_seed_source(service, SEED_CHAT)
     vibey = store.payload["agents"]["vibey"]
     assert vibey["sources"]["order"] == [first.id, SEED_CHAT.id]
     assert [model["id"] for model in vibey["models"]] == seeded
@@ -1201,6 +1219,7 @@ async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capabl
     ]
     service, store, _announced = _seed_service(tmp_path, payload, selections)
     service.models_dev_catalog = lambda: TOOL_CATALOG
+    await _observe_seed_listings(service, dict(sources))
 
     assert await service.seed_vibey_supply() == seeded
 
@@ -1230,7 +1249,7 @@ async def test_the_first_source_seed_fetches_a_models_dev_copy_when_none_is_cach
         return copy_on_disk
 
     monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", fetch_first_copy)
-    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    await _commit_listed_seed_source(service, SEED_ANTHROPIC)
     [row] = store.payload["agents"]["vibey"]["models"]
     assert (row["id"], row["context_window"], row["max_output_tokens"]) == ("claude-opus-5-5", 1_000_000, 128_000)
 
@@ -1274,7 +1293,7 @@ async def test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limi
         raise RuntimeError("models.dev catalog is unavailable")
 
     monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", foreground_fetch_fails)
-    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    await _commit_listed_seed_source(service, SEED_ANTHROPIC)
     [seeded] = store.payload["agents"]["vibey"]["models"]
     assert (seeded["id"], seeded["context_window"], seeded["max_output_tokens"]) == ("claude-opus-5-5", None, None)
     assert announced == ["vibey"]
@@ -1958,6 +1977,7 @@ async def test_vibey_offers_and_starts_on_the_flagship_rather_than_a_listings_fi
     ]
     service, store, _announced = _seed_service(tmp_path, payload, [("codex", "gpt-6-astra")])
     service.models_dev_catalog = lambda: FLAGSHIP_CATALOG
+    await _observe_seed_listings(service, {"src_flagship01": FLAGSHIP_LISTING})
 
     assert await service.seed_vibey_supply() == ["claude-fable-5-2"]
     providers = [candidate["id"] for candidate in service.agent_model_candidates("vibey")["providers"]]

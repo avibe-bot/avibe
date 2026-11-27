@@ -264,6 +264,7 @@ from .resolver import (
     validate_cache_ttl_override,
 )
 from .revocations import CredentialRevocationJournal, PendingCredentialRevocation, RevocationOperation
+from .menu_evidence import MenuEvidence
 from .retry import (
     RECOVERY_ADMISSION_MARGIN_SECONDS,
     RECOVERY_EXHAUSTED_CODE,
@@ -1229,12 +1230,15 @@ def _project_opencode_public_models(
     *,
     now: datetime,
     unavailable_source_ids: frozenset[str] = frozenset(),
+    hidden_ids: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Any]]:
     agent = config.agents["opencode"]
     if agent.mode == "direct":
         return {}
     projected: dict[str, dict[str, Any]] = {}
     for model in agent.models:
+        if model.id in hidden_ids:
+            continue
         if model.native_protocol not in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL:
             raise ValueError("OpenCode model native_protocol is invalid")
         public_model = project_opencode_public_model(model)
@@ -1248,10 +1252,27 @@ def load_opencode_public_models(
 ) -> dict[str, dict[str, Any]]:
     """Return the credential-free OpenCode projection for local callers."""
 
-    return _project_opencode_public_models(
-        config if config is not None else V2ModelHubConfigStore().load(),
-        now=_utc_now(),
-    )
+    config = config if config is not None else V2ModelHubConfigStore().load()
+    if config.agents["opencode"].mode == "direct":
+        return {}
+    evidence = MenuEvidence.load(paths.get_state_dir() / "model_hub_menu_evidence.json")
+    hidden = evidence.hidden(config, "opencode", set())
+    if hidden and paths.get_sqlite_state_path().is_file():
+        # This reader also works without a controller. Never open a writer or
+        # probe OpenCode to decide whether a saved agent selected a hidden row.
+        from core.vibe_agents import VibeAgentStore
+
+        agents = VibeAgentStore(read_only=True)
+        try:
+            menu_ids = {row.id for row in config.agents["opencode"].models}
+            hidden.difference_update(
+                opencode_menu_model_id(agent.model, menu_ids)
+                for agent in agents.list_agents(include_disabled=False)
+                if agent.backend == "opencode" and agent.model
+            )
+        finally:
+            agents.close()
+    return _project_opencode_public_models(config, now=_utc_now(), hidden_ids=frozenset(hidden))
 
 
 def _source_id() -> str:
@@ -1663,6 +1684,14 @@ class ModelHubService:
         opaque_provenance: OpaqueProvenanceRegistry | None = None,
     ):
         self.source_inventory_changed = source_inventory_changed
+        self._menu_evidence_path = events.path.parent / "model_hub_menu_evidence.json"
+        self._menu_evidence_damaged = False
+        try:
+            self._menu_evidence = MenuEvidence.load(self._menu_evidence_path)
+        except (KeyError, OSError, ValueError, TypeError):
+            logger.warning("Model Hub menu evidence is unreadable; preserving file and routing configuration")
+            self._menu_evidence = MenuEvidence()
+            self._menu_evidence_damaged = True
         self.store = store
         self.adapter = adapter
         self.events = events
@@ -2403,7 +2432,7 @@ class ModelHubService:
         if previous_bindings == updated_bindings:
             await self._save_config(updated)
             if menu_inputs_changed:
-                self.source_inventory_changed()
+                self._source_menu_inputs_changed(previous, updated, self._menu_evidence)
             return
         self._engine_synced = False
         await self._save_config(updated)
@@ -2427,6 +2456,17 @@ class ModelHubService:
             raise
         self._engine_synced = True
         if menu_inputs_changed:
+            self._source_menu_inputs_changed(previous, updated, self._menu_evidence)
+
+    def _source_menu_inputs_changed(
+        self, previous: ModelHubConfig, current: ModelHubConfig, previous_evidence: MenuEvidence,
+    ) -> None:
+        # Falling out of the picker changes the runtime catalog even when the
+        # route row stays in config. Reuse the retryable catalog notification.
+        for backend in MODEL_HUB_NATIVE_BACKENDS:
+            if previous_evidence.hidden(previous, backend, set()) != self._menu_evidence.hidden(current, backend, set()):
+                self._pending_builtin_catalog_refresh.add(backend)
+        if self.source_inventory_changed is not None:
             self.source_inventory_changed()
 
     async def _ensure_engine_synced(self) -> None:
@@ -3381,6 +3421,7 @@ class ModelHubService:
         *,
         previous: Optional[ModelHubConfig] = None,
         display_name_defaulted: bool = False,
+        discovered: list[DiscoveredModel] | None = None,
     ) -> None:
         previous = previous or self.store.load()
         config = self._clone_config(previous)
@@ -3398,7 +3439,11 @@ class ModelHubService:
         if source.protocol == "search":
             _maintain_search_service_order(config, source.id, add=True)
         self._apply_source_placement(config, source)
-        seeded = config.vibey_supply_pending and await self._seed_vibey(config)
+        seed_evidence = self._menu_evidence
+        if discovered is not None:
+            seed_evidence = self._evidence_with_listing(source, discovered)
+        seeded = (not self._menu_evidence_damaged and config.vibey_supply_pending
+                  and await self._seed_vibey(config, evidence=seed_evidence))
         await self._commit_synced(previous, config)
         if seeded:
             await self._announce_vibey_seed()
@@ -3536,6 +3581,15 @@ class ModelHubService:
         config: ModelHubConfig | None = None,
     ) -> dict:
         payload = source.to_payload()
+        # A saved route can outlive a listing or be inherited by a new
+        # credential. Only the present account's observed rows are discovery;
+        # keep deliberate entries and retirements available for management.
+        listed = self._menu_evidence.listed(source)
+        payload["models"] = [row for row in payload["models"] if (
+            row["id"] in (listed or ()) or row.get("origin") == "manual" or row.get("retired")
+        )]
+        if listed is None:
+            payload["last_discovered_at"] = None
         observed_at = self.now()
         for model in payload["models"]:
             model.setdefault("retired", False)
@@ -3562,17 +3616,15 @@ class ModelHubService:
         return payload
 
     def _source_creation_result(self, source: dict) -> dict:
-        source = dict(source)
-        for model in source["models"]:
-            model.setdefault("retired", False)
-        source = {
-            **source,
-            "adopted_by": self._adopted_by(source["id"]),
-        }
+        # A replayed create or OAuth receipt is also a Source read. Use the
+        # committed generation, not the compatibility inventory in the receipt.
+        config = self.store.load()
+        committed = self._source(config, source["id"])
+        projected = self._source_payload(committed, config)
         return {
-            "source": self._source_account_payload(source),
-            "added_to": self._added_to(source["id"]),
-            "adopted_by": self._adopted_by(source["id"]),
+            "source": projected,
+            "added_to": self._added_to(committed.id),
+            "adopted_by": projected["adopted_by"],
         }
 
     async def _create_oauth_source(
@@ -3776,8 +3828,11 @@ class ModelHubService:
                     source,
                     previous=previous,
                     display_name_defaulted=display_name_defaulted,
+                    discovered=discovered,
                 )
                 persisted = True
+                if discovered is not None:
+                    await self._publish_complete_listing(source, discovered)
                 try:
                     self.oauth_flows.complete(oauth_ref)
                 except (KeyError, OSError):
@@ -3928,11 +3983,10 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
-            source.models = [
-                model
-                for model in source.models
-                if model.provenance == "manual" or model.retired
-            ]
+            # These are persisted routing targets, not inventory. Unavailable
+            # state blocks calls; erasing targets would also break the same
+            # session after a successful renewal.
+            source.last_discovered_at = None
             source.account_label = None
             source.state = ModelHubSourceStateConfig(
                 status=status,
@@ -3992,9 +4046,8 @@ class ModelHubService:
                         detail_key="models.source.needs_action.oauth_expired",
                     )
                 )
-                # A re-login may have changed accounts. Keep deliberate entries and
-                # retirements, never promote the old account's list to the new one.
-                source.models = [m for m in source.models if m.provenance == "manual" or m.retired]
+                # Login grants no inventory. Existing compatibility routes
+                # remain exactly as saved; never reseed from the bundle.
                 source.last_discovered_at = None
                 await self._commit_synced(previous, config)
                 interrupted_pairs = self._would_interrupt(config)
@@ -4047,6 +4100,7 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
+                await self._publish_complete_listing(source, discovered)
                 self.quota.forget(source.id)
                 self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
@@ -4658,11 +4712,13 @@ class ModelHubService:
                     Literal["anthropic", "openai_responses", "openai_chat", "google"],
                     observation.protocol,
                 )
+            complete_listing: list[DiscoveredModel] | None = None
             if observation is not None and observation.discovery is ObservationDiscovery.SUCCEEDED:
+                complete_listing = list(observation.models)
                 self._apply_discovered_models(
                     source,
                     manual_models,
-                    list(observation.models),
+                    complete_listing,
                     allow_empty=True,
                 )
             else:
@@ -4699,6 +4755,7 @@ class ModelHubService:
                         pass
                     else:
                         source = candidate
+                        complete_listing = discovered
 
             # AC-29 requires the canonical Source validator to run before any
             # permanent credential is provisioned. The placeholder is never saved.
@@ -4760,9 +4817,12 @@ class ModelHubService:
                         pass
                     else:
                         source = candidate
+                        complete_listing = discovered
                 async with self._mutation_lock:
-                    await self._commit_new_source_locked(source)
+                    await self._commit_new_source_locked(source, discovered=complete_listing)
                     persisted = True
+                    if complete_listing is not None:
+                        await self._publish_complete_listing(source, complete_listing)
                 return self._source_creation_result(source.to_payload())
             except asyncio.CancelledError:
                 persisted = self._persisted_credential(
@@ -5044,6 +5104,10 @@ class ModelHubService:
                         self.revocations.remove(source.id, old_credential_ref)
                     except OSError:
                         pass
+            # Discovery evidence is not part of credential custody. An I/O
+            # error here must never roll back/revoke the already-committed key.
+            if not search_balance and discovered is not None:
+                await self._publish_complete_listing(source, discovered)
             return {
                 "source": self._source_payload(source),
                 "removed_hops": removed_hops,
@@ -5153,6 +5217,8 @@ class ModelHubService:
                         self.revocations.remove(source.id, old_credential_ref)
                     except OSError:
                         pass
+                if discovered is not None:
+                    await self._publish_complete_listing(source, discovered)
             else:
                 await self._commit_synced(previous, config)
             return {
@@ -5722,6 +5788,7 @@ class ModelHubService:
                     now=self.now(),
                 )
                 raise
+            await self._publish_complete_listing(source, model_ids)
             return {
                 "source": self._source_payload(source),
                 "removed_hops": removed_hops,
@@ -5975,6 +6042,7 @@ class ModelHubService:
                             "for Source %s to a manual refresh",
                             source_id,
                         )
+                await self._publish_complete_listing(source, discovered)
         except Exception as exc:
             self._record_background_discovery_failure(observed, exc)
             return
@@ -6042,11 +6110,52 @@ class ModelHubService:
 
     @staticmethod
     def _inventory_fingerprint(source: ModelHubSourceConfig) -> list[dict]:
-        # When a model was last listed is not inventory.
+        # The retained route list and the complete observed listing have distinct
+        # publication rules; neither observation nor withdrawal depends on a clock.
         return [
             {key: value for key, value in model.to_payload().items() if key != "discovered_at"}
             for model in source.models
         ]
+
+    def _evidence_with_listing(
+        self, source: ModelHubSourceConfig, discovered: list[DiscoveredModel],
+    ) -> MenuEvidence:
+        ids = []
+        for row in discovered:
+            model_id = canonical_model_id(row.id)
+            if model_id is None or contains_credential_material(model_id):
+                raise ModelHubError("discovery_failed", status=502)
+            ids.append(model_id)
+        staged = replace(self._menu_evidence, inventories=dict(self._menu_evidence.inventories))
+        staged.observe(source, ids)
+        return staged
+
+    async def _publish_complete_listing(self, source: ModelHubSourceConfig, discovered: list[DiscoveredModel]) -> None:
+        """Under the writer lock, after validation and any required config commit."""
+        if self._menu_evidence_damaged or source.supply_channel != "hub":
+            return
+        staged = self._evidence_with_listing(source, discovered)
+        if staged == self._menu_evidence:
+            return
+        previous_evidence = self._menu_evidence
+        await self._save_menu_evidence(staged)
+        if self.source_inventory_changed is not None:
+            config = self.store.load()
+            self._source_menu_inputs_changed(config, config, previous_evidence)
+
+    async def _save_menu_evidence(self, staged: MenuEvidence) -> None:
+        if self._menu_evidence_damaged:
+            raise ModelHubError("config_recovery", status=409)
+        if staged == self._menu_evidence:
+            return
+        worker = asyncio.create_task(asyncio.to_thread(staged.save, self._menu_evidence_path))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await await_owned_task(worker)
+            self._menu_evidence = staged
+            raise
+        self._menu_evidence = staged
 
     @staticmethod
     def _eligible_for_agent(source: ModelHubSourceConfig, backend: str) -> bool:
@@ -6325,9 +6434,9 @@ class ModelHubService:
 
     def _catalog_models_payload(
         self,
-        agent: ModelHubAgentSupplyConfig,
+        config: ModelHubConfig, agent: ModelHubAgentSupplyConfig,
     ) -> list[dict]:
-        hidden = self._hidden_retired_model_ids(agent)
+        hidden = self._hidden_menu_ids(config, agent)
         return [self._catalog_model_payload(model) for model in agent.models if model.id not in hidden]
 
     def _withdrawn_builtin_model_ids(self, backend: BackendName) -> set[str]:
@@ -6352,6 +6461,19 @@ class ModelHubService:
             return set()
         return retired - {item["id"] for item in self._current_builtin_models(backend)}
 
+    def _hidden_menu_ids(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> set[str]:
+        backend = cast(BackendName, agent.backend)
+        pinned = {self._requested_model(agent)}
+        if self.named_agents_override is not None:
+            pinned.update(self._menu_model_for_selection(agent, model)
+                          for _, model in self.named_agents_override(backend) if model)
+        if self._menu_evidence_damaged and agent.mode == "hub":
+            # Ownership is unknown; do not reclassify old automatic rows as
+            # manual. Preserve all saved rows for routing and explicit pins.
+            return {row.id for row in agent.models if row.origin in {"provider", "builtin"}
+                    and row.id not in pinned and normalized_model_hub_override(agent.routes.get(row.id)) is None}
+        return (self._hidden_retired_model_ids(agent) | self._menu_evidence.hidden(config, backend, pinned)) - pinned
+
     def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
         # A retired built-in stays persisted and routeable, so any session,
         # channel, or Agent pin keeps working; it only leaves picker
@@ -6374,7 +6496,7 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=404)
         config = self.store.load()
-        return self._catalog_models_payload(config.agents[backend])
+        return self._catalog_models_payload(config, config.agents[backend])
 
     def _agent_payload(
         self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig,
@@ -6387,7 +6509,7 @@ class ModelHubService:
         mutation responses are built on the controller loop.
         """
         backend = cast(BackendName, agent.backend)
-        hidden = self._hidden_retired_model_ids(agent)
+        hidden = self._hidden_menu_ids(config, agent)
         builtin_models = (
             [model.id for model in agent.models if model.id not in hidden]
             if agent.menu_kind == "fixed"
@@ -6549,22 +6671,43 @@ class ModelHubService:
                         else None
                     ),
                 }
-                for model in self._catalog_models_payload(agent)
+                for model in self._catalog_models_payload(config, agent)
             ],
             "builtin_models": builtin_models,
         }
+
+    def _confirmed_candidate_hops(
+        self, config: ModelHubConfig, backend: BackendName, model_id: str, *, automatic: bool = False,
+    ) -> tuple[ModelHubRouteHopConfig, ...]:
+        """Suppliers a prospective row can actually reach, including saved overrides."""
+        agent = config.agents[backend]
+        prospect = replace(config, agents={**config.agents, backend: replace(
+            agent, models=[ModelHubBackendModelConfig(id=model_id, origin="manual")],
+        )})
+        by_id = {s.id: s for s in config.sources if s.id in agent.sources.order}
+        return tuple(
+            hop for hop in effective_model_route(prospect, backend, model_id).hops
+            if (s := by_id.get(hop.source_id)) is not None
+            and self._eligible_for_agent(s, backend) and s.state.status != "needs_action"
+            and (not automatic or backend != "opencode" or s.protocol in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL)
+            and hop.model_id in (self._menu_evidence.listed(s) or ())
+            and any(row.id == hop.model_id and not row.retired for row in s.models)
+        )
 
     def _candidate_suppliers(
         self,
         config: ModelHubConfig,
         backend: BackendName,
         candidate_id: str,
+        *, confirmed: bool = False, automatic: bool = False,
     ) -> tuple[list[dict], Optional[str], list[str]]:
         source_by_id = {source.id: source for source in config.sources}
         suppliers: list[dict] = []
         display_name: Optional[str] = None
         reasoning_efforts: list[str] = []
-        for hop in self._matching_menu_model_hops(config, backend, candidate_id):
+        hops = (self._confirmed_candidate_hops(config, backend, candidate_id, automatic=automatic) if confirmed
+                else self._matching_menu_model_hops(config, backend, candidate_id))
+        for hop in hops:
             source = source_by_id[hop.source_id]
             model = next(
                 (
@@ -6618,7 +6761,10 @@ class ModelHubService:
 
     def vibey_hint_candidates(self) -> list[dict]:
         """Read eligible not-in-menu rows for the Owner hint; never equip a model on read."""
-        return [row.to_payload() for row in self._source_menu_offers(self.store.load(), "vibey")]
+        config = self.store.load()
+        offers = self._source_menu_offers(config, "vibey")
+        expected = self._project_expected_suppliers(config, "vibey", (row.id for row in offers))
+        return [{**row.to_payload(), "expected_suppliers": {row.id: expected[row.id]}} for row in offers]
 
     def _source_menu_offers(self, config: ModelHubConfig, backend: BackendName) -> list[ModelHubBackendModelConfig]:
         """Candidates for automatic addition (or a Vibey hint), not the manual Add catalog."""
@@ -6632,30 +6778,25 @@ class ModelHubService:
         listed = {}
         for sid in agent.sources.order:
             source = by_source.get(sid)
-            # Released OAuth takeovers stamped their bundled rows at the exact
-            # creation instant. Until a later credential inventory replaces
-            # that ambiguous snapshot, it may route but must not grow a menu.
-            if (source is not None and source.kind == "subscription" and source.created_at
-                and source.last_discovered_at == source.created_at):
-                continue
-            if (source is None or source.supply_channel != "hub" or source.last_discovered_at is None
-                or not self._eligible_for_agent(source, backend)
-                or source.state.status in {"needs_action", "error"}
+            if (source is None or not self._eligible_for_agent(source, backend)
+                or source.state.status == "needs_action"
                 or (backend == "opencode" and source.protocol not in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL)):
                 continue
+            observed_ids = self._menu_evidence.listed(source)
+            if not observed_ids:
+                continue
             for model in source.models:
-                if not model.retired and model.provenance == "discovered" and model.id not in excluded:
+                if not model.retired and model.id in observed_ids and model.id not in excluded:
                     listed.setdefault(model.id, source.protocol)
         descriptions = self._models_dev_descriptions(list(listed))
         rows = []
-        for model_id, protocol in listed.items():
+        for model_id in listed:
             match = descriptions.get(model_id)
             if (not match or not match.get("first_party") or match.get("match_kind") != "exact"
                 or not _described_as_fit_for_agent_turns(match)
-                or (backend in {"codex", "claude"} and _NATIVE_VENDOR_BACKENDS.get(match.get("provider_id")) != backend)):
+                or (backend in _FIXED_BACKEND_PROTOCOLS and _NATIVE_VENDOR_BACKENDS.get(match.get("provider_id")) != backend)):
                 continue
-            candidate = self._provider_candidate(config, backend, model_id, match,
-                                                 opencode_protocol=protocol if backend == "opencode" else None)
+            candidate = self._provider_candidate(config, backend, model_id, match, confirmed=True, automatic=True)
             if candidate is not None and candidate[1]:
                 rows.append(candidate[0])
         return rows
@@ -6667,7 +6808,8 @@ class ModelHubService:
         model_id: str,
         match: Mapping[str, Any] | None,
         *,
-        opencode_protocol: str | None = None,
+        confirmed: bool = False,
+        automatic: bool = False,
     ) -> tuple[ModelHubBackendModelConfig, list[dict], tuple[str, ...]] | None:
         """Build the catalog row a provider-supplied model is added as.
 
@@ -6681,7 +6823,14 @@ class ModelHubService:
             config,
             backend,
             model_id,
+            confirmed=confirmed,
+            automatic=automatic,
         )
+        opencode_protocol: Literal["anthropic", "openai_responses"] | None = None
+        if backend == "opencode" and suppliers and confirmed:
+            protocol = self._source(config, suppliers[0]["source_id"]).protocol
+            if protocol in ("anthropic", "openai_responses"):
+                opencode_protocol = protocol
         # Suppliers speak first, models.dev fills what they left unsaid, and
         # an unstated ladder falls back to the tiers the backend's request
         # protocol accepts, unless models.dev says the model cannot reason.
@@ -6734,7 +6883,7 @@ class ModelHubService:
                 return {}
             return {"native_protocol": native_protocol_for_model_id(model_id)}
 
-        menu_models = self._catalog_models_payload(agent)
+        menu_models = self._catalog_models_payload(config, agent)
         menu_ids = {model["id"] for model in menu_models}
         snapshot = self._current_builtin_models(agent_backend)
         builtin_ids: set[str] = set()
@@ -6765,6 +6914,7 @@ class ModelHubService:
                 config,
                 agent_backend,
                 admitted.id,
+                confirmed=True,
             )
             builtin.append(
                 {
@@ -6787,9 +6937,7 @@ class ModelHubService:
             source = source_by_id.get(source_id)
             if source is None or not self._eligible_for_agent(source, backend):
                 continue
-            for model in source.models:
-                if model.retired:
-                    continue
+            for model in self._observed_model_rows(source):
                 candidate_id = model.id
                 if (
                     candidate_id in withdrawn
@@ -6812,8 +6960,9 @@ class ModelHubService:
                 agent_backend,
                 model_id,
                 described.get(model_id),
+                confirmed=True,
             )
-            if candidate is None:
+            if candidate is None or not candidate[1]:
                 continue
             admitted, suppliers, enriched_fields = candidate
             providers.append(
@@ -6828,7 +6977,7 @@ class ModelHubService:
                         for field in enriched_fields
                     },
                     **({"match_kind": described[model_id]["match_kind"]} if enriched_fields else {}),
-                    **protocol_payload(admitted.id),
+                    **({"native_protocol": admitted.native_protocol} if backend == "opencode" else {}),
                 }
             )
         in_list = []
@@ -6837,6 +6986,7 @@ class ModelHubService:
                 config,
                 agent_backend,
                 model["id"],
+                confirmed=True,
             )
             provider_candidate = admissible_backend_model(
                 agent_backend,
@@ -6862,7 +7012,7 @@ class ModelHubService:
                         if suppliers and provider_candidate is not None
                         else None
                     ),
-                    **protocol_payload(model["id"]),
+                    **({"native_protocol": model["native_protocol"]} if backend == "opencode" else {}),
                 }
             )
         return {"builtin": builtin, "providers": providers, "in_list": in_list}
@@ -7025,7 +7175,9 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
-    async def _seed_vibey(self, config: ModelHubConfig, *, fetch_catalog: bool = True) -> bool:
+    async def _seed_vibey(
+        self, config: ModelHubConfig, *, fetch_catalog: bool = True, evidence: MenuEvidence | None = None,
+    ) -> bool:
         """Give a pending Vibey entry its starting supply, in place; whether it took.
 
         Its Sources are every existing one this backend may use, placed as a
@@ -7058,8 +7210,7 @@ class ModelHubService:
             model.id
             for source in config.sources
             if source.id in agent.sources.order
-            for model in source.models
-            if not model.retired
+            for model in self._observed_model_rows(source, evidence=evidence)
         }
         selections = self.builtin_agent_models_override() if self.builtin_agent_models_override else ()
         model_ids: list[str] = []
@@ -7090,13 +7241,17 @@ class ModelHubService:
             if candidate is not None:
                 rows.append(candidate[0])
         if not rows:
-            starting = self._vibey_starting_model(config, fetch_catalog=fetch_catalog)
+            starting = self._vibey_starting_model(config, fetch_catalog=fetch_catalog, evidence=evidence)
             rows = [starting] if starting is not None else []
         agent.models = rows
         return True
 
+    def _observed_model_rows(self, source: ModelHubSourceConfig, *, evidence: MenuEvidence | None = None):
+        ids = (evidence or self._menu_evidence).listed(source)
+        return (model for model in source.models if ids and model.id in ids and not model.retired)
+
     def _vibey_starting_model(
-        self, config: ModelHubConfig, *, fetch_catalog: bool = True,
+        self, config: ModelHubConfig, *, fetch_catalog: bool = True, evidence: MenuEvidence | None = None,
     ) -> ModelHubBackendModelConfig | None:
         """The one model a seed with no qualifying selection starts Vibey on, or ``None``.
 
@@ -7113,8 +7268,7 @@ class ModelHubService:
                 model.id
                 for source_id in config.agents["vibey"].sources.order
                 if (source := source_by_id.get(source_id)) is not None
-                for model in source.models
-                if not model.retired
+                for model in self._observed_model_rows(source, evidence=evidence)
             )
         )
         # The flagship among them when the built-in menus know one, so a new install
@@ -8391,7 +8545,7 @@ class ModelHubService:
         return {
             model_id: [
                 {"source_id": hop.source_id, "model_id": hop.model_id}
-                for hop in self._matching_menu_model_hops(
+                for hop in self._confirmed_candidate_hops(
                     config,
                     backend,
                     model_id,
@@ -8415,7 +8569,7 @@ class ModelHubService:
     ) -> list[BackendName]:
         changed = []
         for backend in backends:
-            if backend not in {"claude", "codex", "opencode"}:
+            if backend not in MODEL_HUB_NATIVE_BACKENDS:
                 continue  # Vibey only offers hints; it never imports discoveries.
             agent = config.agents[backend]
             touched = False
@@ -8434,7 +8588,7 @@ class ModelHubService:
 
     def _builtin_snapshots(
         self,
-        backends: Iterable[BackendName] = ("claude", "codex"),
+        backends: Iterable[str] = _FIXED_BACKEND_PROTOCOLS,
     ) -> dict[str, dict[str, Any]]:
         from vibe.backend_model_catalog import backend_builtin_snapshot
 
@@ -8448,6 +8602,8 @@ class ModelHubService:
         }
 
     def _reconcile_store_writable(self) -> bool:
+        if self._menu_evidence_damaged:
+            return False
         try:
             self._ensure_config_writable()
         except ModelHubError as exc:
@@ -8553,7 +8709,7 @@ class ModelHubService:
 
     async def reconcile_builtin_models(
         self,
-        backends: Iterable[BackendName] = ("claude", "codex", "opencode"),
+        backends: Iterable[BackendName] = MODEL_HUB_NATIVE_BACKENDS,
         *,
         notify: bool = True,
     ) -> list[BackendName]:
@@ -8573,6 +8729,15 @@ class ModelHubService:
                 config = self._clone_config(previous)
                 changed = await asyncio.to_thread(self._apply_source_menu_reconcile, config, selected_backends)
                 if changed:
+                    # Record ownership before making a new automatic row visible.
+                    # A failed config write leaves no visible row, not an unowned one.
+                    ownership = dict(self._menu_evidence.automatic)
+                    for backend in changed:
+                        before = {row.id for row in previous.agents[backend].models}
+                        added = {row.id for row in config.agents[backend].models} - before
+                        if added:
+                            ownership[backend] = sorted(set(ownership.get(backend, ())) | added)
+                    await self._save_menu_evidence(replace(self._menu_evidence, automatic=ownership))
                     try:
                         await self._commit_synced(previous, config)
                     except ModelHubError as exc:
@@ -8606,6 +8771,8 @@ class ModelHubService:
         confirmed_interruptions: object = None,
     ) -> dict:
         async with self._mutation_lock:
+            if self._menu_evidence_damaged:
+                raise ModelHubError("config_recovery", status=409)
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
@@ -8701,15 +8868,22 @@ class ModelHubService:
                 )
                 if admission_error is not None:
                     raise ModelHubError(admission_error)
+            # A concurrent writer may have already added the identical visible
+            # row and chosen its own route. Replaying the Add is not a new
+            # admission or an ownership change. A hidden row is a restore,
+            # not a replay: it must still pass the supplier guard.
+            hidden = self._hidden_menu_ids(previous, previous.agents[backend]) if parsed_expected_suppliers else set()
+            replayed = {mid for mid in parsed_expected_suppliers if mid not in hidden
+                        and current_by_id.get(mid) == desired_by_id[mid]}
             projections = self._project_expected_suppliers(
                 config,
                 agent_backend,
-                parsed_expected_suppliers,
+                parsed_expected_suppliers.keys() - replayed,
             )
             changed_suppliers = {
                 model_id: projections[model_id]
                 for model_id, expected in parsed_expected_suppliers.items()
-                if projections[model_id] != expected
+                if model_id not in replayed and projections[model_id] != expected
             }
             if changed_suppliers:
                 raise ModelHubError(
@@ -8877,6 +9051,19 @@ class ModelHubService:
             # SQLite selections now refer to the new catalog. Engine sync failure
             # must not roll the file back over them; reconcile on next demand.
             await self._commit_synced(previous, config, rollback_on_sync_failure=not moves)
+            # Explicit additions/restores and individual edits belong to the owner.
+            explicit = ((set(caller_added_model_ids) - replayed) | removed_model_id_set | set(moves) | set(moves.values())
+                        | {mid for mid in desired_by_id.keys() & baseline_by_id.keys()
+                           if desired_by_id[mid] != baseline_by_id[mid]})
+            owned = set(self._menu_evidence.automatic.get(backend, ()))
+            chosen = set(self._menu_evidence.chosen_builtins.get(backend, ()))
+            saved_choices = (chosen - removed_model_id_set - set(moves)) | {
+                mid for mid in explicit if mid in desired_by_id and desired_by_id[mid].origin == "builtin"
+            }
+            if explicit & owned or chosen != saved_choices:
+                ownership = {**self._menu_evidence.automatic, backend: sorted(owned - explicit)}
+                choices = {**self._menu_evidence.chosen_builtins, backend: sorted(saved_choices)}
+                await self._save_menu_evidence(replace(self._menu_evidence, automatic=ownership, chosen_builtins=choices))
             await self._refresh_backend_catalog(cast(BackendName, backend))
             committed = self.store.load()
             result = {
@@ -9484,7 +9671,7 @@ class ModelHubService:
             cast(BackendName, backend),
         )
         live_recovery = self.recovery.annotations(config)
-        hidden = self._hidden_retired_model_ids(agent) - {requested_model}
+        hidden = self._hidden_menu_ids(config, agent) - {requested_model}
         return [
             self._agent_chain(
                 config,
@@ -9506,6 +9693,7 @@ class ModelHubService:
         return _project_opencode_public_models(
             config,
             now=self.now(),
+            hidden_ids=frozenset(self._hidden_menu_ids(config, config.agents["opencode"])),
             unavailable_source_ids=self._unavailable_native_sources(
                 config,
                 "opencode",
@@ -10192,11 +10380,7 @@ class ModelHubService:
                         != affected_backend
                     ):
                         continue
-                    candidate.models = [
-                        model
-                        for model in candidate.models
-                        if model.provenance == "manual" or model.retired
-                    ]
+                    candidate.last_discovered_at = None
                     candidate.account_label = None
                     candidate.state = ModelHubSourceStateConfig(
                         status="needs_action",
