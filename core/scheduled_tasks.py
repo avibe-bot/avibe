@@ -1919,6 +1919,15 @@ class ScheduledTaskStore:
         # Changing a one-shot schedule creates a new lifecycle. The previous
         # terminal fact remains in Run history but cannot own the new instant.
         schedule_changed = (schedule_type, run_at, timezone_name) != previous_schedule
+        if schedule_changed and previous_schedule[0] == schedule_type == "at" and task.retired_at:
+            # A different display zone (or ISO spelling) is not a new fire.
+            try:
+                schedule_changed = (
+                    resolve_run_at(previous_schedule[1], previous_schedule[2]).timestamp()
+                    != resolve_run_at(run_at, timezone_name).timestamp()
+                )
+            except (ValueError, TypeError, KeyError):
+                pass  # Permit replacement of an invalid legacy schedule.
         if schedule_changed:
             if consumed_only and (schedule_type, run_at) != previous_schedule[:2] and compute_next_run_at(
                 enabled=True, schedule_type=schedule_type, cron=cron, run_at=run_at, timezone_name=timezone_name,

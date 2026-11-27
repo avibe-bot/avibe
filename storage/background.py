@@ -296,7 +296,7 @@ def compute_next_run_at(
             if not run_at:
                 return None
             instant = resolve_run_at(run_at, timezone_name)
-            if instant <= now:
+            if instant.timestamp() <= now.timestamp():
                 # A one-shot whose time has already passed has no next run.
                 return None
             trigger = DateTrigger(run_date=instant)

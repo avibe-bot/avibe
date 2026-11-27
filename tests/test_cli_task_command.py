@@ -144,6 +144,7 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
 
 
 @pytest.mark.parametrize(("state", "flag", "value", "armed"), [
+    ("fired_zone_edit", "--at", "2090-01-01T00:00:00Z", True),
     ("fired", "--at", "2090-01-01T00:00:00Z", True),
     ("fired", "--cron", "0 9 * * *", True),
     ("paused", "--at", "2090-01-01T00:00:00Z", False),
@@ -166,6 +167,10 @@ def test_task_update_arm_state(state, flag, value, armed, capsys):
             expected_timezone=task.timezone, expected_job_id="old-generation",
         )
         store.load()
+    if state == "fired_zone_edit":
+        zone_args = cli.build_parser().parse_args(["task", "update", task.id, "--timezone", "Asia/Tokyo"])
+        assert cli.cmd_task_update(zone_args) == 0
+        assert json.loads(capsys.readouterr().out)["definition"]["retirement_reason"] == "schedule_consumed"
     if state.endswith("ui_paused"):
         assert store.sqlite_backend.set_definition_enabled(task.id, False, definition_type="scheduled")
     elif "paused" in state:
@@ -182,7 +187,7 @@ def test_task_update_arm_state(state, flag, value, armed, capsys):
     assert (row["next_run_at"] is not None) is armed
     assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).enabled is armed
     if flag == "--at" and armed:
-        assert row["next_run_at"] == "2090-01-01T00:00:00+00:00"
+        assert row["next_run_at"] == ("2090-01-01T09:00:00+09:00" if state == "fired_zone_edit" else "2090-01-01T00:00:00+00:00")
     if "paused" in state:
         assert row["hint"] == f"paused; run `vibe task resume {task.id}` to arm it"
         assert cli.cmd_task_show(task.id) == 0
