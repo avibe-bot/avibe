@@ -38,6 +38,11 @@ pub fn ask(
 ///
 /// The route carries the window's own credential, that of `registration`,
 /// which no other window presents.
+///
+/// `taken` is told, on the main thread, whether the window's browsing data
+/// took the route (`webview_macos::install_route`). It is not told anything
+/// for a window that has closed or a session that has ended: nothing is
+/// routed there.
 pub fn install(
     app: &AppHandle,
     window: String,
@@ -45,6 +50,7 @@ pub fn install(
     material: Material,
     registration: WindowRegistration,
     still: impl Fn() -> bool + Send + 'static,
+    taken: impl FnOnce(bool) + Send + 'static,
 ) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -56,7 +62,7 @@ pub fn install(
                 return;
             }
             let (username, password) = registration.native_login();
-            let _ = webview_macos::install_route(
+            taken(webview_macos::install_route(
                 webview,
                 main,
                 &host,
@@ -64,7 +70,7 @@ pub fn install(
                 username,
                 password,
                 !material.exclusive,
-            );
+            ));
         });
     });
 }

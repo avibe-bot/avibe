@@ -16,6 +16,7 @@ pub fn install(
     _: Material,
     _: WindowRegistration,
     _: impl Fn() -> bool + Send + 'static,
+    _: impl FnOnce(bool) + Send + 'static,
 ) {
 }
 pub fn answer(_: &AppHandle, _: String, _: Material, _: WindowRegistration, _: impl Fn() -> bool + Send + 'static) {}
