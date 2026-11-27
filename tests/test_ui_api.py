@@ -3021,7 +3021,9 @@ def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tm
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:8] == [
+    assert result["models"][:10] == [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6-sol",
@@ -3060,7 +3062,9 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:8] == [
+    assert result["models"][:10] == [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6-sol",
