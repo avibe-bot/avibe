@@ -57,14 +57,14 @@ logger = logging.getLogger(__name__)
 STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
-# A heavily used controller tracked 0.9-1.1 M objects from its first full collection
-# (7-155 s after start). Until the freeze, every full collection rescans them: across
-# eight starts, a ten-minute freeze still left 209 collections over 200 ms (49 s) in
-# minutes 0-9, spread evenly. Two minutes removes about 87% of those and keeps the
-# memory guard of the ten-minute freeze (resident memory 30-50% under the two-hour
-# freeze at 1 and 6 h). Counts are not identity: which objects an early freeze retains
-# (startup recovery still running, later first-use imports left unfrozen) is an
-# unmeasured trade-off, bounded by the same unfreeze rollback.
+# Observed under the ten-minute freeze, across eight starts of a heavily used
+# controller: 209 full collections over 200 ms (49 s) in minutes 0-9, spread evenly,
+# and 0.9-1.1 M tracked objects by the first logged slow collection (7-155 s after
+# start). Estimate, not measured: by count, about 87% of those fell after minute 2.
+# The freeze applies only after the first full collection past this point finishes,
+# so that collection is not avoided. Counts are not identity: which objects an early
+# freeze retains (startup recovery still running, later first-use imports left
+# unfrozen) and its memory effect are unmeasured, bounded by the same unfreeze rollback.
 WARM_FREEZE_AFTER_SECONDS = 120
 _MAX_GC_REPORTS = 64
 _MAX_OWN_CODES = 200_000
