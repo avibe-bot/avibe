@@ -8779,6 +8779,73 @@ def opencode_direct_menu(data: dict, *, removed: bool = False) -> dict:
     }
 
 
+def removed_menu_entries(backend: str) -> list[dict]:
+    """The rows a Direct menu hides, as menu entries (``value``, ``reasoning_efforts``).
+
+    Removing takes a model off menus, not off a Session, Agent or route already on it, so a check of such a
+    stored choice still finds it here. Reads the catalog snapshot or OpenCode's cached options; starts no CLI.
+    """
+    if not is_native_cli_backend(backend):
+        return []
+    if backend != "opencode":
+        hidden = direct_model_menu(backend, schedule_refresh=False, removed=True)
+        return _flat_catalog_models(hidden) if hidden.get("ok") else []
+    cached = _OPENCODE_OPTIONS_CACHE.get(os.path.expanduser("~"), {})
+    data = cached.get("data") if cached.get("mode") == "direct" else None
+    if not data:
+        return []
+    reasoning = data.get("reasoning_options") or {}
+    return [
+        {"value": value, "reasoning_efforts": _effort_values(reasoning.get(value))}
+        for value in opencode_menu_values(opencode_direct_menu(data, removed=True))
+    ]
+
+
+async def direct_menu_and_removals(backend: str, *, live: bool = False) -> dict:
+    """A Direct backend's menu and its restore list from one read, as Settings · Models shows them.
+
+    ``models`` is the menu the Session pickers offer (the same functions answer them); ``removed`` the rows
+    the backend offers now that the menu hides. OpenCode answers from its cached options unless ``live``
+    (reading them live may start OpenCode); with nothing cached, ``models`` is None.
+    """
+    if backend == "opencode":
+        if live:
+            options = await opencode_options_async("~", apply_removals=False)
+            if not options.get("ok"):
+                return {"ok": False, "error": options.get("error") or "opencode_options_unavailable"}
+            data = options.get("data") or {}
+        else:
+            cached = _OPENCODE_OPTIONS_CACHE.get(os.path.expanduser("~"), {})
+            data = cached.get("data") if cached.get("mode") == "direct" else None
+            if not data:
+                return {"ok": True, "models": None, "removed": []}
+
+        def split() -> dict:
+            return {
+                "ok": True,
+                "models": [{"id": v, "label": v} for v in opencode_menu_values(opencode_direct_menu(data))],
+                "removed": [
+                    {"id": v, "label": v} for v in opencode_menu_values(opencode_direct_menu(data, removed=True))
+                ],
+            }
+
+        return await asyncio.to_thread(split)
+
+    def read() -> dict:
+        snapshot = backend_model_catalog.backend_model_snapshot(backend)
+        if not snapshot.get("ok"):
+            return {"ok": False, "error": snapshot.get("error") or "model_catalog_unavailable"}
+        labels = snapshot.get("model_labels") or {}
+        ids = snapshot.get("models") or []
+
+        def rows(removed: bool) -> list[dict]:
+            return [{"id": m, "label": labels.get(m) or m} for m in _direct_menu_ids(backend, ids, removed=removed)]
+
+        return {"ok": True, "models": rows(False), "removed": rows(True)}
+
+    return await asyncio.to_thread(read)
+
+
 def _effort_values(reasoning_entries: object) -> list[str]:
     """Extract settable reasoning-effort values, dropping the UI ``__default__`` sentinel."""
     out: list[str] = []

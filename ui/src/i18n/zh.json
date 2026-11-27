@@ -1758,7 +1758,8 @@
           "restoreModel": "恢复 {{model}}",
           "failRemove": "{{model}} 未能移除",
           "failRestore": "{{model}} 未能恢复",
-          "readFailed": "没能读到这个后端的模型"
+          "readFailed": "没能读到这个后端的模型",
+          "readLive": "列出模型"
         }
       },
       "takeover": {

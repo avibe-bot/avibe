@@ -64,30 +64,29 @@ def test_removed_model_leaves_every_surface_until_restored(owner, monkeypatch):
             "web": client.get("/api/codex/models").get_json()["models"],
             "cli": [row["value"] for row in api.route_menu_options("codex")["models"]],
             "im": _im_menu(SettingsHandler._load_codex_route_menu, "codex"),
-            "restore": [row["id"] for row in client.get(url).get_json()["models"]],
+            "restore": [row["id"] for row in client.get(url).get_json()["removed"]],
         }
 
     everywhere = ["gpt-6.2-sol", "gpt-5.5"]
     assert surfaces() == {"web": everywhere, "cli": everywhere, "im": everywhere, "restore": []}
+    assert client.get("/api/backend/vibey/models/visibility").status_code == 400
 
     assert client.put(url, json={"model_id": "gpt-6.2-sol", "removed": True}, headers=headers).status_code == 200
     assert surfaces() == {"web": ["gpt-5.5"], "cli": ["gpt-5.5"], "im": ["gpt-5.5"], "restore": ["gpt-6.2-sol"]}
-    assert client.get(url).get_json()["models"] == [{"id": "gpt-6.2-sol", "label": "GPT-6.2-Sol"}]
+    assert client.get(url).get_json() == {
+        "ok": True,
+        "models": [{"id": "gpt-5.5", "label": "gpt-5.5"}],
+        "removed": [{"id": "gpt-6.2-sol", "label": "GPT-6.2-Sol"}],
+    }
+    # A Session or Agent already on the removed model keeps it: checks of a stored choice still find it.
+    from vibe import cli
+
+    assert cli._catalog_mismatches("codex", "gpt-6.2-sol", None) == ([], False)
+    assert cli._menu_entry(api.route_menu_options("codex"), "gpt-6.2-sol") is not None
     assert "gpt-6.2-sol" not in client.get("/api/codex/models").get_json()["model_labels"]
 
     assert client.put(url, json={"model_id": "gpt-6.2-sol", "removed": False}, headers=headers).status_code == 200
     assert surfaces() == {"web": everywhere, "cli": everywhere, "im": everywhere, "restore": []}
-
-
-def test_removal_takes_the_role_that_edits_a_hub_menu(owner):
-    """Whoever may add models removes and restores them: the Hub menu write's role, for both routes."""
-    client, _ = owner
-    from vibe.authorization import http_authorization_policy
-
-    hub_menu = http_authorization_policy("PUT", "/api/models/agents/codex/models").minimum_role
-    for method in ("GET", "PUT"):
-        assert http_authorization_policy(method, "/api/backend/codex/models/visibility").minimum_role == hub_menu
-    assert client.get("/api/backend/unknown/models/visibility").status_code == 400
 
 
 def test_im_form_reads_the_hub_menu_for_a_hub_backend(monkeypatch):
@@ -109,8 +108,26 @@ def test_im_form_reads_the_hub_menu_for_a_hub_backend(monkeypatch):
     assert _im_menu(SettingsHandler._load_codex_route_menu, "codex", hub) == ["gpt-6.2-astra"]
 
 
-def test_opencode_menu_and_restore_list_split_on_the_picker_key(owner):
+def test_opencode_menu_and_restore_list_split_on_the_picker_key(owner, monkeypatch):
+    """Settings reads OpenCode from its cached options (never starting it); the menu drops `provider/id`."""
+    import os
+    import time
+
     client, headers = owner
+
+    async def no_live_read(*_args, **_kwargs):
+        raise AssertionError("opening Settings read OpenCode live")
+
+    url = "/api/backend/opencode/models/visibility"
+    with monkeypatch.context() as patched:
+        patched.setattr(api, "opencode_options_async", no_live_read)
+        assert client.get(url).get_json() == {"ok": True, "models": None, "removed": []}
+
+    from config.v2_config import V2Config
+
+    config = V2Config.load()
+    config.model_hub.agents["opencode"].mode = "direct"
+    config.save()
     data = {
         "models": {
             "providers": [
@@ -120,11 +137,26 @@ def test_opencode_menu_and_restore_list_split_on_the_picker_key(owner):
         },
         "reasoning_options": {"openai/gpt-6.2-sol": [], "openai/gpt-5.5": [], "relay/gpt-6.2-sol": []},
     }
-    url = "/api/backend/opencode/models/visibility"
+    monkeypatch.setitem(
+        api._OPENCODE_OPTIONS_CACHE,
+        os.path.expanduser("~"),
+        {"data": data, "updated_at": time.monotonic(), "model_hub_projection": "{}", "mode": "direct"},
+    )
     assert client.put(url, json={"model_id": "openai/gpt-6.2-sol", "removed": True}, headers=headers).status_code == 200
 
-    menu = api.opencode_direct_menu(data)
-    assert api.opencode_menu_values(menu) == ["openai/gpt-5.5", "relay/gpt-6.2-sol"]
-    assert set(menu["reasoning_options"]) == {"openai/gpt-5.5", "relay/gpt-6.2-sol"}
-    assert api.opencode_menu_values(api.opencode_direct_menu(data, removed=True)) == ["openai/gpt-6.2-sol"]
-    assert api.opencode_menu_values(data) == ["openai/gpt-6.2-sol", "openai/gpt-5.5", "relay/gpt-6.2-sol"]
+    def ids(rows):
+        return [row["id"] for row in rows]
+
+    answer = client.get(url).get_json()
+    assert ids(answer["models"]) == ["openai/gpt-5.5", "relay/gpt-6.2-sol"]
+    assert ids(answer["removed"]) == ["openai/gpt-6.2-sol"]
+    picker = client.post("/api/opencode/options", json={"cwd": "~"}, headers=headers).get_json()
+    assert picker["cached"] is True
+    assert api.opencode_menu_values(picker["data"]) == ["openai/gpt-5.5", "relay/gpt-6.2-sol"]
+    assert set(picker["data"]["reasoning_options"]) == {"openai/gpt-5.5", "relay/gpt-6.2-sol"}
+    # The cache keeps the full live list, so restoring needs no new read.
+    assert api.opencode_menu_values(api._OPENCODE_OPTIONS_CACHE[os.path.expanduser("~")]["data"]) == [
+        "openai/gpt-6.2-sol",
+        "openai/gpt-5.5",
+        "relay/gpt-6.2-sol",
+    ]

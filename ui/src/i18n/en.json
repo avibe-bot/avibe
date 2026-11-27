@@ -1758,7 +1758,8 @@
           "restoreModel": "Restore {{model}}",
           "failRemove": "{{model}} was not removed",
           "failRestore": "{{model}} was not restored",
-          "readFailed": "Couldn't read this backend's models"
+          "readFailed": "Couldn't read this backend's models",
+          "readLive": "List models"
         }
       },
       "takeover": {

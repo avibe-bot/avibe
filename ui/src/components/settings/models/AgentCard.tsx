@@ -18,7 +18,8 @@ import { currentChainLink, isTakeoverChain } from './takeover';
 import { backendDisplayOrder, getBackendUiMeta } from '@/lib/agentBackends';
 import { useBots } from '@/context/BotsContext';
 import type { AgentSupply, Source } from './types';
-import { DirectModelList, useDirectModelMenu, type DirectModelMenuState } from './DirectModelMenu';
+import { DirectModelList } from './DirectModelMenu';
+import { useDirectModelMenu } from './useDirectModelMenu';
 
 const NO_USERS: readonly string[] = [];
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
@@ -253,9 +254,7 @@ const AgentModelCard: React.FC<{
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
   noProviders?: boolean;
-  /** A Direct backend's menu, which its card lists in place of the gateway's saved list. */
-  directMenu?: DirectModelMenuState;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent, noProviders = false, directMenu }) => {
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent, noProviders = false }) => {
   const { t } = useTranslation();
   const { botForAgent, displayName } = useBots();
   const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
@@ -266,7 +265,11 @@ const AgentModelCard: React.FC<{
   }), [agent, botForAgent, displayName]);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
   const allModels = React.useMemo(() => catalogModelIds(agent), [agent]);
-  const modelCount = directMenu ? directMenu.models?.length ?? null : allModels.length;
+  // A Direct backend's card lists the menu its Session pickers offer, not the gateway's saved list.
+  // ui/design: models/direct-menu/list
+  const isDirect = agent.mode !== 'hub' && getBackendUiMeta(agent.backend).capabilities.supports_cli;
+  const directMenu = useDirectModelMenu(agent.backend, isDirect);
+  const modelCount = isDirect ? directMenu.models?.length ?? null : allModels.length;
   const previousModelsRef = React.useRef(allModels);
   React.useEffect(() => {
     const previousModels = new Set(previousModelsRef.current);
@@ -398,19 +401,13 @@ const AgentModelCard: React.FC<{
         </div>
       </div>
       {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">{noProviders ? <p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyNoProviders')}</p> : <><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></>}</div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} users={users.get(modelId) ?? NO_USERS} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}{!noProviders && <AddModelButton disabled={pending} onClick={() => onAddModels(agent)} />}</div>)}
-      {directMenu && <DirectModelList menu={directMenu} />}
+      {isDirect && <DirectModelList menu={directMenu} />}
       {/* With no provider yet, every Agent lacks a model by construction: the one way
           forward is the Providers card's add button, not a warning or an add here.
           ui/design: models/first-provider/fresh */}
       {agent.mode === 'hub' && !noProviders && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
     </section>
   );
-};
-
-/** A Direct backend's card, with the menu its Session model picker shows (ui/design: models/direct-menu/list). */
-const DirectAgentModelCard: React.FC<React.ComponentProps<typeof AgentModelCard>> = (props) => {
-  const directMenu = useDirectModelMenu(props.agent.backend, true);
-  return <AgentModelCard {...props} directMenu={directMenu} />;
 };
 
 /**
@@ -473,8 +470,5 @@ export const AgentCard: React.FC<{
   }, []);
   const orderedAgents = [...agents].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
   const orderedOff = [...switchedOff].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
-  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => {
-    const Card = agent.mode !== 'hub' && getBackendUiMeta(agent.backend).capabilities.supports_cli ? DirectAgentModelCard : AgentModelCard;
-    return <Card key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />;
-  })}{orderedOff.map((agent) => <SwitchedOffBackendRow key={agent.backend} agent={agent} />)}</div>;
+  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}{orderedOff.map((agent) => <SwitchedOffBackendRow key={agent.backend} agent={agent} />)}</div>;
 };

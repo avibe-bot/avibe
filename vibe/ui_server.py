@@ -11397,28 +11397,20 @@ async def direct_model_visibility(backend: str, starlette_request: FastAPIReques
 
 
 @app.get("/api/backend/{backend}/models/visibility", include_in_schema=False)
-async def direct_model_removals(backend: str, starlette_request: FastAPIRequest):
-    """The restore list: rows the backend offers now that its Direct menu hides."""
+async def direct_model_menu_read(backend: str, starlette_request: FastAPIRequest):
+    """A Direct menu and its restore list (rows the backend offers now that the menu hides), for Settings · Models.
+
+    ``?live=1`` lets OpenCode read its options live, which may start it; otherwise it answers from its cache.
+    """
 
     async def handler():
+        from modules.agents.catalog import is_native_cli_backend
         from vibe import api
 
-        if backend == "opencode":
-            # The menu's own read (the picker asks for `~`), without the removals it applies.
-            options = await api.opencode_options_async("~", apply_removals=False)
-            if not options.get("ok"):
-                return jsonify({"ok": False, "error": options.get("error") or "opencode_options_unavailable"}), 502
-            hidden = await asyncio.to_thread(api.opencode_direct_menu, options.get("data") or {}, removed=True)
-            return jsonify({"ok": True, "models": [{"id": model, "label": model} for model in api.opencode_menu_values(hidden)]})
-        if backend not in {"claude", "codex", "antigravity"}:
+        if not is_native_cli_backend(backend):
             return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
-        hidden = await asyncio.to_thread(api.direct_model_menu, backend, removed=True)
-        if not hidden.get("ok"):
-            return jsonify({"ok": False, "error": hidden.get("error") or "model_catalog_unavailable"}), 502
-        labels = hidden.get("model_labels") or {}
-        return jsonify(
-            {"ok": True, "models": [{"id": model, "label": labels.get(model) or model} for model in hidden["models"]]}
-        )
+        answer = await api.direct_menu_and_removals(backend, live=request.args.get("live") == "1")
+        return jsonify(answer), (200 if answer.get("ok") else 502)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
