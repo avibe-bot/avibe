@@ -959,8 +959,18 @@ final class DirectPathController {
         for runtime: MobileRuntimeContext,
         stillWanted: @escaping () -> Bool
     ) async {
+        await prepareRoute(for: runtime, late: false, stillWanted: stillWanted)
+    }
+
+    /// `late`: for a host whose first load has already gone ahead
+    /// (`addLateRoute`). Only a route this call itself writes is a late one.
+    private func prepareRoute(
+        for runtime: MobileRuntimeContext,
+        late: Bool,
+        stillWanted: @escaping () -> Bool
+    ) async {
         preparations += 1
-        await addRoute(for: runtime, stillWanted: stillWanted)
+        await addRoute(for: runtime, late: late, stillWanted: stillWanted)
         preparations -= 1
         // A listener no route points at, and no open is waiting for, has
         // nothing to do.
@@ -972,6 +982,7 @@ final class DirectPathController {
 
     private func addRoute(
         for runtime: MobileRuntimeContext,
+        late: Bool,
         stillWanted: () -> Bool
     ) async {
         guard let authority = DirectAuthority(instanceURL: runtime.instance.url) else {
@@ -1049,6 +1060,15 @@ final class DirectPathController {
                 routeOwner.exclude(authority.host, store: store)
             }
             return
+        }
+        if late {
+            // Written after the host's first load, and marked in the same
+            // turn as the write: no connection of the host can have reached
+            // the listener through this route before the mark. A route an
+            // ordinary open wrote first (the same host opened again while
+            // the bind was under way) is not marked: that open's own load
+            // goes through the listener.
+            awaitingFirstConnect.insert(authority.host)
         }
         if firstRouteWait?.runtime == runtime, firstRouteRetry == nil { cancelFirstRouteWait() }
     }
@@ -2206,15 +2226,13 @@ final class DirectPathController {
         }
         lateRouteTask = Task { [weak self] in
             guard let self else { return }
-            await self.prepareRoute(for: late.runtime) {
+            await self.prepareRoute(for: late.runtime, late: true) {
                 self.lateRoute?.runtime == late.runtime && self.isCurrentRuntime(late.runtime)
                     && !self.isInBackground && self.websiteDataStore.identifier == late.store
             }
+            // Routed by this task, or by an ordinary open of the same host
+            // that got there first.
             let routed = self.routeOwner.routes(late.host, store: late.store)
-            if routed {
-                // From the write on, whoever opens this host's runtime.
-                self.awaitingFirstConnect.insert(late.host)
-            }
             // Abandoned meanwhile: whoever did that has settled the rest.
             guard let still = self.lateRoute, still.runtime == late.runtime, still.store == late.store else {
                 return
