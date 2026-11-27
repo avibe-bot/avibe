@@ -802,7 +802,7 @@ def test_antigravity_pasted_callback_code(raw: str, expected: str | None) -> Non
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX login opener shims; Windows remains vendor-controlled")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["success", "failed", "cancel", "supersede", "launch_failed"])
+@pytest.mark.parametrize("ending", ["success", "failed", "cancel", "supersede", "launch_failed", "removed"])
 async def test_login_opener_shims_are_private_and_retired_with_flow(
     fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch, ending: str,
 ) -> None:
@@ -850,8 +850,15 @@ async def test_login_opener_shims_are_private_and_retired_with_flow(
             assert await service.submit_web_code(flow.flow_id, code) == {"ok": True}
             await flow.waiter_task
             assert flow.state == ending
-        elif ending == "cancel":
+        elif ending in {"cancel", "removed"}:
+            if ending == "removed":
+                # A temp reaper must not turn disposable-file cleanup into a
+                # native credential lockout; prior tests kept the directory.
+                for shim in directory.iterdir():
+                    shim.unlink()
+                directory.rmdir()
             await service.cancel_web_flow(flow.flow_id)
+            assert flow.native_lease is None
         else:
             replacement = await service.start_web_setup("antigravity", auth_method="oauth-personal")
             assert replacement.flow_id != flow.flow_id

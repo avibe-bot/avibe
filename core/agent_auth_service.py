@@ -689,7 +689,7 @@ class AgentAuthService:
         await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         self._close_flow_pty(flow)
         if flow.antigravity_opener_shim_dir is not None:
-            await _native_auth_thread(shutil.rmtree, flow.antigravity_opener_shim_dir)
+            await _native_auth_thread(shutil.rmtree, flow.antigravity_opener_shim_dir, ignore_errors=True)
             flow.antigravity_opener_shim_dir = None
         if flow.native_lease is not None:
             flow.native_lease.release()
