@@ -9,22 +9,23 @@ import WebKit
 @MainActor
 enum VoiceCaptureLoadGate {
     static var provider: ((WebOrigin, UUID) -> DirectLoadGate)?
-    /// The same gate for a load about to be made in the background
-    /// (`DirectPathController.backgroundLoadGate`): there the listener is
+    /// What a load about to be made in the background would meet
+    /// (`DirectPathController.backgroundLoadCheck`): there the listener is
     /// closed and the load rests on WebKit's failover past its port, so the
-    /// port is asked first. `fault`: something else answers there, load
-    /// nothing; `held`: nothing does, the load may go. `nil` without a
-    /// direct transport.
-    static var backgroundProvider: (@MainActor (WebOrigin, UUID) async -> DirectLoadGate)?
+    /// port is asked first. `foreign`: something else answers there, load
+    /// nothing; `gate`: the load may go by it; `undecided`: nothing could be
+    /// told in time (asked again within a bound). `nil` without a direct
+    /// transport.
+    static var backgroundProvider: (@MainActor (WebOrigin, UUID) async -> DirectBackgroundCheck)?
 
     /// `gate(for:store:currentStore:direct:)` for the background's check.
-    static func backgroundGate(
+    static func backgroundCheck(
         for origin: WebOrigin,
         store: UUID,
         currentStore: UUID,
-        direct: @MainActor (URL) async -> DirectLoadGate
-    ) async -> DirectLoadGate {
-        guard store == currentStore else { return .open }
+        direct: @MainActor (URL) async -> DirectBackgroundCheck
+    ) async -> DirectBackgroundCheck {
+        guard store == currentStore else { return .gate(.open) }
         return await direct(origin.url)
     }
 
@@ -177,8 +178,11 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// The direct path's load gate for this instance, whether Avibe is in
     /// front, and a wait (tests replace them).
     private let gate: () -> DirectLoadGate
-    /// The gate asked right before a load made in the background.
-    private let backgroundGate: @MainActor () async -> DirectLoadGate
+    /// The check asked right before a load made in the background.
+    private let backgroundCheck: @MainActor () async -> DirectBackgroundCheck
+    /// Counts a background check that kept a take from loading, or one that
+    /// let it load only when asked again, by reason (`VoiceCapturePortChecks`).
+    private let notePortCheck: (String) -> Void
     private let isActive: () -> Bool
     private let sleep: (Duration) async -> Void
 
@@ -186,9 +190,10 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         target: VoiceCaptureTarget,
         dictationID: String = "ios-action-\(UUID().uuidString.lowercased())",
         gate: (() -> DirectLoadGate)? = nil,
-        backgroundGate: (@MainActor () async -> DirectLoadGate)? = nil,
+        backgroundCheck: (@MainActor () async -> DirectBackgroundCheck)? = nil,
         isActive: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
-        sleep: @escaping (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+        sleep: @escaping (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+        notePortCheck: @escaping (String) -> Void = { VoiceCapturePortChecks.note($0) }
     ) {
         self.target = target
         self.dictationID = dictationID
@@ -197,16 +202,32 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         if let gate {
             self.gate = gate
             // A test's own gate stands for both, unless it gives the second.
-            self.backgroundGate = backgroundGate ?? { gate() }
+            self.backgroundCheck = backgroundCheck ?? { DirectBackgroundCheck(gate()) }
         } else {
             self.gate = { VoiceCaptureLoadGate.provider?(origin, store) ?? .open }
-            self.backgroundGate = backgroundGate ?? {
+            self.backgroundCheck = backgroundCheck ?? {
                 if let ask = VoiceCaptureLoadGate.backgroundProvider { return await ask(origin, store) }
-                return VoiceCaptureLoadGate.provider?(origin, store) ?? .open
+                return DirectBackgroundCheck(VoiceCaptureLoadGate.provider?(origin, store) ?? .open)
             }
         }
         self.isActive = isActive
         self.sleep = sleep
+        self.notePortCheck = notePortCheck
+    }
+
+    /// How long, from its first ask, a background check that could tell
+    /// nothing in time is asked again (Product, 11-27): a stall of a few
+    /// hundred ms is ordinary on a phone, and a refusal holds the take
+    /// until Avibe is opened. At most `backgroundCheckRetries` times more.
+    static let backgroundCheckBudget: Duration = .seconds(1)
+    static let backgroundCheckRetries = 2
+
+    /// Whether an undecided background check is asked again: only where a
+    /// new ask can answer differently at once (no answer in time, or the
+    /// App came and went meanwhile), not the App's own socket still open
+    /// (that wait is bounded by seconds), and within the budget.
+    static func asksAgain(_ reason: DirectBackgroundCheck.Reason, retries: Int, elapsed: Duration) -> Bool {
+        reason != .ownSocketOpen && retries < backgroundCheckRetries && elapsed < backgroundCheckBudget
     }
 
     /// How long a load waits for the listener's return to settle.
@@ -590,17 +611,35 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             // WebKit's failover past its port: the direct path asks the port
             // first. Something answering there is not this App's listener,
             // and gets nothing (the take is kept, and sent by itself once the
-            // instance is reached). `held` here means nothing answers: the
-            // load goes, as before. A process taking the port in the few ms
-            // between this answer and the load's own connection is not covered.
+            // instance is reached). `gate` here means the load may go, as
+            // before (`held`: nothing answers). A check that could tell
+            // nothing in time is asked again, briefly: that narrows a false
+            // refusal on a stalled phone, it does not remove it. A process
+            // taking the port in the few ms between the answer and the
+            // load's own connection is not covered.
             if !isActive() {
-                let checked = await backgroundGate()
+                let askedFrom = ContinuousClock.now
+                var retries = 0
+                var checked = await backgroundCheck()
+                while case .undecided(let reason) = checked, !closed,
+                      Self.asksAgain(reason, retries: retries, elapsed: ContinuousClock.now - askedFrom) {
+                    retries += 1
+                    checked = await backgroundCheck()
+                }
                 guard !closed else {
                     gaveUp(label, "closed")
                     throw Failure.closed
                 }
-                if checked == .fault {
-                    gaveUp(label, "direct_fault port")
+                switch checked {
+                case .gate:
+                    if retries > 0 { notePortCheck("asked_again") }
+                case .foreign:
+                    notePortCheck("foreign")
+                    gaveUp(label, "direct_fault port foreign")
+                    throw Failure.directFault
+                case .undecided(let reason):
+                    notePortCheck(reason.rawValue)
+                    gaveUp(label, "direct_fault port \(reason.rawValue) x\(retries + 1)")
                     throw Failure.directFault
                 }
             }
@@ -689,5 +728,30 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             gaveUp(loadingFor, "webcontent")
             finishLoad(.failure(Failure.offline))
         }
+    }
+}
+
+/// How often a background voice take's port check kept it from loading, by
+/// reason (`foreign`, `no_answer`, `own_socket_open`, `stay_changed`), and
+/// how often one let it load only when asked again (`asked_again`), since
+/// the App was installed. Read into each press's line (`port=`), which
+/// reaches the instance with the take's message. `UserDefaults` only, so
+/// any isolation may count.
+enum VoiceCapturePortChecks {
+    static let key = "avibe.voiceCapture.portChecks"
+    private static let names = ["foreign", "no_answer", "own_socket_open", "stay_changed", "asked_again"]
+
+    static func note(_ name: String, in defaults: UserDefaults = .standard) {
+        guard names.contains(name) else { return }
+        var counts = defaults.dictionary(forKey: key) as? [String: Int] ?? [:]
+        counts[name, default: 0] += 1
+        defaults.set(counts, forKey: key)
+    }
+
+    /// ` port=foreign:1,no_answer:2`, or empty with nothing counted.
+    static func line(in defaults: UserDefaults = .standard) -> String {
+        let counts = defaults.dictionary(forKey: key) as? [String: Int] ?? [:]
+        let parts = names.compactMap { name in (counts[name] ?? 0) > 0 ? "\(name):\(counts[name] ?? 0)" : nil }
+        return parts.isEmpty ? "" : " port=" + parts.joined(separator: ",")
     }
 }

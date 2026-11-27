@@ -2087,24 +2087,28 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertTrue(slept.isEmpty)
     }
 
-    // MARK: The background's port check (DirectPathController.backgroundLoadGate)
+    // MARK: The background's port check (DirectPathController.backgroundLoadCheck)
 
-    /// In the background the listener is closed and the load rests on
-    /// WebKit's failover past its port. Before that load the direct path
-    /// asks the port once: something answering there is not this App's
-    /// listener, so nothing is loaded (the take is kept, as for a fault).
-    /// A port nothing answers on lets the load go, as before.
-    func testInTheBackgroundAPortSomethingElseHoldsLoadsNothing() async throws {
-        let target = VoiceCaptureTarget(
+    private func backgroundTarget() throws -> VoiceCaptureTarget {
+        VoiceCaptureTarget(
             accountID: "a", instanceID: "i",
             origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
             storeIdentifier: UUID()
         )
+    }
+
+    /// In the background the listener is closed and the load rests on
+    /// WebKit's failover past its port. Before that load the direct path
+    /// asks the port once: something answering there is not this App's
+    /// listener, so nothing is loaded at once, with no second ask (the take
+    /// is kept, as for a fault), and the refusal is counted by its reason.
+    func testInTheBackgroundAPortSomethingElseHoldsLoadsNothingAtOnce() async throws {
         var asked = 0
+        var counted: [String] = []
         let client = VoiceCaptureInstanceClient(
-            target: target, gate: { .held },
-            backgroundGate: { asked += 1; return .fault },
-            isActive: { false }, sleep: { _ in }
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { asked += 1; return .foreign },
+            isActive: { false }, sleep: { _ in }, notePortCheck: { counted.append($0) }
         )
         do {
             _ = try await client.status()
@@ -2112,25 +2116,22 @@ final class VoiceCaptureTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? Failure, .directFault)
         }
-        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(asked, 1, "not asked again")
+        XCTAssertEqual(counted, ["foreign"])
         XCTAssertEqual(client.failures.count, 1)
-        XCTAssertTrue(client.failures[0].hasPrefix("GET /api/asr/status direct_fault port +"), client.failures[0])
+        XCTAssertTrue(client.failures[0].hasPrefix("GET /api/asr/status direct_fault port foreign +"), client.failures[0])
     }
 
     /// Nothing answers on the port: `held` from the background's check means
     /// the load may go (WebKit fails over), not "wait". It goes at once.
     func testInTheBackgroundAPortNothingAnswersOnLetsTheLoadGo() async throws {
-        let target = VoiceCaptureTarget(
-            accountID: "a", instanceID: "i",
-            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
-            storeIdentifier: UUID()
-        )
         var asked = 0
         var slept: [Duration] = []
+        var counted: [String] = []
         let client = VoiceCaptureInstanceClient(
-            target: target, gate: { .held },
-            backgroundGate: { asked += 1; return .held },
-            isActive: { false }, sleep: { slept.append($0) }
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { asked += 1; return .gate(.held) },
+            isActive: { false }, sleep: { slept.append($0) }, notePortCheck: { counted.append($0) }
         )
         do {
             _ = try await client.status()
@@ -2142,22 +2143,89 @@ final class VoiceCaptureTests: XCTestCase {
         }
         XCTAssertEqual(asked, 1)
         XCTAssertTrue(slept.isEmpty)
+        XCTAssertTrue(counted.isEmpty)
         XCTAssertFalse(client.failures.contains { $0.contains("direct_fault") }, "\(client.failures)")
+    }
+
+    /// A check that could tell nothing in time (a stalled phone, Product
+    /// 11-27) is asked again; its next answer decides. Counted as a load
+    /// the second ask let through.
+    func testInTheBackgroundACheckWithNoAnswerIsAskedAgainAndThenLoads() async throws {
+        var answers: [DirectBackgroundCheck] = [.undecided(.noAnswer), .gate(.held)]
+        var counted: [String] = []
+        let client = VoiceCaptureInstanceClient(
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { answers.removeFirst() },
+            isActive: { false }, sleep: { _ in }, notePortCheck: { counted.append($0) }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("the fixture's host does not exist")
+        } catch {
+            XCTAssertNotEqual(error as? Failure, .directFault)
+        }
+        XCTAssertTrue(answers.isEmpty, "asked twice")
+        XCTAssertEqual(counted, ["asked_again"])
+        XCTAssertFalse(client.failures.contains { $0.contains("direct_fault") }, "\(client.failures)")
+    }
+
+    /// Asked three times with no answer: refused, counted by its reason, and
+    /// the record says how many times it was asked.
+    func testInTheBackgroundThreeChecksWithNoAnswerRefuse() async throws {
+        var asked = 0
+        var counted: [String] = []
+        let client = VoiceCaptureInstanceClient(
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { asked += 1; return .undecided(.noAnswer) },
+            isActive: { false }, sleep: { _ in }, notePortCheck: { counted.append($0) }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("three checks with no answer refuse")
+        } catch {
+            XCTAssertEqual(error as? Failure, .directFault)
+        }
+        XCTAssertEqual(asked, 3)
+        XCTAssertEqual(counted, ["no_answer"])
+        XCTAssertTrue(client.failures[0].hasPrefix("GET /api/asr/status direct_fault port no_answer x3 +"), client.failures[0])
+    }
+
+    /// Asked again only where a new ask can answer at once, and within about
+    /// a second from the first: the App's own socket still open (a wait of
+    /// seconds) is not asked again, nor is anything past the budget.
+    func testAnUndecidedCheckIsAskedAgainOnlyWhereItCanHelpAndWithinASecond() async throws {
+        typealias Client = VoiceCaptureInstanceClient
+        XCTAssertTrue(Client.asksAgain(.noAnswer, retries: 0, elapsed: .milliseconds(300)))
+        XCTAssertTrue(Client.asksAgain(.stayChanged, retries: 1, elapsed: .milliseconds(650)))
+        XCTAssertFalse(Client.asksAgain(.noAnswer, retries: 2, elapsed: .milliseconds(10)))
+        XCTAssertFalse(Client.asksAgain(.noAnswer, retries: 0, elapsed: .seconds(1)))
+        XCTAssertFalse(Client.asksAgain(.ownSocketOpen, retries: 0, elapsed: .zero))
+
+        var asked = 0
+        var counted: [String] = []
+        let client = VoiceCaptureInstanceClient(
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { asked += 1; return .undecided(.ownSocketOpen) },
+            isActive: { false }, sleep: { _ in }, notePortCheck: { counted.append($0) }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("the App's own socket still open refuses")
+        } catch {
+            XCTAssertEqual(error as? Failure, .directFault)
+        }
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(counted, ["own_socket_open"])
     }
 
     /// In front the listener serves or is being bound again: the port is not
     /// asked, and the gate is waited for as before.
     func testInFrontThePortIsNotAsked() async throws {
-        let target = VoiceCaptureTarget(
-            accountID: "a", instanceID: "i",
-            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
-            storeIdentifier: UUID()
-        )
         var asked = 0
         let client = VoiceCaptureInstanceClient(
-            target: target, gate: { .open },
-            backgroundGate: { asked += 1; return .fault },
-            isActive: { true }, sleep: { _ in }
+            target: try backgroundTarget(), gate: { .open },
+            backgroundCheck: { asked += 1; return .foreign },
+            isActive: { true }, sleep: { _ in }, notePortCheck: { _ in }
         )
         do {
             _ = try await client.status()
@@ -2168,18 +2236,15 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(asked, 0)
     }
 
-    /// A take given up while the port was being asked loads nothing.
+    /// A take given up while the port was being asked loads nothing, and is
+    /// not asked again.
     func testATakeClosedWhileThePortIsAskedLoadsNothing() async throws {
-        let target = VoiceCaptureTarget(
-            accountID: "a", instanceID: "i",
-            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
-            storeIdentifier: UUID()
-        )
+        var asked = 0
         var client: VoiceCaptureInstanceClient!
         client = VoiceCaptureInstanceClient(
-            target: target, gate: { .held },
-            backgroundGate: { client.close(); return .held },
-            isActive: { false }, sleep: { _ in }
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { asked += 1; client.close(); return .undecided(.noAnswer) },
+            isActive: { false }, sleep: { _ in }, notePortCheck: { _ in }
         )
         do {
             _ = try await client.status()
@@ -2187,6 +2252,7 @@ final class VoiceCaptureTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? Failure, .closed)
         }
+        XCTAssertEqual(asked, 1)
     }
 
     /// Without a test's gate, the background's check is the App model's, for
@@ -2200,34 +2266,48 @@ final class VoiceCaptureTests: XCTestCase {
         VoiceCaptureLoadGate.provider = { _, _ in .held }
         VoiceCaptureLoadGate.backgroundProvider = { asked, askedStore in
             askedFor.append("\(asked.serialized) \(askedStore == store)")
-            return .fault
+            return .foreign
         }
         let target = VoiceCaptureTarget(accountID: "a", instanceID: "i", origin: origin, storeIdentifier: store)
-        let client = VoiceCaptureInstanceClient(target: target, isActive: { false }, sleep: { _ in })
+        let client = VoiceCaptureInstanceClient(target: target, isActive: { false }, sleep: { _ in }, notePortCheck: { _ in })
         do {
             _ = try await client.status()
-            XCTFail("the App's check said fault")
+            XCTFail("the App's check said foreign")
         } catch {
             XCTAssertEqual(error as? Failure, .directFault)
         }
         XCTAssertEqual(askedFor, ["https://instance-one.example true"])
 
         // On another store (an account change since the take began) the
-        // App's routes do not apply: open, with nothing asked.
+        // App's routes do not apply: the load may go, with nothing asked.
         let gates = VoiceCaptureLoadGate.self
         var direct = 0
-        let other = await gates.backgroundGate(for: origin, store: UUID(), currentStore: store) { _ in
+        let other = await gates.backgroundCheck(for: origin, store: UUID(), currentStore: store) { _ in
             direct += 1
-            return .fault
+            return .foreign
         }
-        XCTAssertEqual(other, .open)
+        XCTAssertEqual(other, .gate(.open))
         XCTAssertEqual(direct, 0)
-        let same = await gates.backgroundGate(for: origin, store: store, currentStore: store) { _ in
+        let same = await gates.backgroundCheck(for: origin, store: store, currentStore: store) { _ in
             direct += 1
-            return .fault
+            return .foreign
         }
-        XCTAssertEqual(same, .fault)
+        XCTAssertEqual(same, .foreign)
         XCTAssertEqual(direct, 1)
+    }
+
+    /// The counts by reason, since installation, in each press's line.
+    func testThePortChecksAreCountedByReasonIntoThePressLine() throws {
+        let suite = "VoiceCapturePortChecks.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(VoiceCapturePortChecks.line(in: defaults), "")
+        VoiceCapturePortChecks.note("no_answer", in: defaults)
+        VoiceCapturePortChecks.note("no_answer", in: defaults)
+        VoiceCapturePortChecks.note("foreign", in: defaults)
+        VoiceCapturePortChecks.note("asked_again", in: defaults)
+        VoiceCapturePortChecks.note("anything else", in: defaults)
+        XCTAssertEqual(VoiceCapturePortChecks.line(in: defaults), " port=foreign:1,no_answer:2,asked_again:1")
     }
 
     /// A take the background's check refused (something held the port, or

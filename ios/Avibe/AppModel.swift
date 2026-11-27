@@ -820,13 +820,13 @@ final class AppModel: ObservableObject {
         // listener's port asked first (something else may hold it then).
         VoiceCaptureLoadGate.backgroundProvider = { [weak self] origin, storeIdentifier in
             guard let self, let controller = self.directPathController else {
-                return .open
+                return .gate(.open)
             }
-            return await VoiceCaptureLoadGate.backgroundGate(
+            return await VoiceCaptureLoadGate.backgroundCheck(
                 for: origin, store: storeIdentifier, currentStore: self.websiteDataStore.identifier
             ) { url in
                 controller.settleRecordedFault()
-                return await controller.backgroundLoadGate(forInstanceURL: url)
+                return await controller.backgroundLoadCheck(forInstanceURL: url)
             }
         }
         runtimeOpenLifecycleObservers = [

@@ -2286,6 +2286,7 @@ enum VoiceCaptureLaunch {
             + "byPress=\(byPress ? 1 : 0) scene=\(everActive ? 1 : 0) presses=\(presses) "
             + "session=\(VoiceCaptureAudioState.active ? 1 : 0) launch=\(launchState) "
             + "prevEnd=\(VoiceCaptureEndSwitch.takeLastDecision() ?? "-")"
+            + VoiceCapturePortChecks.line()
         presses += 1
         let session = AVAudioSession.sharedInstance()
         return facts + " " + audioContext(
