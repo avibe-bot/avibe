@@ -242,6 +242,11 @@ def _role_sentence(role: str) -> str:
     return f" Your role: {text}" + ("" if text[-1] in ".!?。！？" else ".")
 
 
+# Ends the roster's sentence on when working together is worth it. A Bot's copy stops before it: its own section
+# (``bot-harness.md``) already says what it does itself, and "you can often just do" would contradict it.
+_OWN_WORK = "; what you can readily do yourself, you can often just do"
+
+
 def _bot_blocks(bot: BotPromptInfo) -> list[RenderedPromptBlock]:
     blocks = [
         render_prompt_block(
@@ -432,7 +437,12 @@ def build_system_prompt_blocks(
         bots_rows = _format_bots_rows(roster)
         if agent_rows or bots_rows:
             blocks.append(
-                render_prompt_block("harness-agents-prompt", bots_rows=bots_rows, enabled_agents_rows=agent_rows)
+                render_prompt_block(
+                    "harness-agents-prompt",
+                    bots_rows=bots_rows,
+                    enabled_agents_rows=agent_rows,
+                    own_work="" if bot is not None else _OWN_WORK,
+                )
             )
         if bot is not None and projects is not None:
             blocks.append(render_prompt_block("projects-prompt", project_catalog=_format_project_catalog(projects)))

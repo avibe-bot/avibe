@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.3.3
+version: 0.3.4
 ---
 
 # Use Avibe Harness
@@ -27,8 +27,8 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 ### Choosing the shape
 | Need | Use |
 | --- | --- |
-| Work that needs a Bot's memory or judgment | `vibe agent run --bot <bot> --message ...` |
-| Self-contained or parallel work | `vibe agent run --agent <agent> --message ...` |
+| Talk with a Bot | `vibe agent run --bot <bot> --message ...` |
+| Bring a fresh Session in for a part of the work | `vibe agent run --agent <agent> --message ...` |
 | Continue an existing Session | `vibe agent run --session-id <id> --message ...` |
 | Branch from this Session's context | `vibe agent run --fork-self --message ...` |
 | Bring a Session to the user | `vibe session update --session-id <id> --visible` |

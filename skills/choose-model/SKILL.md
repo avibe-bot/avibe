@@ -2,7 +2,7 @@
 name: choose-model
 slug: choose-model
 description: Choose the model, reasoning effort, and speed for work you hand out or continue. Match them to the work and how fast it is needed. See and switch an existing Session's settings rather than start over, and pass the choice explicitly.
-version: 0.3.1
+version: 0.3.2
 ---
 
 # Choose a Model
@@ -66,7 +66,7 @@ Start a new Session instead when:
 
 To keep the context and leave the original as it is, fork with `vibe agent run --fork-session <id> --model <model> --reasoning-effort <effort> --message ...`.
 
-A Bot runs on the model the user chose for it. Only the user, or the Bot itself when the user asks, changes it.
+A Bot runs on the model the user chose for it. Only the user, or the Bot itself when the user asks, changes it. The model of a Session the user is talking in is the user's choice. If you think another would serve better, say so; switching it is theirs.
 
 ## 5. The user's findings come first
 What the user has found about models overrides this Skill. That covers what they tell you now and what is recorded in your memory (a Bot's memory files, or the Project's `AGENTS.md`), so check there before you choose. When the user shares a finding, or confirms one you observed, record it there so later choices use it.
