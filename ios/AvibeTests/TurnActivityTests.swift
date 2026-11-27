@@ -412,8 +412,91 @@ final class TurnActivityTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(cards.first).state, .active)
         calls.removeAll()
         await owner.reconcile(target: target)
-        XCTAssertEqual(calls.map { $0.0 }, ["PUT"])
+        // No answer at once is a lost connection: made once more, and no
+        // more than that.
+        XCTAssertEqual(calls.map { $0.0 }, ["PUT", "PUT"])
         await owner.endAll(reason: "logout")
+    }
+
+    /// The card's hidden WebView does not hold off the instance page's
+    /// direct hand-over, so a hand-over may close the connection one of its
+    /// requests was about to use. That request gets no answer at once and
+    /// is made once more; the card is registered by the second.
+    func testARequestThatLostItsConnectionIsMadeOnceMore() async throws {
+        for lost in ["status", "thrown"] {
+            cards = []; calls = []
+            var puts = 0
+            let owner = coordinator(response: { _, method, path, _ in
+                if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+                if method == "PUT" {
+                    puts += 1
+                    if puts == 1 {
+                        if lost == "thrown" { throw VoiceCaptureInstanceClient.Failure.offline }
+                        return .init(status: 0, json: nil, redirected: false)
+                    }
+                }
+                return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
+            })
+            await start(owner)
+            XCTAssertEqual(calls.map { $0.0 }.filter { $0 == "PUT" }.count, 2, lost)
+            // Registered: the next foreground reads the row, it does not
+            // register again.
+            calls.removeAll()
+            await owner.reconcile(target: target)
+            XCTAssertEqual(calls.map { $0.0 }, ["GET"], lost)
+            await owner.endAll(reason: "logout")
+        }
+    }
+
+    /// A request that waited out its deadline is not made again: the
+    /// instance is not answering, and a second wait helps nobody.
+    func testARequestThatRanOutOfTimeIsNotMadeAgain() async throws {
+        for lost in ["status", "thrown"] {
+            cards = []; calls = []
+            var clock = Date(timeIntervalSince1970: 1795001000)
+            let owner = coordinator(now: { clock }, response: { _, method, path, _ in
+                if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+                guard method == "PUT" else { return .init(status: 200, json: nil, redirected: false) }
+                clock += TurnActivityCoordinator.lostConnectionWithin
+                if lost == "thrown" { throw VoiceCaptureInstanceClient.Failure.offline }
+                return .init(status: 0, json: nil, redirected: false)
+            })
+            await start(owner)
+            XCTAssertEqual(calls.map { $0.0 }.filter { $0 == "PUT" }.count, 1, lost)
+            await owner.endAll(reason: "logout")
+        }
+    }
+
+    /// A voice take's hidden WebView holds off the instance page's direct
+    /// hand-over for as long as it lives; the card's does not.
+    func testOnlyAVoiceTakesHiddenWebViewHoldsOffAHandover() async throws {
+        for (holdsOff, sole) in [(true, false), (false, true)] {
+            let store = UUID()
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: store)
+            let page = WKWebView(frame: .zero, configuration: configuration)
+            DirectWebViewRegistry.shared.register(page)
+            let client = VoiceCaptureInstanceClient(
+                target: VoiceCaptureTarget(
+                    accountID: "account-a", instanceID: "",
+                    origin: try XCTUnwrap(WebOrigin.parseConfigured("https://one.invalid")),
+                    storeIdentifier: store
+                ),
+                gate: { .open }, isActive: { true }, sleep: { _ in },
+                holdsOffHandover: holdsOff
+            )
+            // Nothing answers at that name: the load fails, and the client
+            // keeps its WebView until it is closed.
+            _ = try? await client.request("GET", "/api/web-push/live-activities/turn")
+            XCTAssertNotNil(client.releaseBarrier, "the client holds a WebView")
+            let answer = DirectWebViewRegistry.shared.isSoleDocument(page, host: "one.invalid")
+            // Counted, it is another document of the host, or one with no
+            // address left after its failed load: refused either way.
+            XCTAssertEqual(answer == true, sole, "holds off: \(holdsOff), answered \(String(describing: answer))")
+            client.close()
+            // The named store this case made is removed again.
+            _ = await FixtureStoreRemoval.remove(store) { false }
+        }
     }
 
     func testUnregisteredExpiresAfterEightHoursWithoutAdvancingStaleDate() async throws {

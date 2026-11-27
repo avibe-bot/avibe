@@ -135,7 +135,10 @@ final class AvibePageViewController: UIViewController, WKNavigationDelegate,
         configuration.applicationNameForUserAgent = userAgentSuffix
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(nibName: nil, bundle: nil)
-        DirectWebViewRegistry.shared.register(webView)
+        // Not registered with `DirectWebViewRegistry`: this WebView only ever
+        // holds its one avibe.bot page (`AvibePagePolicy` opens anything else
+        // outside the App), so it is never another document of an instance
+        // for a direct hand-over.
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false

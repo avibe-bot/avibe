@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class MobileAuthTransportIntegrationTests: XCTestCase {
+    /// The transport's hidden WebView shares the account's store with the
+    /// instance page and only ever holds avibe.bot. It is no other document
+    /// of an instance for the page's direct hand-over: neither once it has
+    /// loaded, nor before, when it has no address to tell by (it then
+    /// refused every hand-over until the account was next asked something).
+    func testTheTransportsWebViewIsNoOtherDocumentOfAnInstance() throws {
+        let store = WKWebsiteDataStore.nonPersistent()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = store
+        let page = WKWebView(frame: .zero, configuration: configuration)
+        DirectWebViewRegistry.shared.register(page)
+        XCTAssertEqual(DirectWebViewRegistry.shared.isSoleDocument(page, host: "instance-one.example"), true)
+
+        // Made, and not yet asked anything: its WebView has no address.
+        let transport = MobileAuthTransport(
+            controlPlaneURL: try XCTUnwrap(URL(string: "https://avibe.example")),
+            websiteDataStore: store
+        )
+        XCTAssertEqual(DirectWebViewRegistry.shared.isSoleDocument(page, host: "instance-one.example"), true)
+        _ = transport.invalidate()
+    }
+
     /// Each fixture event here (a request reaching the fixture server, a
     /// navigation finishing, an account operation ending) comes after WebKit
     /// launches a web content process for a new WebView, so it is bounded by
