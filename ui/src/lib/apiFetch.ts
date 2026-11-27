@@ -215,7 +215,11 @@ export async function withApiDeadline<T>(
     // cover every phase inside it rather than restarting at inner fetches.
     return await run(deadline.signal);
   } catch (error) {
-    if (deadline.isOwnDeadline(error) && typeof error === 'object' && error !== null) {
+    // WebKit rejects fetch/body reads with a fresh AbortError rather than the
+    // reason supplied to abort(). The composed signal records which owner won.
+    // Do not turn an unrelated operation failure after cancellation into a timeout.
+    if (typeof error === 'object' && error !== null && deadline.isOwnDeadline(deadline.signal.reason)
+      && (error === deadline.signal.reason || (error instanceof DOMException && error.name === 'AbortError'))) {
       deadlineAbortReasons.add(error);
     }
     throw error;
