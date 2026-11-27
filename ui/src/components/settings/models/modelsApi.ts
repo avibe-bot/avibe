@@ -105,7 +105,12 @@ export type OAuthResult = {
 
 /** One row of a Direct menu: the selection ID the backend takes, and its display label. */
 export type DirectMenuRow = { id: string; label: string };
-export type DirectMenu = { models: DirectMenuRow[] | null; removed: DirectMenuRow[] };
+export type DirectMenu = {
+  models: DirectMenuRow[] | null;
+  removed: DirectMenuRow[];
+  /** A remote catalog refresh may still change this answer (as for the Session pickers). */
+  catalogRefreshPending?: boolean;
+};
 
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
@@ -678,9 +683,9 @@ export const modelsApi: ModelsApi = {
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
   refreshAgentPresence: () => call<{ agents: AgentSupply[] }>('/api/models/agents?refresh_cli_presence=1').then((r) => r.agents),
   getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
-  getDirectMenu: (backend, live = false) => call<DirectMenu>(
+  getDirectMenu: (backend, live = false) => call<DirectMenu & { catalog_refresh_pending?: boolean }>(
     `/api/backend/${encodeURIComponent(backend)}/models/visibility${live ? '?live=1' : ''}`,
-  ).then(({ models, removed }) => ({ models, removed })),
+  ).then(({ models, removed, catalog_refresh_pending }) => ({ models, removed, catalogRefreshPending: catalog_refresh_pending === true })),
   setDirectModelRemoved: (backend, modelId, removed) => call<{ ok: true }>(
     `/api/backend/${encodeURIComponent(backend)}/models/visibility`, jsonInit('PUT', { model_id: modelId, removed }),
   ).then(() => undefined),

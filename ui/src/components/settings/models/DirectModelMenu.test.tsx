@@ -13,6 +13,7 @@ import i18n from '@/i18n';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { capabilitiesFor } from '@/lib/testing/instanceRoleCapabilities';
 import type { InstanceRole } from '@/lib/sessionInfo';
+import { CATALOG_REFRESH_RETRY_DELAY_MS } from '@/lib/backendModels';
 import { AgentCard } from './AgentCard';
 import { modelsApi, type DirectMenu } from './modelsApi';
 import type { AgentSupply } from './types';
@@ -102,6 +103,19 @@ describe('Direct model menu in Settings · Models', () => {
     await act(async () => {});
     expect(listed()).toEqual(['gpt-6.2-sol']);
     expect(screen.getByRole('button', { name: '1 removed model' })).toBeTruthy();
+  });
+
+  it('reads again while a remote catalog refresh is pending, as the Session pickers do', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(modelsApi.getDirectMenu).mockImplementationOnce(async () => ({ ...answer(), models: [offered[1]], catalogRefreshPending: true }));
+      await renderAs('owner');
+      expect(listed()).toEqual(['gpt-5.5']);
+      await act(async () => { await vi.advanceTimersByTimeAsync(CATALOG_REFRESH_RETRY_DELAY_MS); });
+      expect(listed()).toEqual(['gpt-6.2-sol', 'gpt-5.5']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows a role that cannot add models the same menu with nothing to remove or restore', async () => {

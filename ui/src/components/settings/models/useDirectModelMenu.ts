@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
+import { CATALOG_REFRESH_MAX_RETRIES, CATALOG_REFRESH_RETRY_DELAY_MS } from '@/lib/backendModels';
 import { modelsApi, type DirectMenuRow } from './modelsApi';
 import type { AgentBackend } from './types';
 
@@ -47,7 +48,8 @@ export function useDirectModelMenu(backend: AgentBackend, enabled: boolean): Dir
   React.useEffect(() => {
     if (!enabledBackend) return undefined;
     let cancelled = false;
-    void modelsApi.getDirectMenu(enabledBackend, request.live).then(
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = (live: boolean, retriesRemaining: number) => void modelsApi.getDirectMenu(enabledBackend, live).then(
       (answer) => {
         if (cancelled) return;
         setModels(answer.models);
@@ -55,10 +57,18 @@ export function useDirectModelMenu(backend: AgentBackend, enabled: boolean): Dir
         // A failed read keeps the rows it had; only an answer replaces them.
         setRemovedRows(answer.removed);
         setFailed(false);
+        // Follow a pending remote catalog refresh as the Session pickers do, so both show its answer.
+        if (answer.catalogRefreshPending && retriesRemaining > 0) {
+          timer = setTimeout(() => load(false, retriesRemaining - 1), CATALOG_REFRESH_RETRY_DELAY_MS);
+        }
       },
       () => { if (!cancelled) setFailed(true); },
     );
-    return () => { cancelled = true; };
+    load(request.live, CATALOG_REFRESH_MAX_RETRIES);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
   }, [enabledBackend, request]);
 
   // Rows read for one backend never stand for another.

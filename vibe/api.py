@@ -8783,22 +8783,25 @@ def removed_menu_entries(backend: str) -> list[dict]:
     """The rows a Direct menu hides, as menu entries (``value``, ``reasoning_efforts``).
 
     Removing takes a model off menus, not off a Session, Agent or route already on it, so a check of such a
-    stored choice still finds it here. Reads the catalog snapshot or OpenCode's cached options; starts no CLI.
+    stored choice still finds it here. Reads the catalog snapshot or OpenCode's cached options (any working
+    directory); starts no CLI.
     """
     if not is_native_cli_backend(backend):
         return []
     if backend != "opencode":
         hidden = direct_model_menu(backend, schedule_refresh=False, removed=True)
         return _flat_catalog_models(hidden) if hidden.get("ok") else []
-    cached = _OPENCODE_OPTIONS_CACHE.get(os.path.expanduser("~"), {})
-    data = cached.get("data") if cached.get("mode") == "direct" else None
-    if not data:
-        return []
-    reasoning = data.get("reasoning_options") or {}
-    return [
-        {"value": value, "reasoning_efforts": _effort_values(reasoning.get(value))}
-        for value in opencode_menu_values(opencode_direct_menu(data, removed=True))
-    ]
+    # Every working directory's cached options: the CLI reads the configured default directory, the Web
+    # pickers `~`. A removed row any of them supplies is still a valid stored choice.
+    entries: dict[str, dict] = {}
+    for cached in list(_OPENCODE_OPTIONS_CACHE.values()):
+        data = cached.get("data") if cached.get("mode") == "direct" else None
+        if not data:
+            continue
+        reasoning = data.get("reasoning_options") or {}
+        for value in opencode_menu_values(opencode_direct_menu(data, removed=True)):
+            entries.setdefault(value, {"value": value, "reasoning_efforts": _effort_values(reasoning.get(value))})
+    return list(entries.values())
 
 
 async def direct_menu_and_removals(backend: str, *, live: bool = False) -> dict:
@@ -8841,7 +8844,9 @@ async def direct_menu_and_removals(backend: str, *, live: bool = False) -> dict:
         def rows(removed: bool) -> list[dict]:
             return [{"id": m, "label": labels.get(m) or m} for m in _direct_menu_ids(backend, ids, removed=removed)]
 
-        return {"ok": True, "models": rows(False), "removed": rows(True)}
+        # As the pickers do, Settings reads again while a remote catalog refresh may answer differently.
+        pending = bool(snapshot.get("catalog_refresh_pending"))
+        return {"ok": True, "models": rows(False), "removed": rows(True), "catalog_refresh_pending": pending}
 
     return await asyncio.to_thread(read)
 

@@ -77,6 +77,7 @@ def test_removed_model_leaves_every_surface_until_restored(owner, monkeypatch):
         "ok": True,
         "models": [{"id": "gpt-5.5", "label": "gpt-5.5"}],
         "removed": [{"id": "gpt-6.2-sol", "label": "GPT-6.2-Sol"}],
+        "catalog_refresh_pending": False,
     }
     # A Session or Agent already on the removed model keeps it: checks of a stored choice still find it.
     from vibe import cli
@@ -154,6 +155,17 @@ def test_opencode_menu_and_restore_list_split_on_the_picker_key(owner, monkeypat
     assert picker["cached"] is True
     assert api.opencode_menu_values(picker["data"]) == ["openai/gpt-5.5", "relay/gpt-6.2-sol"]
     assert set(picker["data"]["reasoning_options"]) == {"openai/gpt-5.5", "relay/gpt-6.2-sol"}
+    # An Agent on the removed row stays valid, whichever working directory's options were read.
+    from vibe import cli
+
+    with monkeypatch.context() as patched:
+        other = {"/tmp/other-cwd": api._OPENCODE_OPTIONS_CACHE[os.path.expanduser("~")]}
+        patched.setattr(api, "_OPENCODE_OPTIONS_CACHE", other)
+        stored = cli._agent_models_current(
+            SimpleNamespace(model="openai/gpt-6.2-sol", reasoning_effort=None),
+            {"backend": "opencode", "models": [{"value": "openai/gpt-5.5", "reasoning_efforts": []}]},
+        )
+    assert stored["model_known"] is True and stored["valid"] is True
     # The cache keeps the full live list, so restoring needs no new read.
     assert api.opencode_menu_values(api._OPENCODE_OPTIONS_CACHE[os.path.expanduser("~")]["data"]) == [
         "openai/gpt-6.2-sol",
