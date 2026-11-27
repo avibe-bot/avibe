@@ -20,11 +20,11 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import stat
 from typing import TYPE_CHECKING, Mapping
 
 if TYPE_CHECKING:
     from core.handlers.direct_model_menu import PickerModel
+from vibe.native_inventory_files import read_native_file as _read
 from vibe.opencode_config import get_opencode_auth_path, parse_jsonc_object
 
 from .caller_context import PLUGIN_FILENAME, PLUGIN_SOURCE
@@ -45,20 +45,6 @@ _MAX_FILE = 2 * 1024 * 1024
 
 def _literal(s) -> bool:
     return isinstance(s, str) and bool(s.strip()) and not any(ref in s for ref in ("{env:", "{file:"))
-
-
-def _read(path: Path, limit: int) -> bytes | None:
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
-    except FileNotFoundError:
-        return None
-    with os.fdopen(fd, "rb") as source:
-        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
-            raise ValueError("not a regular native config file")
-        raw = source.read(limit + 1)
-    if len(raw) > limit:
-        raise ValueError("oversize native config")
-    return raw
 
 
 def _object(path: Path, *, jsonc: bool = False) -> dict:
@@ -275,12 +261,12 @@ async def discover(controller, binary: str, cwd: str) -> list[PickerModel]:
     async with agent.borrow_picker_server() as server:
         scope = await asyncio.to_thread(_scope, cwd)
         _, build = await asyncio.to_thread(_binary_identity, binary)
-        if (
-            not server.has_served_directory(scope.cwd)
-            or "stat" not in build
-            or server.picker_launch_proof != _digest([scope.profile, build])
-        ):
-            raise ValueError("different OpenCode launch profile or cold directory")
+        if not server.has_served_directory(scope.cwd):
+            from modules.agents.direct_inventory import InventoryNotReady
+
+            raise InventoryNotReady("cold directory")
+        if "stat" not in build or server.picker_launch_proof != _digest([scope.profile, build]):
+            raise ValueError("different OpenCode launch profile")
         # OpenCode can cache a directory's config from an earlier turn. Disk
         # equality alone cannot prove what this generation uses for this cwd.
         if (await server.direct_picker_get("/path", scope.cwd)).get("directory") != scope.cwd:

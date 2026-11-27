@@ -88,6 +88,8 @@ async def test_codex_upgrade_failure_and_account_cutover(tmp_path, monkeypatch):
     other = inventory_identity("codex", config)
     assert other and other != identity and read_inventory("codex", other).observed_at is None
     monkeypatch.setenv("CODEX_API_KEY", "test-override-C")
+    assert inventory_identity("codex", config) is None  # competing file and environment credentials
+    auth.unlink()
     third = inventory_identity("codex", config)
     assert third and third not in (identity, other)
     (home / "config.toml").write_text('profile="private"\n[profiles.private]\nmodel_catalog_json="projected.json"')

@@ -919,6 +919,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     @asynccontextmanager
     async def borrow_picker_server(self) -> AsyncIterator[OpenCodeGeneration]:
         """Borrow, never prepare or acquire. Do not even wait for a drain to end."""
+        from modules.agents.direct_inventory import InventoryNotReady
+
         service = self.controller.agent_service
         server = self._runtime.current()
         if (
@@ -928,7 +930,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             or server.model_hub_provider_ids
             or not service.is_backend_ready(self.name)
         ):
-            raise ValueError("no serving Direct OpenCode generation")
+            raise InventoryNotReady("no serving Direct OpenCode generation")
 
         # bind is bookkeeping only. A generation replaced or force-stopped
         # while the HTTP request was in flight cannot contribute an answer.
@@ -942,7 +944,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         binding = await self._runtime.bind(server)
         try:
             if not await asyncio.to_thread(server.serves_picker) or not still_current():
-                raise ValueError("OpenCode generation not serving")
+                raise InventoryNotReady("OpenCode generation not serving")
             yield server
             if not await asyncio.to_thread(server.serves_picker) or not still_current():
                 raise ValueError("OpenCode generation changed")

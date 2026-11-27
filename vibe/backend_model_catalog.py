@@ -1409,6 +1409,28 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         efforts = entry.get("reasoning_efforts") or default_efforts
         reasoning_options[entry["id"]] = _reasoning_option_items(efforts)
 
+    if backend_key == "codex":
+        # Cut over the existing picker and its metadata together. The separate
+        # builtin/Hub APIs never use an ambient account as a source binding.
+        from config.v2_config import V2Config, is_model_hub_enabled
+        from core.handlers.direct_inventory_identity import inventory_identity
+        from core.handlers.direct_model_menu import PickerModel, read_menu
+
+        try:
+            config = V2Config.load(persist_migrations=False)
+        except (ValueError, OSError):
+            config = None
+        if config is not None and (not is_model_hub_enabled() or config.model_hub.agents["codex"].mode == "direct"):
+            public = tuple(PickerModel(entry["id"], entry.get("label"), reasoning_efforts=entry.get("reasoning_efforts")) for entry in merged)
+            menu = read_menu("codex", inventory_identity("codex", config), fallback=public)
+            models = [row.id for row in menu.models]
+            model_labels = {row.id: row.label for row in menu.models if row.label and row.label != row.id}
+            reasoning_options = {"": _reasoning_option_items(default_efforts)}
+            for row in menu.models:
+                efforts = row.reasoning_efforts if row.reasoning_efforts is not None else default_efforts
+                reasoning_options[row.id] = _reasoning_option_items(efforts)
+            if menu.observed_at is not None:
+                sources = [("native", models)]
     cached_payload = _cached_remote_payload(source_key=remote_source_key)
     notes = []
     error = cached_payload.get("error")

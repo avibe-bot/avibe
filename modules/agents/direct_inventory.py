@@ -11,6 +11,10 @@ from core.command_runner import run_supervised_command
 from core.handlers.direct_inventory_identity import NativeScope, claude_account_matches
 from core.handlers.direct_model_menu import PickerModel
 
+class InventoryNotReady(ValueError):
+    """No eligible live generation yet; this wasn't a failed native read."""
+
+
 _MAX_OUTPUT = 8 * 1024 * 1024
 
 
@@ -64,9 +68,10 @@ async def _codex(binary: str, scope: NativeScope) -> list[PickerModel]:
 
 async def _claude(settings, binary: str, scope: NativeScope, controller) -> list[PickerModel]:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-    from vibe.claude_config import CLAUDE_NATIVE_MCP_DISABLED, build_claude_subprocess_env
+    from vibe.claude_config import CLAUDE_NATIVE_MCP_DISABLED
+    from core.handlers.direct_inventory_identity import claude_picker_environment
 
-    env = await asyncio.to_thread(build_claude_subprocess_env, settings)
+    _, env = await asyncio.to_thread(claude_picker_environment, settings)
     with tempfile.TemporaryDirectory() as cwd:
         client = ClaudeSDKClient(
             options=ClaudeAgentOptions(

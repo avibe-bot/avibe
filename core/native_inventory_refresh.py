@@ -17,7 +17,7 @@ from core.backend_restart import NativeCredentialLease, finish_native_operation
 from core.handlers.direct_inventory_identity import NativeScope, inventory_scope
 from core.handlers.direct_model_menu import publish_inventory, read_inventory
 from modules.agents.catalog import NATIVE_CLI_BACKENDS, default_cli_for_backend
-from modules.agents.direct_inventory import discover
+from modules.agents.direct_inventory import InventoryNotReady, discover
 
 logger = logging.getLogger(__name__)
 _POLL = 60
@@ -166,6 +166,10 @@ class NativeInventoryRefresh:
                 if not await finish_native_operation(asyncio.to_thread(commit_if_current)):
                     self.attempts.pop(slot, None)
                     return
+        except InventoryNotReady:
+            # No native read occurred. An ordinary turn may warm this cwd before the next poll.
+            self.attempts.pop(slot, None)
+            return
         except Exception:
             logger.debug("No complete %s native inventory", backend)
             failures = min(7, failures + 1)

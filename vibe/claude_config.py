@@ -411,6 +411,7 @@ def build_claude_subprocess_env(
     base_env: Optional[Dict[str, str]] = None,
     *,
     force_oauth: bool = False,
+    settings_env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Build the env dict passed to every Claude subprocess / SDK client.
 
@@ -457,7 +458,8 @@ def build_claude_subprocess_env(
     auth_mode = "oauth" if force_oauth else configured_auth_mode
     configured_key_raw = (getattr(claude_cfg, "api_key", None) or "").strip() if claude_cfg is not None else ""
     configured_base = (getattr(claude_cfg, "base_url", None) or "").strip() if claude_cfg is not None else ""
-    settings_env = read_claude_settings_env()
+    if settings_env is None:
+        settings_env = read_claude_settings_env()
     settings_api_key = settings_env.get("ANTHROPIC_API_KEY") or ""
     settings_auth_token = settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""

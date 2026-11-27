@@ -1222,7 +1222,7 @@ class OpenCodeServerClient:
             if not isinstance(provider, dict) or not isinstance(pid := provider.get("id"), str) or pid in by_id:
                 raise ValueError("invalid provider catalog entry")
             by_id[pid] = provider
-        if any(not isinstance(by_id.get(pid, {}).get("models"), dict) for pid in connected):
+        if set(by_id) != set(connected) or any(not isinstance(by_id[pid].get("models"), dict) for pid in connected):
             raise ValueError("incomplete connected provider catalog")
         return [by_id[pid] for pid in connected]
 
