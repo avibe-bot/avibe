@@ -155,6 +155,49 @@ def test_an_accepted_remote_request_is_told_how_it_arrived_and_no_other_is(insta
         assert header not in anonymous.get("/health", base_url=ORIGIN, environ_base=REMOTE_PEER).headers
 
 
+def test_an_answer_a_cache_may_give_again_does_not_say_how_its_request_arrived(
+    instance, counted, monkeypatch, tmp_path  # noqa: F811
+):
+    """Replayed after the client changed paths, or by a shared cache to another
+    client, the word would be about a request the instance never saw."""
+    config, _rendezvous = instance
+    (tmp_path / "logo-unread.png").write_bytes(b"\x89PNG\r\n")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: tmp_path)
+    owner = _signed_in(config, role="owner", subject="sub-owner")
+    header = ui_server.REQUEST_VIA_HEADER
+    with monkeypatch.context() as patch:
+        patch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+        asset = owner.get("/logo-unread.png", base_url=ORIGIN, environ_base=REMOTE_PEER)
+        assert asset.status_code == 200 and "max-age" in asset.headers["Cache-Control"]
+        assert header not in asset.headers
+        # The same session's next API answer says its own word.
+        answer = owner.get("/api/session", base_url=ORIGIN, environ_base=REMOTE_PEER)
+        assert answer.headers.get(header) == "direct"
+
+
+@pytest.mark.parametrize(
+    ("headers", "reusable"),
+    [
+        # What the page's API requests get: nothing a cache may give again.
+        ({}, False),
+        ({"Cache-Control": "no-store"}, False),
+        ({"Cache-Control": "no-store, private"}, False),
+        ({"Cache-Control": "no-cache", "ETag": '"a"', "Last-Modified": "Fri, 27 Nov 2026 13:20:39 GMT"}, False),
+        ({"ETag": '"a"'}, False),
+        # A bot's avatar, a static file, a Show runtime asset: a browser's own
+        # cache, or a shared one, may answer the next request by itself.
+        ({"Cache-Control": "private, max-age=31536000, immutable"}, True),
+        ({"Cache-Control": "public, max-age=3600"}, True),
+        ({"Cache-Control": "Public"}, True),
+        ({"Cache-Control": "s-maxage=60"}, True),
+        ({"Expires": "Fri, 27 Nov 2026 13:20:39 GMT"}, True),
+        ({"Last-Modified": "Fri, 27 Nov 2026 13:20:39 GMT"}, True),
+    ],
+)
+def test_which_answers_a_cache_may_give_again(headers, reusable):
+    assert ui_server._answer_may_be_reused(ui_server.Response(b"", headers=headers)) is reusable
+
+
 def test_a_later_request_of_the_session_logs_the_minutes_that_are_over(instance, counted, caplog):  # noqa: F811
     config, _rendezvous = instance
     clock, _counts = counted

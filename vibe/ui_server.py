@@ -3246,13 +3246,32 @@ def add_public_show_representation_vary(response: Response) -> Response:
 # words of the event stream's ``via``). Only on the answer to a request whose
 # remote session was accepted as current, and only what the instance counted
 # for it. Not an address, and nothing a client did not already choose.
+#
+# Never on an answer a cache may give again without asking the instance (an
+# avatar, a static file): replayed after the client changed paths, or by a
+# shared cache to another client, the word would be about a request the
+# instance never saw.
 REQUEST_VIA_HEADER = "X-Avibe-Via"
+_REUSABLE_CACHE_DIRECTIVES = ("max-age", "s-maxage", "immutable", "public")
+
+
+def _answer_may_be_reused(response: Response) -> bool:
+    """A cache may give this answer again without asking the instance."""
+    cache_control = response.headers.get("Cache-Control", "").lower()
+    if "no-store" in cache_control or "no-cache" in cache_control:
+        return False
+    # An explicit lifetime, or one a cache may work out for itself.
+    return (
+        any(directive in cache_control for directive in _REUSABLE_CACHE_DIRECTIVES)
+        or "Expires" in response.headers
+        or "Last-Modified" in response.headers
+    )
 
 
 @app.after_request
 def add_request_via_header(response: Response) -> Response:
     via = getattr(g, "remote_request_via", None)
-    if via is not None:
+    if via is not None and not _answer_may_be_reused(response):
         response.headers[REQUEST_VIA_HEADER] = via
     return response
 
