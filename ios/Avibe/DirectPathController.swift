@@ -744,6 +744,9 @@ final class DirectPathController {
     private var lateRouteTask: Task<Void, Never>?
     /// When the first bind of the listener that is there now was started.
     private var firstBindStarted: ContinuousClock.Instant?
+    /// Listeners started in this process: only the first one's bind is a
+    /// cold start's (`ColdStartTimings`).
+    private var listenersStarted = 0
     /// Hosts whose route was added after their first load, until one of
     /// their connections reaches the listener. Their documents are told
     /// `tunnel` meanwhile: nothing of theirs passes through the listener
@@ -2115,6 +2118,8 @@ final class DirectPathController {
     }
 
     private func startListener() -> Task<Bool, Never> {
+        listenersStarted += 1
+        let firstInProcess = listenersStarted == 1
         // The failure callback names the listener it came from, so one from
         // a listener that was replaced or stopped does nothing.
         let listenerBox = DirectListenerBox()
@@ -2178,6 +2183,16 @@ final class DirectPathController {
                 self.listenerPort = binding.port
                 self.listenerGeneration = binding.generation
                 self.disarmWatchdog()
+                if firstInProcess, let started = self.firstBindStarted {
+                    // The process's first listener only: a later one (after
+                    // the first failed or was retired) is no cold start's.
+                    // A host that loaded while this bind was under way gets
+                    // its route late (`lateRoute`).
+                    ColdStartTimings.shared.firstBindConfirmed(
+                        took: started.duration(to: ContinuousClock.now),
+                        late: self.lateRoute != nil
+                    )
+                }
                 return true
             }
         }

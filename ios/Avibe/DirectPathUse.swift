@@ -198,12 +198,29 @@ final class DirectPathUse: @unchecked Sendable {
 
     private let lock = NSLock()
     private let seconds: @Sendable () -> Int
+    /// This App's build (`CFBundleVersion`, for example "57.1"), sent as each
+    /// entry's `app`; nil when it is unknown or not what the instance
+    /// accepts (1–32 printable ASCII characters).
+    let app: String?
     private var entries: [Key: Entry] = [:]
 
     /// `seconds`: whole seconds on a clock that never goes back and keeps
     /// counting while the device sleeps.
-    init(seconds: @escaping @Sendable () -> Int = DirectPathUse.continuousSeconds()) {
+    init(
+        seconds: @escaping @Sendable () -> Int = DirectPathUse.continuousSeconds(),
+        app: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    ) {
         self.seconds = seconds
+        self.app = app.flatMap(Self.acceptedBuild)
+    }
+
+    /// The build as the instance accepts it, or nil.
+    static func acceptedBuild(_ build: String) -> String? {
+        let bytes = Array(build.utf8)
+        guard (1...32).contains(bytes.count), bytes.allSatisfy({ (0x20...0x7e).contains($0) }) else {
+            return nil
+        }
+        return build
     }
 
     static func continuousSeconds() -> @Sendable () -> Int {
@@ -280,7 +297,7 @@ final class DirectPathUse: @unchecked Sendable {
                 .prefix(Self.reportLimit)
                 .compactMap { key in
                     entries[key].map {
-                        Report(scope: key.scope, minute: key.minute, path: key.path, json: Self.json($0, key, now: now))
+                        Report(scope: key.scope, minute: key.minute, path: key.path, json: Self.json($0, key, now: now, app: app))
                     }
                 }
         }
@@ -352,8 +369,8 @@ final class DirectPathUse: @unchecked Sendable {
     }
 
     /// Written by hand, in a fixed order: four fixed words and integers
-    /// within the instance's bounds.
-    private static func json(_ entry: Entry, _ key: Key, now: Int) -> String {
+    /// within the instance's bounds, then `app` when the build is known.
+    private static func json(_ entry: Entry, _ key: Key, now: Int, app: String?) -> String {
         func bounded(_ value: Int) -> Int {
             min(max(value, 0), Int(Int32.max))
         }
@@ -371,6 +388,12 @@ final class DirectPathUse: @unchecked Sendable {
         let words = "\"client\":\"ios\",\"path\":\"\(key.path.rawValue)\""
             + ",\"handover_rule\":\"\(most(entry.handoverRules))\""
             + ",\"retired_rule\":\"\(most(entry.retiredRules))\""
-        return "{" + words + numbers.map { ",\"\($0.0)\":\(bounded($0.1))" }.joined() + "}"
+        // Printable ASCII only (`acceptedBuild`): a quote and a backslash
+        // are the two characters JSON escapes among them.
+        let build = app.map {
+            ",\"app\":\"" + $0.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        } ?? ""
+        return "{" + words + numbers.map { ",\"\($0.0)\":\(bounded($0.1))" }.joined() + build + "}"
     }
 }

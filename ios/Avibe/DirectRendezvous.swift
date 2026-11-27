@@ -396,11 +396,18 @@ enum DirectRendezvous {
     /// (`DirectPathUse`). Each entry has exactly the 22 keys the instance
     /// requires; one it does not accept makes it ignore them all. An
     /// instance that does not know the field ignores it.
+    ///
+    /// `startup`, when there are any: the App's cold starts of a restored
+    /// instance (`ColdStartTimings`), oldest first, at most five. Each entry
+    /// has exactly `bind_ms`, `visible_ms`, `late` and `visible`; one the
+    /// instance does not accept makes it ignore the list (and only the
+    /// list). No identifier, address or time of day.
     static func requestBody(
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
         slowStoreRemovalsMs: [Int] = [],
-        pathUse: [DirectPathUse.Report] = []
+        pathUse: [DirectPathUse.Report] = [],
+        startup: [String] = []
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
@@ -421,6 +428,10 @@ enum DirectRendezvous {
         let use = pathUse.prefix(DirectPathUse.reportLimit).map(\.json)
         if !use.isEmpty {
             body += ",\"path_use\":[" + use.joined(separator: ",") + "]"
+        }
+        let starts = startup.suffix(ColdStartTimings.limit)
+        if !starts.isEmpty {
+            body += ",\"startup\":[" + starts.joined(separator: ",") + "]"
         }
         return body + "}"
     }

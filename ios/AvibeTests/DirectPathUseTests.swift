@@ -82,7 +82,7 @@ final class DirectPathUseTests: XCTestCase {
 
     func testAMinuteIsReportedOnceItIsOverWithExactlyTheInstancesKeys() throws {
         let clock = DirectPathUseTestClock()
-        let use = DirectPathUse(seconds: { clock.now })
+        let use = DirectPathUse(seconds: { clock.now }, app: nil)
         use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 120), scope: scope, path: .relay)
         use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 80), scope: scope, path: .relay)
         use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 60), scope: scope, path: .relay)
@@ -137,9 +137,37 @@ final class DirectPathUseTests: XCTestCase {
         XCTAssertEqual(use.pending(for: scope), [])
     }
 
+    /// The App's build rides each entry as `app` when the instance would
+    /// accept it (1–32 printable ASCII characters), escaped for JSON; an
+    /// unknown or unacceptable build sends no `app` at all.
+    func testEachEntryCarriesTheAppsBuildWhenItIsAcceptable() throws {
+        let clock = DirectPathUseTestClock()
+        let use = DirectPathUse(seconds: { clock.now }, app: "57.1")
+        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 12), scope: scope, path: .lan)
+        clock.now += 60
+        let entry = try object(XCTUnwrap(use.pending(for: scope).first))
+        XCTAssertEqual(entry["app"] as? String, "57.1")
+        XCTAssertEqual(entry.count, 23)
+        XCTAssertTrue(try XCTUnwrap(use.pending(for: scope).first).json.hasSuffix(",\"retired\":0,\"app\":\"57.1\"}"))
+
+        let quoted = DirectPathUse(seconds: { clock.now }, app: #"a"b\c"#)
+        quoted.connection(Connection(carrier: .tunnel, plan: .noDirect, readyMs: 3), scope: scope, path: .none)
+        clock.now += 60
+        XCTAssertEqual(try object(XCTUnwrap(quoted.pending(for: scope).first))["app"] as? String, #"a"b\c"#)
+
+        XCTAssertEqual(DirectPathUse.acceptedBuild("3.2.9-rc.4"), "3.2.9-rc.4")
+        XCTAssertEqual(DirectPathUse.acceptedBuild(String(repeating: "9", count: 32))?.count, 32)
+        XCTAssertNil(DirectPathUse.acceptedBuild(""))
+        XCTAssertNil(DirectPathUse.acceptedBuild(String(repeating: "9", count: 33)))
+        XCTAssertNil(DirectPathUse.acceptedBuild("57.1\n"))
+        XCTAssertNil(DirectPathUse.acceptedBuild("版本"))
+        XCTAssertNil(DirectPathUse(app: "").app)
+        XCTAssertNil(DirectPathUse(app: nil).app)
+    }
+
     func testCountsStayWithTheirOwnInstanceAndAccount() throws {
         let clock = DirectPathUseTestClock()
-        let use = DirectPathUse(seconds: { clock.now })
+        let use = DirectPathUse(seconds: { clock.now }, app: nil)
         let other = DirectPathUse.Scope(store: scope.store, host: "instance-two.example")
         let nextAccount = DirectPathUse.Scope(store: UUID(), host: scope.host)
         use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 20), scope: scope, path: .lan)
@@ -167,7 +195,7 @@ final class DirectPathUseTests: XCTestCase {
 
     func testWhatIsKeptAndSentIsBounded() throws {
         let clock = DirectPathUseTestClock()
-        let use = DirectPathUse(seconds: { clock.now })
+        let use = DirectPathUse(seconds: { clock.now }, app: nil)
         for minute in 0..<40 {
             clock.now += 60
             use.retired(.pathMonitor, scope: scope, path: minute % 2 == 0 ? .lan : .punched)
