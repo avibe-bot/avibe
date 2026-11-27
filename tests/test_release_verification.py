@@ -167,7 +167,10 @@ def _notes_git_fixture(tmp_path, *, annotation, existing_body, tag="gh-v3.1.0rc1
     if annotation is None:
         _fixture_git(remote, "tag", tag)
     else:
-        _fixture_git(remote, "tag", "-a", tag, "-m", annotation)
+        # From a file: a long annotation would exceed the per-argument exec limit.
+        annotation_file = tmp_path / "annotation.txt"
+        annotation_file.write_text(annotation, encoding="utf-8")
+        _fixture_git(remote, "tag", "-a", tag, "-F", str(annotation_file))
     workspace = tmp_path / "checkout 中文"
     _fixture_git(tmp_path, "clone", "--no-hardlinks", str(remote), str(workspace))
     binaries = tmp_path / "bin"
@@ -961,11 +964,39 @@ def _run_notes(tmp_path, *, annotation, notes_text, tag="gh-v3.1.0rc1"):
     return notes.read_text(encoding="utf-8")
 
 
+SILENT_PAIR = "<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n"
+
+
 def test_the_silent_pair_leads_notes_that_quote_other_markers(tmp_path):
-    quoted = "# Notes\n\n<!-- avibe:update-notification=default -->\n\n<!-- avibe:update-notification=none -->\n"
+    quoted = (
+        "# Notes\n\n<!-- avibe:update-notification=default -->\n\n"
+        "```\n<!-- avibe:update-notification=none -->\n```\n"
+    )
     text = _run_notes(tmp_path, annotation=None, notes_text=quoted)
-    assert text.startswith("<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n")
-    assert text.count("<!-- avibe:update-notification=none -->") == 1
+    # Leads the body, once across replays, and leaves the text below untouched.
+    assert text.startswith(SILENT_PAIR + quoted)
+
+
+@pytest.mark.parametrize("where", ["annotation", "existing-body"])
+def test_a_long_silent_input_beats_the_announce_flag(tmp_path, where):
+    filler = "filler line\n" * 20000
+    if where == "annotation":
+        annotation = "<!-- avibe:update-notification=none -->\n<!-- avibe:update-notification=default -->\n" + filler
+        existing = ""
+    else:
+        annotation = "Avibe 3.1.0rc1\n<!-- avibe:update-notification=default -->"
+        existing = "<!-- avibe:update-notification=none -->\n" + filler
+    _remote, workspace, env, _tag, _source, command = _notes_git_fixture(
+        tmp_path, annotation=annotation, existing_body=existing,
+    )
+    notes = workspace / "release.md"
+    notes.write_text("# Release\n", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+        cwd=workspace, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert notes.read_text(encoding="utf-8").startswith(SILENT_PAIR)
 
 
 def test_a_long_flagged_annotation_still_announces(tmp_path):

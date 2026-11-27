@@ -792,7 +792,7 @@ jobs:
           if [ "$(git cat-file -t "$TAG_OBJECT")" = "tag" ]; then
             TAG_MSG="$(git cat-file tag "$TAG_OBJECT" | sed '1,/^$/d')"
           fi
-          if echo "$TAG_MSG" | grep -qE "$MARKER_RE"; then
+          if grep -qE "$MARKER_RE" <<<"$TAG_MSG"; then
             echo "Silent update marker found in tag annotation."
             has_marker="true"
           fi
@@ -805,7 +805,7 @@ jobs:
           # not an intent to go silent.
           if [ "$has_marker" != "true" ]; then
             EXISTING_BODY=$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null || true)
-            if echo "$EXISTING_BODY" | grep -qE "$MARKER_COMMENT_RE"; then
+            if grep -qE "$MARKER_COMMENT_RE" <<<"$EXISTING_BODY"; then
               echo "Silent update marker (HTML comment) found in the existing release body."
               has_marker="true"
             fi
@@ -832,14 +832,13 @@ jobs:
           # the legacy 'vibe-remote' marker — dropping it would notify exactly the
           # old-version users a silent release is meant not to disturb.
           # Clients read the FIRST policy marker, so the silent pair must lead the body
-          # even when generated text quotes another marker. Drop any standalone
-          # canonical pair first so this stays idempotent, then put it on top.
-          if [ "$has_marker" = "true" ]; then
+          # even when generated text quotes another marker. Prepend it unless the body
+          # already starts with it (idempotent); never edit the text below it.
+          SILENT_HEADER=$'<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->'
+          if [ "$has_marker" = "true" ] && [ "$(head -n 2 release.md)" != "$SILENT_HEADER" ]; then
             echo "Leading the release notes with the silent-update markers (current + legacy)."
-            grep -vxF -e '<!-- avibe:update-notification=none -->' -e '<!-- vibe-remote:update-notification=none -->' \
-              release.md > release.md.tmp || true
-            { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md.tmp; } > release.md
-            rm -f release.md.tmp
+            { printf '%s\n\n' "$SILENT_HEADER"; cat release.md; } > release.md.tmp
+            mv release.md.tmp release.md
           fi
 
           # The RC's one attested unverified job, as the release gate printed it, bound to

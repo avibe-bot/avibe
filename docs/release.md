@@ -110,7 +110,8 @@ remain mandatory.
   automatically.
 - A GitHub-only RC (`gh-vX.Y.ZrcN`) is **silent by default**. It announces
   itself only when its annotated tag carries the explicit flag
-  `<!-- avibe:update-notification=default -->`; the release Session adds it to
+  `<!-- avibe:update-notification=default -->` on a line by itself; the release
+  Session adds it to
   every RC it cuts for testers. Without the flag (including a lightweight tag),
   the RC still builds and publishes, but its notes get the silent marker, so no
   automatic updater offers it. A silent marker in the annotation wins over the
