@@ -1091,6 +1091,42 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(2);
   });
 
+  it('follows the path again after a return from the background, when the shell could not move it before', async () => {
+    const shell = await pathShell();
+    // Another page of the instance was open: the shell moved nothing.
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? { closed: 0, kept: 0, skipped: 'other_documents' } : null),
+    );
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    emitHandshakeVia(2, 'other');
+    emitControllerLeg(true);
+
+    // The App goes to the background and comes back: its listener closes and
+    // binds again, so its preference goes to the public path and returns to
+    // the same address. The page is told on the return, by the status it
+    // reads and by the events that follow.
+    await vi.advanceTimersByTimeAsync(20_000);
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? { closed: 1, kept: 0 } : null),
+    );
+    setVisibility('hidden');
+    setVisibility('visible');
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    emitHandshakeVia(3, 'other');
+    emitControllerLeg(true);
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 1, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    // An arrival: followed at once, 20 s after the last hand-over, and not
+    // held to the 30 s a repeat on the same address waits.
+    expect(shell.handovers()).toBe(2);
+    emitHandshakeVia(4, 'direct');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(shell.handovers()).toBe(2);
+  });
+
   it('makes at most six hand-overs however the path flaps between kinds, until ten minutes pass without one', async () => {
     const shell = await pathShell();
     let sequence = 0;
