@@ -485,7 +485,11 @@ def test_leg_faults_log_only_their_fixed_words_and_numbers_without_changing_the_
         "lost_race", "proxy_auth", "expired", "other", "invalid_offer", "no_permitted_path",
         "listener_closed", "superseded", "not_ready", "connection_ended", "invalid_head",
         "not_ready_certificate", "not_ready_owner_required", "not_ready_not_running", "not_ready_permission",
-        "not_ready_transport", "not_ready_disabled", "not_ready_no_address", "not_ready_other")
+        "not_ready_transport", "not_ready_disabled", "not_ready_no_address", "not_ready_other",
+        "path_unselected",
+        "path_refused_relay", "path_refused_private", "path_refused_cgnat", "path_refused_ula",
+        "path_refused_linklocal", "path_refused_loopback", "path_refused_public", "path_refused_global",
+        "path_refused_nat64", "path_refused_mapped", "path_refused_other")
     assert direct_rendezvous._LEG_FAULT_PATHS == ("lan", "punched", "relay", "none")
     # It rides beside the iPhone's fields without either changing the other.
     caplog.clear()
