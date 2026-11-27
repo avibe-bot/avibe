@@ -11,6 +11,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -153,14 +155,34 @@ def detect_antigravity_adc(env: Mapping[str, str] | None = None) -> dict[str, An
     return {"present": False, "source": None, "path": None, "login_command": ANTIGRAVITY_ADC_LOGIN_COMMAND}
 
 
+def create_antigravity_login_opener_shims() -> str | None:
+    """Shadow agy's PATH-resolved browser openers for one POSIX login child."""
+    if os.name == "nt":
+        return None
+    directory = tempfile.mkdtemp(prefix="avibe-agy-login-")
+    try:
+        os.chmod(directory, 0o700)
+        for name in ("open", "xdg-open"):
+            shim = Path(directory) / name
+            shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            shim.chmod(0o755)
+    except BaseException:
+        shutil.rmtree(directory)
+        raise
+    return directory
+
+
 def build_antigravity_auth_env(
     config: Any | None = None,
     *,
     base_env: Mapping[str, str] | None = None,
     auth_mode: str | None = None,
+    opener_shim_dir: str | None = None,
 ) -> dict[str, str]:
     """Build subprocess env for Antigravity ACP auth/status/logout/probe calls."""
     env = dict(os.environ if base_env is None else base_env)
+    if opener_shim_dir is not None:
+        env["PATH"] = opener_shim_dir + os.pathsep + env.get("PATH", os.defpath)
     env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV] = "true"
     mode = normalize_antigravity_auth_mode(config, auth_mode)
 
