@@ -816,6 +816,19 @@ final class AppModel: ObservableObject {
                 return controller.loadGate(forInstanceURL: url)
             }
         }
+        // And, right before a load in the background, the same gate with the
+        // listener's port asked first (something else may hold it then).
+        VoiceCaptureLoadGate.backgroundProvider = { [weak self] origin, storeIdentifier in
+            guard let self, let controller = self.directPathController else {
+                return .gate(.open)
+            }
+            return await VoiceCaptureLoadGate.backgroundCheck(
+                for: origin, store: storeIdentifier, currentStore: self.websiteDataStore.identifier
+            ) { url in
+                controller.settleRecordedFault()
+                return await controller.backgroundLoadCheck(forInstanceURL: url)
+            }
+        }
         runtimeOpenLifecycleObservers = [
             runtimeOpenNotificationCenter.addObserver(
                 forName: UIScene.didActivateNotification, object: nil, queue: nil

@@ -1965,7 +1965,7 @@ actor DirectConnectListener {
 
     /// Whether anything accepts a connection on the loopback `port` now.
     /// One attempt, nothing sent, closed at once. For a port this App does
-    /// not hold at the moment (`DirectPathController.backgroundLoadGate`):
+    /// not hold at the moment (`DirectPathController.backgroundLoadCheck`):
     /// asked while this listener holds it, the answer is this listener.
     static func probe(port: UInt16, within seconds: TimeInterval) async -> DirectPortProbe {
         guard seconds > 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {

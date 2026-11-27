@@ -319,7 +319,7 @@ struct DirectPathTiming: Sendable {
     /// checked again, attempt by attempt; the last one repeats for as long
     /// as the App stays in the foreground.
     let retrySeconds: [TimeInterval]
-    /// In the background (`backgroundLoadGate`): how long the listener's
+    /// In the background (`backgroundLoadCheck`): how long the listener's
     /// own socket may take to be closed after the App left the foreground
     /// (a close takes up to a second, and an attempt that was under way
     /// ends first), and how long the port may take to accept or refuse one
@@ -436,6 +436,35 @@ enum DirectListenerState: Equatable, Sendable {
     /// interrupted. (A listener no route points at is not kept when it
     /// fails: it is stopped, and the next open makes another.)
     case failed
+}
+
+/// What a load made while the App is in the background would meet
+/// (`DirectPathController.backgroundLoadCheck`).
+enum DirectBackgroundCheck: Equatable, Sendable {
+    /// The load may go by this gate: the port refused, or the App is back
+    /// in front. Never `.fault`: that is `foreign`.
+    case gate(DirectLoadGate)
+    /// Something else holds the port: it accepted, or the synchronous gate
+    /// already says so.
+    case foreign
+    /// Nothing could be told.
+    case undecided(Reason)
+
+    enum Reason: String, Sendable {
+        /// The port gave no answer within the bound (or the attempt failed
+        /// some other way).
+        case noAnswer = "no_answer"
+        /// The App's own listening socket was not closed within its bound.
+        case ownSocketOpen = "own_socket_open"
+        /// The App came to the front and left again while the question was
+        /// open.
+        case stayChanged = "stay_changed"
+    }
+
+    /// The answer `loadGate` alone gives: `foreign` where it is `fault`.
+    init(_ gate: DirectLoadGate) {
+        self = gate == .fault ? .foreign : .gate(gate)
+    }
 }
 
 /// Whether the shell may create or reload a runtime's WebView now. Derived,
@@ -969,33 +998,36 @@ final class DirectPathController {
         return gate
     }
 
-    /// The gate for a load that is made while the App is in the background
-    /// (an Action Button voice take). In the foreground it is `loadGate`,
-    /// at once. In the background `loadGate` cannot say what a load would
+    /// What a load made while the App is in the background (an Action
+    /// Button voice take) would meet. In the foreground it is `loadGate`, at
+    /// once. In the background `loadGate` cannot say what a load would
     /// meet: the listener is closed there on purpose, a load of a routed
     /// host goes to the listener's port all the same, and that port may
     /// have been taken by another process since the App left. So the port
     /// is asked, right before the load:
     ///
-    /// - something accepts a connection there: `fault`. It is not this
+    /// - something accepts a connection there: `foreign`. It is not this
     ///   App's listener, and the load would go to it;
-    /// - the connection is refused: `loadGate`'s own answer. Nothing
-    ///   listens there, and the load goes as it does today;
-    /// - neither within `timing.portProbeSeconds`: `fault`.
+    /// - the connection is refused: `gate(loadGate)`. Nothing listens
+    ///   there, and the load goes as it does today;
+    /// - neither within `timing.portProbeSeconds`: `undecided(.noAnswer)`.
     ///
     /// "It is not this App's listener" holds only once the listener's own
     /// socket is closed, which only this controller and its listener know:
     /// right after the App leaves the foreground the close is still under
     /// way, and an attempt to bind that was running ends first. That is
     /// waited for, up to `timing.ownCloseSeconds`; a socket still not
-    /// closed then is `fault` as well, since nothing could be told from an
-    /// answer on the port.
+    /// closed then is `undecided(.ownSocketOpen)`, since nothing could be
+    /// told from an answer on the port. A return to the front and a new
+    /// stay in the background while it was asked is `undecided(.stayChanged)`.
+    /// Wherever `loadGate` itself is `fault`, the answer is `foreign`.
     ///
-    /// Nothing is recorded or changed by asking. What it cannot cover: the
-    /// port can be taken between this answer and the load's own connection,
-    /// a few milliseconds later; and it is asked for one load, so a page
-    /// that is already loaded makes its later connections without it.
-    func backgroundLoadGate(forInstanceURL url: URL) async -> DirectLoadGate {
+    /// Nothing is recorded or changed by asking, so an undecided answer may
+    /// be asked again. What it cannot cover: the port can be taken between
+    /// this answer and the load's own connection, a few milliseconds later;
+    /// and it is asked for one load, so a page that is already loaded makes
+    /// its later connections without it.
+    func backgroundLoadCheck(forInstanceURL url: URL) async -> DirectBackgroundCheck {
         let gate = loadGate(forInstanceURL: url)
         guard
             isInBackground,
@@ -1006,7 +1038,7 @@ final class DirectPathController {
             let listener,
             let port = listenerPort
         else {
-            return gate
+            return DirectBackgroundCheck(gate)
         }
         // The same stay in the background throughout: after a return the
         // listener binds this port again, and an answer on it is its own.
@@ -1024,15 +1056,15 @@ final class DirectPathController {
                 break
             }
             guard stayNow() == .same, ContinuousClock.now < closeBy, !Task.isCancelled else {
-                return Self.backgroundGate(.undecided, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
+                return Self.backgroundCheck(nil, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
             }
             try? await Task.sleep(for: .milliseconds(10))
         }
         guard stayNow() == .same else {
-            return Self.backgroundGate(.undecided, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
+            return Self.backgroundCheck(nil, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
         }
         let probe = await DirectConnectListener.probe(port: port, within: timing.portProbeSeconds)
-        return Self.backgroundGate(probe, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
+        return Self.backgroundCheck(probe, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
     }
 
     /// Where the App is when an answer about the background is ready.
@@ -1046,20 +1078,28 @@ final class DirectPathController {
     }
 
     /// What the port's answer makes of the gate. In the stay it was asked
-    /// in: a refused connection leaves the gate as it is, and anything
-    /// else is a fault. Back in the foreground the gate alone answers, as
-    /// it does there. In another stay nothing was learnt about this one,
-    /// and the port may be the listener's own again or someone else's.
-    nonisolated static func backgroundGate(
-        _ probe: DirectPortProbe,
+    /// in: a refused connection leaves the gate as it is, an accepted one is
+    /// `foreign`, and no answer is `undecided`. `probe` nil: the App's own
+    /// socket was not closed in time, and the port was not asked. Back in
+    /// the foreground the gate alone answers, as it does there. In another
+    /// stay nothing was learnt about this one, and the port may be the
+    /// listener's own again or someone else's.
+    nonisolated static func backgroundCheck(
+        _ probe: DirectPortProbe?,
         stay: BackgroundStay,
         otherwise gate: DirectLoadGate
-    ) -> DirectLoadGate {
+    ) -> DirectBackgroundCheck {
         switch (stay, probe) {
         case (.ended, _), (.same, .refused):
-            return gate
-        case (.another, _), (.same, .accepted), (.same, .undecided):
-            return .fault
+            return DirectBackgroundCheck(gate)
+        case (.another, _):
+            return .undecided(.stayChanged)
+        case (.same, .accepted):
+            return .foreign
+        case (.same, .undecided):
+            return .undecided(.noAnswer)
+        case (.same, nil):
+            return .undecided(.ownSocketOpen)
         }
     }
 
