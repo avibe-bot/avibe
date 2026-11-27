@@ -267,17 +267,24 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(audio.calls, ["start", "stop", "start", "stop"])
     }
 
-    func testAudioForAPageThatWasDeallocatedEndsTheTake() throws {
+    /// A take whose audio goes to its page (`start` with no `deliver`) ends
+    /// when that page goes away: its WebView's controller says so
+    /// (`stop(webView:)`, at each teardown), the input stops, and audio
+    /// still on its way reaches nothing. Told directly: a test cannot make
+    /// WebKit free a WKWebView (in every simulator run on record it kept
+    /// it alive, and the earlier form of this test skipped itself).
+    func testAudioForAPageThatWentAwayEndsTheTake() throws {
         let audio = FakeAudio()
         let capture = makeCapture(audio)
-        weak var released: WKWebView?
-        try autoreleasepool {
-            let page = WKWebView()
-            released = page
-            _ = try capture.start(take: "one", webView: page).get()
-        }
-        guard released == nil else { throw XCTSkip("WebKit kept the WebView alive") }
+        let page = WKWebView()
+        _ = try capture.start(take: "one", webView: page).get()
+        XCTAssertEqual(capture.currentTake, "one")
+        capture.stop(webView: page)
+        XCTAssertNil(capture.currentTake)
+        XCTAssertEqual(audio.calls, ["start", "stop"])
+        // Late audio from the stopped input is dropped: no new take, no restart.
         audio.onPCM?(Data([1, 0]))
+        drain()
         XCTAssertNil(capture.currentTake)
         XCTAssertEqual(audio.calls, ["start", "stop"])
     }
