@@ -124,29 +124,46 @@ jobs:
             build-for-testing
 
       - name: Run XCTest on iPhone Simulator
-        # A normal run takes 47-49 minutes.
-        timeout-minutes: 70
+        # The build takes about 11 minutes and the tests 34-58 on this runner;
+        # one run that passed every test still met the old 70-minute bound.
+        # A test rerun after a simulator stall adds a few minutes.
+        timeout-minutes: 90
         run: |
           set -euo pipefail
-          xcodebuild \
-            -project ios/Avibe.xcodeproj \
-            -scheme Avibe \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -parallel-testing-enabled NO \
-            -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 600 \
-            -maximum-test-execution-time-allowance 600 \
-            CODE_SIGNING_ALLOWED=NO \
-            test
+          xctest() {
+            xcodebuild \
+              -project ios/Avibe.xcodeproj \
+              -scheme Avibe \
+              -configuration Debug \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+              -derivedDataPath "$RUNNER_TEMP/AvibeTestDerivedData" \
+              -parallel-testing-enabled NO \
+              -test-timeouts-enabled YES \
+              -default-test-execution-time-allowance 600 \
+              -maximum-test-execution-time-allowance 600 \
+              CODE_SIGNING_ALLOWED=NO \
+              "$@"
+          }
+          xctest -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" test \
+            2>&1 | tee "$RUNNER_TEMP/AvibeTests.log" && exit 0
+          # The hosted simulator now and then stalls WebKit's processes for
+          # 30 s or more. A failed test whose own lines show such a stall runs
+          # once more, alone; any other failure stands. See the script.
+          python3 ios/scripts/xctest_stall_retry.py "$RUNNER_TEMP/AvibeTests.log" \
+            --out "$RUNNER_TEMP/AvibeTests.rerun"
+          rerun=()
+          while IFS= read -r only; do rerun+=("$only"); done < "$RUNNER_TEMP/AvibeTests.rerun"
+          xctest -resultBundlePath "$RUNNER_TEMP/AvibeTestsRerun.xcresult" \
+            "${rerun[@]}" test-without-building
 
       - name: Upload XCTest result bundle
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-shell-xcresult
-          path: ${{ runner.temp }}/AvibeTests.xcresult
+          path: |
+            ${{ runner.temp }}/AvibeTests.xcresult
+            ${{ runner.temp }}/AvibeTestsRerun.xcresult
           if-no-files-found: ignore
           retention-days: 7
 

@@ -1032,7 +1032,13 @@ readiness deadline, which a cold WebContent or GPU process launch on a loaded
 simulator can exceed before the request is sent; it retries such an attempt
 within the fixture budget instead of counting it. `ios-shell` uploads any available
 `AvibeTests.xcresult` as `ios-shell-xcresult` after success or failure, including
-compile failures. Signed-in App fixtures require a settled bootstrap and the
+compile failures. The hosted simulator now and then stalls WebKit's processes
+for 30 s or more; a failed test whose own log lines show such a stall (a
+WebKit process launch of 20 s or more, a WebKit process reported unresponsive,
+or a fixture bootstrap of 60 s or more) runs once more alone, and that rerun's
+`AvibeTestsRerun.xcresult` joins the same artifact. Any other failure, a crash,
+or more than three failed tests fails the job without a rerun
+(`ios/scripts/xctest_stall_retry.py`). Signed-in App fixtures require a settled bootstrap and the
 expected account and instance IDs: the picker route alone also occurs after a
 bootstrap error. Fixture request attachments contain elapsed time, method, path,
 and response status, not headers, query strings, or bodies. The password-error
