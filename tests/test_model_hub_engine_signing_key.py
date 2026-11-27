@@ -34,11 +34,14 @@ if pathlib.Path(__file__).name == 'avault':
         assert argv == ['keypair','generate','--name','MODEL_HUB_ENGINE_CHANNEL','--curve','secp256k1']
         (vault/'machine.key').write_text(marker)
         print(marker,file=sys.stderr)
-        print(json.dumps({'public_key':'02'+'ab'*32, 'envelope':marker}))
+        envelope = {'ciphertext':marker, 'nonce':'nonce', 'wrap_meta':'{}'}
+        print(json.dumps({'public_key':'02'+'ab'*32, 'envelope':marker if mode == 'bad-envelope' else envelope}))
     else:
         assert argv == ['key','export'] and len(data) >= 48 and data.decode() not in str(argv)+str(os.environ)
         if mode == 'vault-error': sys.exit(marker)
-        print(json.dumps({'ciphertext':marker, 'check':hashlib.sha256(data).hexdigest()}))
+        blob = {'scheme':'machine-key-export-v1', 'kdf':'scrypt', 'n':32768, 'r':8, 'p':1,
+                'salt':hashlib.sha256(data).hexdigest(), 'nonce':'nonce', 'ciphertext':marker}
+        print(json.dumps({} if mode == 'bad-export' else blob))
 else:
     assert os.environ['HOME'] == str(root/'daily')
     assert argv[0] == 'secret' and argv[argv.index('--env')+1] == 'model-hub-engine-channel-signer'
@@ -51,8 +54,8 @@ else:
     else:
         assert argv[1:3] == ['set',secret] and 'set' not in log.read_text().splitlines()[:-1]
         b = json.loads(data)
-        assert b['envelope'] == b['import']['blob']['ciphertext'] == marker
-        pw = b['import']['passphrase']; assert hashlib.sha256(pw.encode()).hexdigest() == b['import']['blob']['check']
+        assert b['envelope']['ciphertext'] == b['import']['blob']['ciphertext'] == marker
+        pw = b['import']['passphrase']; assert hashlib.sha256(pw.encode()).hexdigest() == b['import']['blob']['salt']
         assert pw not in str(argv)+str(os.environ)
         # Check the test-owned filesystem at the handoff, not just after cleanup.
         for p in root.rglob('*'):
@@ -73,6 +76,9 @@ else:
     ('appeared', [], 'list generate export list', 'already exists'),
     ('second-error', [], 'list generate export list', 'Cannot read'),
     ('vault-error', [], 'list generate export', 'vault operation failed'),
+    ('bad-envelope', ['--replace'], 'list generate', 'invalid signing identity'),
+    ('bad-export', ['--replace'], 'list generate export', 'invalid wrapped export'),
+    ('floor-overflow', ['--replace', '--sequence-floor', '9007199254740992'], '', 'sequence floor'),
     ('ambiguous', [], 'list generate export list set', 'outcome unknown'),
 ])
 def test_owner_key_boundaries(tmp_path, mode, flags, calls, error):
@@ -88,7 +94,8 @@ def test_owner_key_boundaries(tmp_path, mode, flags, calls, error):
     result = subprocess.run([sys.executable, '-I', SCRIPT, *flags], env=env, cwd=tmp_path, capture_output=True)
     marker = ('sealed-' + 'sensitive' * 4).encode()
     assert marker not in result.stdout + result.stderr
-    assert (tmp_path/'calls').read_text().splitlines() == calls.split()
+    log = tmp_path/'calls'
+    assert (log.read_text().splitlines() if log.exists() else []) == calls.split()
     assert not list((tmp_path/'tmp').iterdir()) and not list((tmp_path/'daily').iterdir())
     assert all(marker not in f.read_bytes() for f in tmp_path.rglob('*') if f.is_file())
     if error:
