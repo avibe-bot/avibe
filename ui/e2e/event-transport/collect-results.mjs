@@ -6,7 +6,7 @@ const [directory, destination] = process.argv.slice(2);
 if (!directory || !destination) throw new Error('Usage: node collect-results.mjs <evidence-directory> <summary.json>');
 const results = readdirSync(directory).filter((name) => name.endsWith('.json'))
   .sort().map((name) => ({ file: name, ...JSON.parse(readFileSync(resolve(directory, name), 'utf8')) }));
-assert.equal(results.length, 28, 'Expected the complete two-browser suite');
+assert.equal(results.length, 36, 'Expected the complete two-browser suite');
 const runs = results.filter((result) => result.file.startsWith('compatibility-'));
 const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 const summary = {

@@ -133,7 +133,9 @@ for (const family of ['workbench', 'sdk'] as const satisfies readonly Family[]) 
       await start(page, { family });
       await expect.poll(async () => (await page.evaluate(() => window.eventTransport.state())).errors).toBeGreaterThan(0);
       if (family === 'sdk') {
-        await expect.poll(() => fixture.requests.filter((request) => request.kind === 'upgrade').length).toBeGreaterThanOrEqual(2);
+        expect((await page.evaluate(() => window.eventTransport.state())).readyState).toBe(2);
+        expect(fixture.requests.filter((request) => request.kind === 'upgrade')).toHaveLength(1);
+        expect(fixture.requests.filter((request) => request.kind === 'admission')).toHaveLength(1);
       }
       await page.evaluate(() => window.eventTransport.close());
       const attemptsAtClose = fixture.requests.filter((request) => request.kind === 'upgrade').length;
@@ -182,6 +184,58 @@ for (const family of ['workbench', 'sdk'] as const satisfies readonly Family[]) 
     }
   });
 }
+
+for (const status of [401, 404]) {
+  test(`SDK ${status} admission is terminal after exactly one non-streaming GET`, async ({ context, browser }, info) => {
+    const fixture = await startFixture('new', { denyWs: true, probeStatus: status });
+    try {
+      const [page] = await documents(context, fixture, 1);
+      await start(page, { family: 'sdk', afterId: '中文 cursor' });
+      await expect.poll(async () => (await page.evaluate(() => window.eventTransport.state())).readyState).toBe(2);
+      await new Promise((done) => setTimeout(done, 1_200));
+      const upgrades = fixture.requests.filter((request) => request.kind === 'upgrade');
+      const admission = fixture.requests.filter((request) => request.kind === 'admission');
+      await evidence(info, `sdk-terminal-${status}`, { browserVersion: browser.version(), status, state: await page.evaluate(() => window.eventTransport.state()), stats: fixture.stats(), requests: fixture.requests });
+      expect(upgrades).toHaveLength(1);
+      expect(admission).toHaveLength(1);
+      expect(admission[0].afterId).toBe('中文 cursor');
+      expect(new URL(admission[0].path, fixture.origin).searchParams.has('stream')).toBe(false);
+      expect(fixture.stats().sseOpened).toBe(0);
+    } finally { await fixture.close(); }
+  });
+}
+
+test('SDK 503 admission retains bounded WS retry without creating an SSE stream', async ({ context, browser }, info) => {
+  const fixture = await startFixture('new', { denyWs: true, probeStatus: 503 });
+  try {
+    const [page] = await documents(context, fixture, 1);
+    await start(page, { family: 'sdk', afterId: 'retry' });
+    await expect.poll(() => fixture.requests.filter((request) => request.kind === 'upgrade').length).toBeGreaterThanOrEqual(2);
+    expect((await page.evaluate(() => window.eventTransport.state())).readyState).toBe(0);
+    await page.evaluate(() => window.eventTransport.close());
+    const attemptsAtClose = fixture.requests.filter((request) => request.kind === 'upgrade').length;
+    await new Promise((done) => setTimeout(done, 1_200));
+    await evidence(info, 'sdk-retry-503', { browserVersion: browser.version(), attemptsAtClose, stats: fixture.stats(), requests: fixture.requests });
+    expect(fixture.requests.filter((request) => request.kind === 'upgrade')).toHaveLength(attemptsAtClose);
+    expect(fixture.stats().sseOpened).toBe(0);
+  } finally { await fixture.close(); }
+});
+
+test('SDK close cancels pending admission before a delayed denial can dispatch or retry', async ({ context, browser }, info) => {
+  const fixture = await startFixture('new', { denyWs: true, probeStatus: 403, probeDelayMs: 700 });
+  try {
+    const [page] = await documents(context, fixture, 1);
+    await start(page, { family: 'sdk' });
+    await expect.poll(() => fixture.requests.filter((request) => request.kind === 'admission').length).toBe(1);
+    await page.evaluate(() => window.eventTransport.close());
+    await new Promise((done) => setTimeout(done, 1_200));
+    const state = await page.evaluate(() => window.eventTransport.state());
+    await evidence(info, 'sdk-close-admission', { browserVersion: browser.version(), state, stats: fixture.stats(), requests: fixture.requests });
+    expect(state).toMatchObject({ readyState: 2, errors: 0 });
+    expect(fixture.requests.filter((request) => request.kind === 'upgrade')).toHaveLength(1);
+    expect(fixture.stats().sseOpened).toBe(0);
+  } finally { await fixture.close(); }
+});
 
 test('SDK reconnect replays its SSE cursor and close cancels further reconnects', async ({ context, browser }, info) => {
   const fixture = await startFixture('new');

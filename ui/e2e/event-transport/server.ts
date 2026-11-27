@@ -19,7 +19,12 @@ function frame(text: string): Buffer {
   return Buffer.concat([header, payload]);
 }
 
-export async function startFixture(runtime: Runtime, options: { denyWs?: boolean; sessionDelayMs?: number } = {}) {
+export async function startFixture(runtime: Runtime, options: {
+  denyWs?: boolean;
+  sessionDelayMs?: number;
+  probeStatus?: number;
+  probeDelayMs?: number;
+} = {}) {
   const responses = new Set<http.ServerResponse>();
   const websockets = new Set<Socket>();
   const connections = new Set<Socket>();
@@ -51,6 +56,19 @@ export async function startFixture(runtime: Runtime, options: { denyWs?: boolean
       return;
     }
     if (url.pathname.endsWith('/events')) {
+      if (/^\/(?:show|p)\/[^/]+\/__show\/events$/.test(url.pathname) && !url.searchParams.has('stream')) {
+        record(request, 'admission');
+        const answer = () => {
+          if (response.destroyed) return;
+          response.writeHead(options.probeStatus ?? (options.denyWs ? 403 : 200), { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ events: [] }));
+        };
+        if (options.probeDelayMs) {
+          const timer = setTimeout(answer, options.probeDelayMs);
+          response.on('close', () => clearTimeout(timer));
+        } else answer();
+        return;
+      }
       record(request, 'sse');
       sseOpened += 1;
       responses.add(response);

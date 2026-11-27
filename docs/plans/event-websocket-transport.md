@@ -23,8 +23,8 @@ across both and must not weaken any admission or resource authorization.
 - The existing authenticated/local `GET /api/session` JSON adds
   `event_stream_transport: "websocket-sse-v1"`. An old successful session payload
   without this field means SSE-only. A failed session probe or a remote session
-  that is unauthenticated/unavailable is not permission to fall back. An unknown
-  nonempty capability is an error, never legacy SSE. Future Runtime versions
+  that is unauthenticated/unavailable is not permission to fall back. An unrecognized
+  present capability is an error, never legacy SSE. Future Runtime versions
   must keep advertising this supported v1 value to these clients, or negotiate
   additional transports through a separate backwards-compatible field.
 - The Runtime-injected Show configuration adds
@@ -51,9 +51,9 @@ across both and must not weaken any admission or resource authorization.
 - SDK callers retain the EventSource-shaped subscription contract (listeners,
   open/error, readyState, close). Explicit authorization/access rejection is
   terminal; network errors reconnect with bounded backoff and the last SSE ID
-  as `after_id`. For standard Show event routes, a failed handshake can be
+  as `after_id`. For same-origin standard Show event routes, a failed handshake can be
   classified by one read-only GET of the same route without `stream=1`: 4xx
-  rejection closes the source, while network errors/5xx remain retryable.
+  rejection (except temporary 408/425/429) closes the source, while network errors/5xx remain retryable.
   The probe never opens an SSE stream or downgrades transport. Opaque browser
   errors alone cannot prove rejection. Custom routes must not be probed as
   non-streaming without a contract that they return a finite response.
@@ -87,7 +87,7 @@ Desktop acceptance is deferred. Never operate the active installed app windows.
 ## Implementation evidence (2026-11-27)
 
 The Avibe branch was rebased to `0a01fa4af8`. Show SDK PR #79 is
-`f7f282148bab3f401ef0b66003097d33d563f95e`. The paired fixture records source and
+`e7829d306a97a2043217684ad2d258cbfaa6572a`. The paired fixture records source and
 artifact SHA256 values, so its pre-commit provenance remains tied to the exact
 transport bytes tested.
 
@@ -97,25 +97,25 @@ transport bytes tested.
   and real TLS direct-ingress admission (anonymous rejected; cookie accepted).
 - 77 UI tests cover negotiation/denial/closing/switching plus the existing
   ApiContext reconnect, heartbeat, catch-up, local-store and snapshot owners.
-- The production-compiled UI/SDK fixture passes 28 Chromium/WebKit scenarios.
+- The production-compiled UI/SDK fixture passes 36 Chromium/WebKit scenarios.
   Across both families, all three SSE compatibility combinations hold an
-  ordinary HTTP/1.1 fetch for 2005–2215 ms, until one occupied slot closes.
-  With eight new/new WS sources, Workbench fetches take 0.6–1.0 ms in Chromium
-  and 2–3 ms in WebKit; SDK fetches take 0.7–1.1 ms and 2–3 ms respectively.
+  ordinary HTTP/1.1 fetch for 2004.7–2229 ms, until one occupied slot closes.
+  With eight new/new WS sources, Workbench fetches take 0.7–1.4 ms in Chromium
+  and 2–3 ms in WebKit; SDK fetches take 0.7–1.3 ms and 2–3 ms respectively.
   WS denial never downgrades; SDK reconnect retains after_id; switching and
   disposal prevent late delivery or retries. Every cleanup reaches zero streams.
 - The opt-in `tests/test_event_websocket_browser.py` runs the compiled real
   clients against actual isolated Runtime routes, SQLite Show events and a
   real ephemeral uvicorn listener. Four UI plus four SDK streams coexist;
   persisted Chinese/emoji events replay after the supplied cursor; ordinary
-  `/api/session` reads take 6.3–7.5 ms in Chromium 156 and 8–13 ms in WebKit 27.2.
+  `/api/session` reads take 6.5–7.7 ms in Chromium 156 and 9–13 ms in WebKit 27.2.
   Closing all pages releases every broker subscription.
 - `npm run build`, UI lint/typecheck and changed-Python Ruff pass. The unsigned
   headless engines are test evidence; no installed/signed Desktop was operated.
 
 Evidence is in the owner's `2026-11-27-desktop-full-acceptance/findings/`:
-`event-transport-browser-results-f7f2821-default.json`, individual
-`event-transport-f7f2821-default/*.json`, `event-real-runtime-share-browser.txt`, `event-python-regression.txt`, and
+`event-transport-browser-results-e7829d3.json`, individual
+`event-transport-e7829d3/*.json`, `event-real-runtime-e7829d3.txt`, `event-python-regression.txt`, and
 `event-ui-regression.txt`.
 
 ### First-load budget
@@ -138,8 +138,8 @@ It is part of the existing static UI CI job; run `npm run test:dev-event-proxy`.
 
 The real Runtime browser test executes the native share bridge's exact READ
 script from `macos_show_share.rs`: access/page GETs wait behind six SSE sources
-until one closes (2041.1 / 2035 ms), but complete while eight WS streams stay
-open (26.3 / 31 ms in Chromium/WebKit). This covers the D09-06 network preflight,
+until one closes (2040.2 / 2042 ms), but complete while eight WS streams stay
+open (27.9 / 34 ms in Chromium/WebKit). This covers the D09-06 network preflight,
 not the installed AppKit picker; signed Desktop acceptance is still pending.
 
 D09-07/08 has an independently reproduced stale visibility gate:
@@ -166,3 +166,15 @@ contract above. No `/api/events` GET is used as a non-streaming probe.
 The independent review also identified an existing anonymous public-share
 revocation gap in the shared SSE generator. Main assigned it separately; this
 transport PR does not claim to fix it or weaken the existing behavior.
+
+### Final paired SDK admission checks
+
+SDK #79 e7829d3 passes 293 unit/consumer tests and a full workspace build.
+The paired production fixture passes 36 browser scenarios on Chromium/WebKit:
+401/403/404 produce exactly one WS attempt and one finite admission GET before
+CLOSED; 503 retries with bounded backoff; closing during the probe cancels it
+and prevents a late error/reconnect. The native browser fetch receiver is
+covered by these real network tests. The final fixture SHA256 is
+`bac65599592d552bf2ccaf015ebf744290f1f2dbbeb07e9cf390063ecd6fec8b`.
+The actual Runtime paired test passes both engines with this fixture and the
+single-owner close implementation, preserving replay and broker release.

@@ -45,6 +45,12 @@ Unicode/frame fragmentation and Workbench cancellation during capability
 negotiation. Workbench reconnection remains owned by ApiContext; this suite
 does not create a second reconnect owner.
 
+Show WS failures now perform one cancellable non-streaming admission GET.
+The browser suite asserts that 401/403/404 stop retries, 503 retains retry,
+and closing during a delayed probe prevents a late error or reconnection.
+The fixture models the actual Runtime's JSON events response only on the two
+standard Show route shapes; `/api/events` remains streaming.
+
 To pierce the real Runtime boundary as well, after building this fixture run
 from the Avibe repository root with the test environment's Python:
 
