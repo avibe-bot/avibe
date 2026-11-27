@@ -46,14 +46,15 @@ enum DirectRendezvousFetcher {
     static let defaultDeadlineMilliseconds = 5_000
 
     /// The answer's bytes, exactly as the instance sent them with `200`.
-    /// `listenerFaults` are reported with the request
-    /// (`DirectRendezvous.requestBody`).
+    /// `listenerFaults`, `slowStoreRemovalsMs` and `pathUse` are reported
+    /// with the request (`DirectRendezvous.requestBody`).
     static func fetch(
         in webView: WKWebView,
         origin: WebOrigin,
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
         slowStoreRemovalsMs: [Int] = [],
+        pathUse: [DirectPathUse.Report] = [],
         deadlineMilliseconds: Int = defaultDeadlineMilliseconds
     ) async throws -> Data {
         guard isShowing(origin, in: webView) else {
@@ -71,7 +72,8 @@ enum DirectRendezvousFetcher {
                     "body": DirectRendezvous.requestBody(
                         clientEndpointID: clientEndpointID,
                         listenerFaults: listenerFaults,
-                        slowStoreRemovalsMs: slowStoreRemovalsMs
+                        slowStoreRemovalsMs: slowStoreRemovalsMs,
+                        pathUse: pathUse
                     ),
                     "deadlineMilliseconds": deadlineMilliseconds,
                     "maxBytes": DirectRendezvous.maxAnswerBytes,

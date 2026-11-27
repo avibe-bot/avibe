@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::{
-    loopback::{Callback, CallbackCopy, Loopback, Secrets, WAIT},
+    loopback::{Callback, CallbackCopy, Loopback, ProviderFailure, ResultPage, Secrets, WAIT},
     protocol::*,
     transport::{Epoch, NativeSession, Response, Transport},
 };
@@ -48,26 +48,37 @@ pub trait SystemBrowser: Send + Sync {
 }
 
 /// A provider sign-in between its start and its code. Its secrets stay here;
-/// dropping it releases the listener's port.
+/// dropping it retains only a bounded, read-only browser result responder.
 pub struct ProviderAttempt {
     supabase: NativeSession,
     key: String,
     secrets: Secrets,
-    loopback: Option<Loopback>,
+    loopback: Loopback,
     authorize: Url,
+    redemption_started: bool,
 }
 impl ProviderAttempt {
+    pub fn complete(&mut self, reply: &ClientReply) {
+        let result = match reply.error.as_ref() {
+            Some(error) if error.code == "stale_generation" => ResultPage::Cancelled,
+            Some(error) => ResultPage::Failed(ProviderFailure::from_code(&error.code)),
+            None if reply.state.account.status == AccountStatus::SignedIn => ResultPage::Complete,
+            None if reply.state.account.status == AccountStatus::SecondFactorRequired => ResultPage::VerifyInApp,
+            None => ResultPage::Failed(ProviderFailure::from_code("provider_failed")),
+        };
+        self.loopback.complete(result);
+    }
+
     /// Opens Supabase's authorization page in the default browser and waits,
     /// holding no lock, for this attempt's callback. A newer generation (another
     /// attempt, an account change, return_local, abort, a closed window) ends it.
     pub async fn browse(&mut self, browser: &dyn SystemBrowser, epoch: &Epoch) -> Result<String, ClientError> {
         epoch.check()?;
-        let loopback = self.loopback.take().ok_or_else(|| ClientError::new("invalid_action"))?;
+        let loopback = &mut self.loopback;
         browser.open(&self.authorize)?;
         match loopback.wait(&self.secrets.state, epoch, WAIT).await? {
             Callback::Code(code) => Ok(code),
-            Callback::EmailUnverified => Err(ClientError::new("provider_email_unverified")),
-            Callback::Failed => Err(ClientError::new("invalid_or_expired")),
+            Callback::Failed(failure) => Err(ClientError::new(failure.code)),
         }
     }
 }
@@ -289,8 +300,9 @@ impl AccountFlow {
             supabase,
             key,
             secrets,
-            loopback: Some(loopback),
+            loopback,
             authorize,
+            redemption_started: false,
         })
     }
 
@@ -299,11 +311,15 @@ impl AccountFlow {
     /// verifier, then ordinary native token establishment and the two-step gate.
     pub async fn finish_provider_sign_in(
         &mut self,
-        attempt: ProviderAttempt,
+        attempt: &mut ProviderAttempt,
         code: String,
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
+        // The retained result-page owner must not make the PKCE attempt reusable.
+        if std::mem::replace(&mut attempt.redemption_started, true) {
+            return Err(ClientError::new("invalid_action"));
+        }
         let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
         flow.redeem_provider_code(attempt, code, epoch, &mut next).await?;
         self.commit(flow, next, state);
@@ -312,16 +328,13 @@ impl AccountFlow {
 
     async fn redeem_provider_code(
         &mut self,
-        attempt: ProviderAttempt,
+        attempt: &mut ProviderAttempt,
         code: String,
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
         let ProviderAttempt {
-            mut supabase,
-            key,
-            secrets,
-            ..
+            supabase, key, secrets, ..
         } = attempt;
         supabase.fence(epoch);
         let response = supabase
@@ -329,7 +342,7 @@ impl AccountFlow {
                 Method::POST,
                 "/auth/v1/token?grant_type=pkce",
                 Some(json!({"auth_code": code, "code_verifier": secrets.verifier})),
-                provider_headers(&key)?,
+                provider_headers(key)?,
             )
             .await?;
         if !response.success() {

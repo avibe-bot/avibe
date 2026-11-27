@@ -652,7 +652,7 @@ impl Coordinator {
                 inner.restore_allowed = false;
             }
         }
-        let (epoch, provider) = match provider {
+        let (epoch, mut provider) = match provider {
             Some((epoch, attempt, code)) => (Some(epoch), Some((attempt, code))),
             None => (None, None),
         };
@@ -692,11 +692,17 @@ impl Coordinator {
                 | ClientAction::SignInWithPasskey
         );
         let owner = self.presentation_owner();
-        let result = self.execute(&mut working, request.action, &epoch, provider).await;
+        let result = self
+            .execute(&mut working, request.action, &epoch, provider.as_mut())
+            .await;
         if epoch.check().is_err() || (result.is_err() && self.view.terminal_commit(&epoch)) {
             let error = result.err().unwrap_or_else(|| ClientError::new("stale_generation"));
             self.recover_commit(&epoch, owner, &error).await;
-            return self.reply(request.request_id, Err(error));
+            let reply = self.reply(request.request_id, Err(error));
+            if let Some((attempt, _)) = &mut provider {
+                attempt.complete(&reply);
+            }
+            return reply;
         }
         if !first_factor_candidate
             && result
@@ -726,7 +732,7 @@ impl Coordinator {
             self.recover_commit(&epoch, owner, &error).await;
         }
         self.view.changed(&self.state());
-        self.reply(
+        let reply = self.reply(
             request.request_id,
             match (result, persistence) {
                 // One-time recovery codes must survive an unrelated storage failure.
@@ -734,7 +740,11 @@ impl Coordinator {
                 (result, Ok(())) => result,
                 (_, Err(error)) => Err(error),
             },
-        )
+        );
+        if let Some((attempt, _)) = &mut provider {
+            attempt.complete(&reply);
+        }
+        reply
     }
 
     async fn execute(
@@ -742,7 +752,7 @@ impl Coordinator {
         working: &mut Inner,
         action: ClientAction,
         epoch: &Epoch,
-        provider: Option<(ProviderAttempt, String)>,
+        provider: Option<&mut (ProviderAttempt, String)>,
     ) -> Result<Option<DirectResult>, ClientError> {
         let mut direct = None;
         match action {
@@ -765,7 +775,7 @@ impl Coordinator {
                 let (attempt, code) = provider.ok_or_else(|| ClientError::new("invalid_action"))?;
                 working
                     .account
-                    .finish_provider_sign_in(attempt, code, epoch.clone(), &mut working.state)
+                    .finish_provider_sign_in(attempt, std::mem::take(code), epoch.clone(), &mut working.state)
                     .await?;
             }
             ClientAction::SignInWithPasskey => {

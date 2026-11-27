@@ -40,6 +40,8 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/settings/diagnostics',
   '/settings/diagnostics/logs',
   '/settings/access',
+  '/settings/experimental',
+  '/settings/experimental/source-filter',
 ]);
 
 const RESTORABLE_DYNAMIC_PATHS = [/^\/chat\/[^/]+$/, /^\/apps\/show\/[^/]+$/];

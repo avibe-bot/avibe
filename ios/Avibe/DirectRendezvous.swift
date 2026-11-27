@@ -389,10 +389,18 @@ enum DirectRendezvous {
     /// recent WebKit store removals that took over a second took, in
     /// milliseconds (`SlowStoreRemovals`), at most five non-negative
     /// integers. An instance that does not know the field ignores it.
+    ///
+    /// `path_use`, when there are any: the App's account of which leg
+    /// carried its pages' connections, one entry for each finished minute
+    /// and direct path present in it, oldest first, at most ten
+    /// (`DirectPathUse`). Each entry has exactly the 22 keys the instance
+    /// requires; one it does not accept makes it ignore them all. An
+    /// instance that does not know the field ignores it.
     static func requestBody(
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
-        slowStoreRemovalsMs: [Int] = []
+        slowStoreRemovalsMs: [Int] = [],
+        pathUse: [DirectPathUse.Report] = []
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
@@ -409,6 +417,10 @@ enum DirectRendezvous {
         let removals = slowStoreRemovalsMs.suffix(SlowStoreRemovals.limit).map { min(max($0, 0), Int(Int32.max)) }
         if !removals.isEmpty {
             body += ",\"slow_store_removals_ms\":[" + removals.map(String.init).joined(separator: ",") + "]"
+        }
+        let use = pathUse.prefix(DirectPathUse.reportLimit).map(\.json)
+        if !use.isEmpty {
+            body += ",\"path_use\":[" + use.joined(separator: ",") + "]"
         }
         return body + "}"
     }

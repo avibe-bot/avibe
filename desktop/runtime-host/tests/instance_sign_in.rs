@@ -4,7 +4,7 @@
 //! listener; no real browser, provider, account or passkey is involved.
 use async_trait::async_trait;
 use avibe_runtime_host::instance_client::{
-    account::{Passkeys, SystemBrowser},
+    account::{AccountFlow, Passkeys, SystemBrowser},
     coordinator::{ClientView, Coordinator},
     loopback::CallbackCopy,
     protocol::*,
@@ -193,6 +193,11 @@ impl SystemBrowser for Browser {
         CallbackCopy {
             done: done.into(),
             failed: failed.into(),
+            server_error: failed.into(),
+            verify_in_app: "Verify in App".into(),
+            cancelled: "Cancelled".into(),
+            timed_out: "Timed out".into(),
+            ..Default::default()
         }
     }
 }
@@ -297,11 +302,7 @@ fn browsers(browsing: Vec<Browsing>) -> Arc<Browser> {
         pages: Arc::new(Mutex::new(vec![])),
     })
 }
-/// Tests that check that a port was released run one at a time, so no other
-/// test's listener is on the port they check. A refused connection proves the
-/// release here because no test in this binary spawns a process: in the
-/// library's tests, where some do, a child can inherit a listener on macOS and
-/// keep its port open (see `unanswered` in loopback.rs).
+/// Keep port-sensitive scenario fixtures serial within this test binary.
 static PORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn act(client: &Coordinator, action: ClientAction) -> ClientReply {
@@ -400,10 +401,20 @@ async fn provider_sign_in_redeems_its_own_code_and_keeps_the_two_step_gate() {
         .find(|request| request.path == "/api/desktop/session")
         .unwrap();
     assert_eq!(session.body.clone().unwrap()["access_token"], "synthetic-access");
-    // The attempt's port is gone: a late redirect cannot reach a new attempt.
-    assert!(TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
-        .await
-        .is_err());
+    // Late callbacks can read the terminal page but cannot redeem another code.
+    for path in ["/callback?code=second", "/callback", "/favicon.ico"] {
+        assert!(get(redirect.port().unwrap(), path).await.contains("Verify in App"));
+    }
+    assert_eq!(
+        f.http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.path == "/auth/v1/token")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -443,17 +454,17 @@ async fn the_browsers_last_page_speaks_the_asking_pages_language() {
         (
             json!({"type":"sign_in_with_provider","provider":"google","locale":"zh"}),
             Browsing::Code("c"),
-            "<p>夹具完成。</p>",
+            "<h1>夹具完成。</h1>",
         ),
         (
             json!({"type":"sign_in_with_provider","provider":"google","locale":"zh"}),
             Browsing::Error("error=server_error&error_description=x"),
-            "<p>夹具未完成。</p>",
+            "<h1>夹具未完成。</h1>",
         ),
         (
             json!({"type":"sign_in_with_provider","provider":"google"}),
             Browsing::Error("error=server_error&error_description=x"),
-            "<p>Fixture failed.</p>",
+            "<h1>Fixture failed.</h1>",
         ),
     ];
     for (request, browsing, line) in cases {
@@ -477,15 +488,17 @@ async fn the_browsers_last_page_speaks_the_asking_pages_language() {
             .unwrap();
         let pages = browser.pages.lock().unwrap().clone();
         assert_eq!(pages.len(), 1);
-        assert!(pages[0].ends_with(line), "{}", pages[0]);
+        assert!(pages[0].contains(line), "{}", pages[0]);
     }
 }
 
 #[tokio::test]
 async fn provider_sign_in_answers_each_ending_with_its_code() {
     let _ports = PORTS.lock().await;
-    let cases: [(bool, Browsing, &str); 3] = [
+    let cases: [(bool, Browsing, &str); 5] = [
         (false, Browsing::Nothing, "provider_unavailable"),
+        (true, Browsing::Error("error=access_denied"), "provider_denied"),
+        (true, Browsing::Error("error=server_error&error_code=unexpected_failure&error_description=Multiple+accounts+with+the+same+email+address+in+the+same+linking+domain+detected%3A+default"), "provider_account_conflict"),
         (
             true,
             Browsing::Error("error=access_denied&error_code=provider_email_needs_verification&error_description=x"),
@@ -494,7 +507,7 @@ async fn provider_sign_in_answers_each_ending_with_its_code() {
         (
             true,
             Browsing::Error("error=server_error&error_description=x"),
-            "invalid_or_expired",
+            "provider_server_error",
         ),
     ];
     for (enabled, browsing, code) in cases {
@@ -525,7 +538,7 @@ async fn provider_sign_in_answers_each_ending_with_its_code() {
 /// The browser has no cancel the app can see: abort ends the wait, releases
 /// the port and leaves the window where it is.
 #[tokio::test]
-async fn abort_ends_a_waiting_provider_sign_in_and_frees_its_port() {
+async fn abort_ends_authentication_and_keeps_a_cancelled_result_page() {
     let _ports = PORTS.lock().await;
     let browser = browser(Browsing::Nothing);
     let f = fixture(
@@ -555,7 +568,8 @@ async fn abort_ends_a_waiting_provider_sign_in_and_frees_its_port() {
         .unwrap();
     assert_eq!(ended.error.unwrap().code, "stale_generation");
     assert_eq!(f.client.state().account.status, AccountStatus::SignedOut);
-    assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+    assert!(get(port, "/callback?code=late").await.contains("Cancelled"));
+    assert!(f.http.seen.lock().unwrap().iter().all(|r| r.path != "/auth/v1/token"));
     // A signed-in account cannot be aborted out.
     let g = fixture(
         vec![
@@ -1136,7 +1150,7 @@ async fn a_new_attempt_retires_the_waiting_one_and_signs_in() {
         .unwrap()
         .unwrap();
     assert_eq!(first.error.unwrap().code, "stale_generation");
-    assert!(TcpStream::connect(("127.0.0.1", first_port)).await.is_err());
+    assert!(get(first_port, "/callback?code=late").await.contains("Cancelled"));
     let seen = f.http.seen.lock().unwrap().clone();
     let tokens: Vec<_> = seen.iter().filter(|request| request.path == "/auth/v1/token").collect();
     assert_eq!(tokens.len(), 1);
@@ -2084,4 +2098,91 @@ async fn the_same_account_finishing_its_second_factor_erases_nothing() {
     assert!(l.keychain.erased.lock().unwrap().is_empty());
     assert!(l.keychain.jar(B).is_some_and(|jar| jar.contains("account=done;")));
     assert_eq!(saved_account(&l.path).as_deref(), Some(B));
+}
+
+/// AUTH-SETUP-183: receiving a code must never claim success before exchange and storage.
+#[tokio::test]
+async fn a_failed_exchange_or_account_save_serves_failure_without_redeeming_again() {
+    for fail_save in [false, true] {
+        let browser = browser(Browsing::Code("synthetic-code"));
+        let mut replies = vec![("/api/config/auth", config(true))];
+        if fail_save {
+            replies.extend([
+                ("/auth/v1/token", tokens()),
+                (
+                    "/api/desktop/session",
+                    reply(200, signed_in(), Some("account=fixture; Path=/; Secure; HttpOnly")),
+                ),
+            ]);
+        } else {
+            replies.push(("/auth/v1/token", reply(500, json!({}), None)));
+        }
+        let f = fixture(replies, Some(browser.clone()), passkeys(Err("x")));
+        if fail_save {
+            std::fs::remove_file(f._root.path().join("connection.json")).unwrap();
+            std::fs::create_dir(f._root.path().join("connection.json")).unwrap();
+        }
+        let result = act(&f.client, google()).await;
+        assert!(!result.ok);
+        tokio::time::timeout(Duration::from_secs(3), browser.redirected.notified())
+            .await
+            .unwrap();
+        let first = browser.pages.lock().unwrap()[0].clone();
+        assert!(first.contains("Fixture failed.") && !first.contains("Fixture done."));
+        assert_eq!(get(redirect_port(&browser, 0), "/callback?code=second").await, first);
+        assert_eq!(
+            f.http
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.path == "/auth/v1/token")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn retaining_the_result_owner_does_not_make_a_failed_exchange_reusable() {
+    let f = fixture(
+        vec![
+            ("/api/config/auth", config(true)),
+            ("/auth/v1/token", reply(500, json!({}), None)),
+        ],
+        None,
+        passkeys(Err("x")),
+    );
+    let epoch = Epoch::new(Arc::new(std::sync::atomic::AtomicU64::new(1)), 1);
+    let mut attempt = AccountFlow::start_provider_sign_in(
+        SignInProvider::Google,
+        f.http.clone(),
+        epoch.clone(),
+        &CallbackCopy::default(),
+    )
+    .await
+    .unwrap();
+    let mut flow = AccountFlow::new(f.http.clone(), false);
+    let mut state = f.client.state();
+    assert!(flow
+        .finish_provider_sign_in(&mut attempt, "first".into(), epoch.clone(), &mut state)
+        .await
+        .is_err());
+    assert_eq!(
+        flow.finish_provider_sign_in(&mut attempt, "second".into(), epoch, &mut state)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_action"
+    );
+    assert_eq!(
+        f.http
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.path == "/auth/v1/token")
+            .count(),
+        1
+    );
 }

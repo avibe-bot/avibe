@@ -24,3 +24,4 @@ export { SettingsShortcutsPage } from './SettingsShortcutsPage';
 export { SettingsMicrophonePage } from './MicrophoneSettingsPage';
 export { SettingsNotificationsPage } from './SettingsNotificationsPage';
 export { SettingsComputerUsePage } from './SettingsComputerUsePage';
+export { SettingsExperimentalPage, SettingsSourceFilterPage } from './experimental/SettingsExperimentalPages';

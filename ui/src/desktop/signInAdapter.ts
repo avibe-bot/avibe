@@ -60,7 +60,11 @@ const canonicalCode = (code: string, operation: Operation): SignInErrorCode => {
     case 'provider_email_unverified':
       return code;
     case 'provider_timeout':
-      return operation === 'provider' ? 'invalid_or_expired' : 'network';
+    case 'provider_account_conflict':
+    case 'provider_server_error':
+    case 'provider_denied':
+    case 'provider_failed':
+      return code;
     // A refused code (native's 403 verification_invalid, 400 invalid) on a code step is the code,
     // not the network; a provider's refusal keeps its own wording.
     case 'invalid_or_expired':

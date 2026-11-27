@@ -347,6 +347,15 @@ struct DirectConnectPlan: Sendable {
     var path: DirectPathKind?
     /// Hears how the race went, once it is decided.
     var recordRace: (@Sendable (DirectRaceRecord) -> Void)?
+    /// Hears what became of the CONNECT, once, from the last plan it raced
+    /// under: the backend its relay was granted on, or `nil` when the
+    /// listener gave the CONNECT up after that plan's race (its legs
+    /// failed, its bound ran out during a race or between two, or no
+    /// further plan was to be had), with or without an HTTP refusal. A
+    /// race that is fenced and planned again is not the CONNECT's outcome,
+    /// and nothing is heard of a CONNECT whose client left or whose
+    /// listener stopped serving.
+    var connectionSettled: (@Sendable (DirectRelayBackend?) -> Void)?
     /// A sticky direct attempt did not answer within `stickySeconds`. Not a
     /// failure of the path: `directFailed` is not called for it.
     var stickyMissed: (@Sendable () -> Void)?
@@ -1188,9 +1197,13 @@ actor DirectConnectListener {
         var deadline: ContinuousClock.Instant?
         var strictOnly = false
         var heldExpiry: (@MainActor @Sendable () -> Void)?
+        // The last plan that raced: told once what became of the CONNECT.
+        var settled: (@Sendable (DirectRelayBackend?) -> Void)?
         let planningStarted = ContinuousClock.now
         while true {
             if let deadline, ContinuousClock.now >= deadline {
+                // A strict CONNECT whose every plan failed until its bound.
+                settled?(nil)
                 await heldExpiry?()
                 return
             }
@@ -1206,6 +1219,7 @@ actor DirectConnectListener {
                 scope == nil || plan.scope == scope
             else {
                 if !Task.isCancelled, deadline == nil {
+                    settled?(nil)
                     await refuse(
                         connection,
                         status: scope == nil ? 403 : 503,
@@ -1232,7 +1246,11 @@ actor DirectConnectListener {
                 if deadline == nil { deadline = planningStarted.advanced(by: .seconds(seconds)) }
             } else {
                 // A deliberate re-establishment is for a new navigation, never this request.
-                guard !strictOnly, ordinaryPlans < 2 else { return }
+                guard !strictOnly, ordinaryPlans < 2 else {
+                    // Given up after a race, if there was one.
+                    settled?(nil)
+                    return
+                }
                 ordinaryPlans += 1
             }
             let admission = await listener.planned(
@@ -1245,6 +1263,7 @@ actor DirectConnectListener {
             )
             guard admission != .refused else {
                 if !Task.isCancelled, deadline == nil {
+                    settled?(nil)
                     await refuse(
                         connection,
                         status: 503,
@@ -1259,6 +1278,7 @@ actor DirectConnectListener {
             if admission == .obsolete {
                 outcome = .fenced
             } else {
+                settled = plan.connectionSettled
                 // The race runs as its own task, so a newer path generation
                 // can cancel it without ending the CONNECT.
                 let limit = deadline
@@ -1279,7 +1299,12 @@ actor DirectConnectListener {
                 }
                 guard let watched else {
                     // WebKit closed its side, or sent too much, before a
-                    // backend was chosen.
+                    // backend was chosen; or the CONNECT's bound ran out
+                    // while this race was still running. Only the second
+                    // is the listener giving the CONNECT up.
+                    if let limit, ContinuousClock.now >= limit {
+                        settled?(nil)
+                    }
                     return
                 }
                 if race.isRetired {
@@ -1303,6 +1328,7 @@ actor DirectConnectListener {
                     do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
                     continue
                 }
+                settled?(nil)
                 await refuse(
                     connection,
                     status: status,
@@ -1350,6 +1376,7 @@ actor DirectConnectListener {
                 case .granted:
                     break
                 }
+                settled?(backend)
                 // Granted. From here the backend is fixed: whatever fails,
                 // this relay only ends; it is never planned or dialled
                 // again, and nothing is replayed.
@@ -1379,6 +1406,7 @@ actor DirectConnectListener {
             }
         }
         if deadline == nil {
+            settled?(nil)
             await refuse(connection, status: 503, reader: reader, within: limits.headSeconds)
         }
     }
@@ -1965,7 +1993,7 @@ actor DirectConnectListener {
 
     /// Whether anything accepts a connection on the loopback `port` now.
     /// One attempt, nothing sent, closed at once. For a port this App does
-    /// not hold at the moment (`DirectPathController.backgroundLoadGate`):
+    /// not hold at the moment (`DirectPathController.backgroundLoadCheck`):
     /// asked while this listener holds it, the answer is this listener.
     static func probe(port: UInt16, within seconds: TimeInterval) async -> DirectPortProbe {
         guard seconds > 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {

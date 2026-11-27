@@ -40,3 +40,6 @@ class TurnHostedTools:
     images: tuple[ImageChoice, ...] = ()
     # None denotes the released, activation-off turn shape.
     prefer_native: bool | None = None
+    # Settings › Experimental › Source filter: web_search and web_fetch run only through the gateway, between the
+    # owner's hook scripts (``source_filter.py``). The turn's web_search is then never native (``prefer_native``).
+    source_filter: bool = False

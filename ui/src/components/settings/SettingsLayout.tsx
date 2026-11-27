@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronLeft,
   Cpu,
+  FlaskConical,
   MonitorSmartphone,
   Hash,
   Keyboard,
@@ -122,6 +123,8 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       { path: '/settings/dependencies', labelKey: 'settings.sections.dependencies', icon: Package, ownerOnly: true },
       { path: '/settings/diagnostics', labelKey: 'settings.sections.diagnostics', icon: Stethoscope, ownerOnly: true },
       { path: '/settings/access', labelKey: 'settings.sections.access', icon: ShieldCheck },
+      // Experiments run the owner's local scripts (Source filter): owner-only, like Service.
+      { path: '/settings/experimental', labelKey: 'settings.sections.experimental', icon: FlaskConical, ownerOnly: true },
     ],
   },
 ];

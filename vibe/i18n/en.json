@@ -1182,6 +1182,12 @@
       "upstream_unauthorized": "The provider rejected authorization after refresh.",
       "upstream_error": "The provider returned an error."
     },
+    "sourceFilter": {
+      "blocked": "Blocked by the source filter: {reason}",
+      "blockedNoReason": "Blocked by the source filter.",
+      "failed": "The source filter script {hook} failed, so this call was blocked: {reason}.",
+      "refused": "The arguments the source filter wrote were refused ({code})."
+    },
     "hostedTools": {
       "noExecutor": {
         "web_search": {"one": "No provider can run web search right now. Add an API key from {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "several": "No provider can run web search right now. Add an API key from one of {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "refused": "{sources} refused web search, so no provider can run it right now. Clear the refusal in Models › Tools to try again."},
@@ -1806,7 +1812,9 @@
       "fetch_unsupported_content": "the document type is not supported",
       "fetch_refused": "the page request was refused",
       "fetch_unavailable": "the page is unavailable",
-      "fetch_sources_blocked": "all page-reading sources are blocked or disabled"
+      "fetch_sources_blocked": "all page-reading sources are blocked or disabled",
+      "source_filter_blocked": "the source filter blocked this call",
+      "source_filter_failed": "a source filter script failed, so this call was blocked"
     },
     "tool": {
       "web_search": "Web search",
