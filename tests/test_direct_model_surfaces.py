@@ -141,11 +141,15 @@ def test_codex_direct_restore_list_reads_the_unfiltered_catalog(tmp_path, monkey
     config = V2Config.default()
     config.model_hub.agents["codex"].mode = "direct"
     config.save()
-    model = api.codex_models(schedule_refresh=False)["models"][0]
+    shown = api.codex_models(schedule_refresh=False)
+    model = shown["models"][0]
     set_removed("codex", model, True)
 
     assert model not in api.codex_models(schedule_refresh=False)["models"]
-    assert api.direct_model_menu("codex", schedule_refresh=False, removed=True)["models"] == [model]
+    hidden = api.direct_model_menu("codex", schedule_refresh=False, removed=True)
+    assert hidden["models"] == [model]
+    # The restore list names it as the menu did: the catalog's display name.
+    assert hidden["model_labels"][model] == shown["model_labels"][model]
     assert [entry["value"] for entry in api.removed_menu_entries("codex")] == [model]
 
 

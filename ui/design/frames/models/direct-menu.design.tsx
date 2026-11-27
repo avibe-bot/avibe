@@ -12,7 +12,7 @@ const route = '/settings/models';
 
 const agents: AgentSpec[] = demoAgents.map((spec) => spec.backend === 'codex' ? { backend: 'codex', mode: 'direct' } : spec);
 const menu = ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-terra'];
-const labels: Record<string, string> = { 'gpt-6.2-sol': 'GPT-6.2-Sol', 'gpt-6.2-astra': 'GPT-6.2-Astra', 'gpt-6.1-sol': 'GPT-6.1-Sol', 'gpt-6-astra': 'GPT-6-Astra', 'gpt-5.6-terra': 'GPT-5.6-Terra' };
+const labels: Record<string, string> = { 'gpt-6.2-sol': 'GPT-6.2-Sol', 'gpt-6.2-astra': 'GPT-6.2-Astra', 'gpt-6.1-sol': 'GPT-6.1-Sol', 'gpt-6-astra': 'GPT-6-Astra', 'gpt-5.6-terra': 'GPT-5.6-Terra', 'gpt-5.5': 'GPT-5.5' };
 const row = (id: string) => ({ id, label: labels[id] ?? id });
 
 const direct = (removed: string[]) => settingsFixtures({

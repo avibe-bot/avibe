@@ -88,6 +88,9 @@ describe('Direct model menu in Settings · Models', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '1 removed model' }));
     const restoreRow = document.querySelector('[data-direct-removed-model="gpt-6.2-sol"]') as HTMLElement;
+    // A restorable row reads like the menu's rows: the display name, the ID under it.
+    expect(within(restoreRow).getByText('GPT-6.2-Sol')).toBeTruthy();
+    expect(within(restoreRow).getByText('gpt-6.2-sol')).toBeTruthy();
     await userEvent.click(within(restoreRow).getByRole('button', { name: 'Restore GPT-6.2-Sol' }));
     await act(async () => {});
     expect(modelsApi.setDirectModelRemoved).toHaveBeenLastCalledWith('codex', 'gpt-6.2-sol', false);
