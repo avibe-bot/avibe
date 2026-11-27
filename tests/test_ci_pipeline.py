@@ -584,7 +584,13 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
     )
-    assert workflow[True] == {"workflow_call": None}  # PR routing lives in lint's existing runner
+    assert set(workflow[True]) == {"workflow_call"}
+    inputs = workflow[True]["workflow_call"]["inputs"]
+    assert set(inputs) == {"fast-native"}
+    assert inputs["fast-native"]["type"] == "boolean" and inputs["fast-native"]["default"] is False
+    assert _jobs()["ios-shell"]["with"]["fast-native"] == (
+        "${{ github.event_name == 'pull_request' && needs.changes.outputs.portfolio == 'true' }}"
+    )
 
     steps = workflow["jobs"]["simulator"]["steps"]
     setup_node, = [
@@ -631,6 +637,26 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         index for index, step in enumerate(steps)
         if "-project ios/Avibe.xcodeproj" in step.get("run", "")
     ]
+    fast_step, = [step for step in steps if step.get('if') == 'inputs.fast-native']
+    fast_script = fast_step['run']
+    assert fast_step['name'] == 'Compile the app and run the native PR contracts'
+    assert not fast_step.get('continue-on-error') and 'set -euo pipefail' in fast_script
+    assert [arg for arg in fast_script.split() if arg.startswith('-only-testing:')] == [
+        '-only-testing:AvibeTests/NativeBadgeTests/testBadgeSetTakesExactlyOneCountNumber',
+        '-only-testing:AvibeTests/NavigationPolicyTests/testConfiguredOriginRequiresHTTPSAndCanonicalizesToOrigin',
+        '-only-testing:AvibeTests/SystemScheduleTests/testSharedContractVectorsCoverSwiftParsersAndEveryTerminalReceipt',
+    ]
+    assert 'CODE_SIGNING_ALLOWED=NO test' in fast_script and '-scheme Avibe ' in fast_script
+    assert fast_script.index('CODE_SIGNING_ALLOWED=NO test') < fast_script.index('xcresulttool get test-results summary')
+    assert fast_script.index("summary.get('passedTests') != 3 or summary.get('totalTestCount') != 3") < fast_script.index('verify_iroh_app_product.sh')
+    assert 'raise SystemExit' in fast_script and 'Avibe.app/Avibe.debug.dylib" YES' in fast_script
+    assert steps.index(fast_step) > verify_index
+    assert {s['name'] for s in steps if s.get('if') == '${{ !inputs.fast-native }}'} == {
+        'Build for the iOS Simulator SDK', 'Verify linked iroh binary in the simulator product',
+        'Build the sheet gesture XCUITest fixture', 'Run XCTest on iPhone Simulator',
+    }
+    # The full branch still performs the original four builds/tests.
+    app_builds = [i for i in app_builds if steps[i] is not fast_step]
     assert len(app_builds) == 4
     assert all(verify_index < index for index in app_builds)
     simulator_build = steps[app_builds[0]]["run"]
@@ -723,8 +749,13 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     )
     boot = steps[selection_index + 1]
     assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
-    assert steps[selection_index + 2]["name"] == "Build the sheet gesture XCUITest fixture"
-    assert steps[selection_index + 3]["name"] == "Run XCTest on iPhone Simulator"
+    after_boot = steps[selection_index + 2:]
+    assert after_boot[0]['name'] == 'Compile the app and run the native PR contracts'
+    assert after_boot[0]['if'] == 'inputs.fast-native'
+    assert [(step['name'], step['if']) for step in after_boot[1:3]] == [
+        ('Build the sheet gesture XCUITest fixture', '${{ !inputs.fast-native }}'),
+        ('Run XCTest on iPhone Simulator', '${{ !inputs.fast-native }}'),
+    ]
     shell = selection["run"]
     subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
     # Execute the actual workflow selector, not a copied implementation.
