@@ -67,6 +67,8 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
         # App build inputs require the simulator, not unrelated historical heuristics.
         return {'ios'}, set(LINUX | PROOFS['ios'])
     groups = set().union(*(path_groups(p) for p in paths))
+    if 'engine-publication' in named:
+        groups.add('shared')
     if 'ios-app' in named:
         groups.add('ios')
     # Named inputs that the old path heuristic did not recognize in isolation.
