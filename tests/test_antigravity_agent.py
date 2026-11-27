@@ -704,13 +704,16 @@ async def test_idle_eviction_respects_runtime_ownership_and_renewal(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_sibling_runtime_isolation_and_running_agents_end(tmp_path: Path) -> None:
-    async with make_agent_harness(tmp_path) as h:
+    # Each peer owns its sessions; this scenario does not exercise disk persistence.
+    async with make_agent_harness(tmp_path, server_config={"persistState": False}) as h:
         req_a = make_request(message="hello-a", workdir=h.workdir, base_session_id="slack_thread_A", session_key="slack::channel::C1")
         req_b = make_request(message="hello-b", workdir=h.workdir, base_session_id="slack_thread_B", session_key="slack::channel::C2")
         await asyncio.gather(h.agent.handle_message(req_a), h.agent.handle_message(req_b))
 
         sess_a, sess_b = h.agent._sessions[req_a.composite_session_id], h.agent._sessions[req_b.composite_session_id]
         assert sess_a.client._process.pid != sess_b.client._process.pid and sess_a.activation != sess_b.activation and sess_a.spec.rules_dirs != sess_b.spec.rules_dirs
+        assert sess_a.native_session_id == sess_b.native_session_id == "sess-1"
+        assert not h.state_file.exists()
         texts = [text for _, text, _ in h.controller.events("result")]
         assert any("echo:hello-a" in t for t in texts) and any("echo:hello-b" in t for t in texts) and h.agent.runtime_activation_identity_for_request(req_a) == sess_a.activation
 
@@ -912,16 +915,62 @@ async def test_verification_required_reply_fails_turn_and_normal_verification_pr
 async def _start_steer_chain(h):
     req = make_request(message="STEER_CHAIN", workdir=h.workdir, platform_specific={"turn_token": "logical-1"})
     target = ActiveSteerTarget(req.composite_session_id, "logical-1", req.context, req, h.agent)
-    # Exercise the same synchronous identity lookup that on_native_start performs.
+    # Register sticky signals before dispatch: a fast peer may notify before we wait.
+    started, usage_received = asyncio.Event(), asyncio.Event()
     observed = []
-    h.controller.agent_service.mark_runtime_turn_started = lambda *_a, **_kw: observed.append(h.agent.steering_native_turn_id(target))
+    original_note_tokens = h.controller.note_session_tokens
+
+    def mark_started(*_args, **_kwargs):
+        # Exercise the synchronous identity lookup performed by on_native_start.
+        observed.append(h.agent.steering_native_turn_id(target))
+        started.set()
+
+    def note_tokens(context, *, total):
+        original_note_tokens(context, total=total)
+        usage_received.set()
+
+    h.controller.agent_service.mark_runtime_turn_started = mark_started
+    h.controller.note_session_tokens = note_tokens
     task = asyncio.create_task(h.agent.handle_message(req))
-    async def wait_started():
-        while not h.controller.token_notes:
-            await asyncio.sleep(0.01)
-    await asyncio.wait_for(wait_started(), 5)
+
+    async def wait_phase(event, *, timeout, phase):
+        waiter = asyncio.create_task(event.wait())
+        try:
+            done, _ = await asyncio.wait((task, waiter), timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                await task
+                pytest.fail(f"Steer chain ended before {phase}: {h.controller.emitted!r}")
+            assert waiter in done, f"Steer chain did not reach {phase}"
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    try:
+        # Cold process/rules/SQLite setup is not part of the peer's usage deadline.
+        await wait_phase(started, timeout=30, phase="native dispatch")
+        await wait_phase(usage_received, timeout=5, phase="initial usage")
+    except BaseException:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    finally:
+        h.controller.note_session_tokens = original_note_tokens
     session = h.agent._sessions[req.composite_session_id]
     return req, target, task, session, observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("started", [False, True])
+async def test_steer_chain_setup_reports_early_completion(tmp_path, monkeypatch, started):
+    async with make_agent_harness(tmp_path) as h:
+        async def finish_early(_request):
+            if started:
+                h.controller.agent_service.mark_runtime_turn_started()
+
+        monkeypatch.setattr(h.agent, "handle_message", finish_early)
+        with pytest.raises(pytest.fail.Exception, match="Steer chain ended before"):
+            await _start_steer_chain(h)
+        assert h.launches() == []
 
 
 def _chain_steer(h, target, *, native_id=None, attempt_id="attempt-B", **kwargs):

@@ -93,6 +93,9 @@ class FakeAcpServer:
     """Async JSON-RPC 2.0 ACP server speaking NDJSON over stdin/stdout."""
 
     def __init__(self, *, state_file: Path | None, config: dict[str, Any]) -> None:
+        # Runtime-isolation tests do not need a shared persistent session store.
+        if not config.get("persistState", True):
+            state_file = None
         self._state_file = state_file
         self._config = config
         self._agent_info = _copy(config.get("agentInfo", DEFAULT_AGENT_INFO))
