@@ -3317,10 +3317,7 @@
       "desktopSaveFailed": "Couldn't save the notification switch. Try again."
     },
     "experimental": {
-      "title": "Experimental",
       "subtitle": "These features are on trial and may change between versions.",
-      "on": "On",
-      "off": "Off",
       "loadFailed": "Could not load the source filter. Try again.",
       "sourceFilter": {
         "title": "Source filter",
@@ -3330,8 +3327,6 @@
         "scripts": "Scripts",
         "scriptsHint": "Put them in this folder; any that are missing are skipped.",
         "copyFolder": "Copy the folder path",
-        "found": "Found",
-        "notFound": "Not found",
         "lastFailed": "Last run failed",
         "failure": "{{time}} · that call was blocked"
       }

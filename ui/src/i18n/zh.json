@@ -3317,10 +3317,7 @@
       "desktopSaveFailed": "无法保存通知开关，请稍后重试。"
     },
     "experimental": {
-      "title": "实验性",
       "subtitle": "这些功能还在试用，可能随版本调整。",
-      "on": "已开启",
-      "off": "关闭",
       "loadFailed": "读取信源过滤失败，请重试。",
       "sourceFilter": {
         "title": "信源过滤",
@@ -3330,8 +3327,6 @@
         "scripts": "脚本",
         "scriptsHint": "放在下面的目录里，没放的会跳过。",
         "copyFolder": "复制目录路径",
-        "found": "已找到",
-        "notFound": "未找到",
         "lastFailed": "上次运行失败",
         "failure": "{{time}} · 那次调用已拦下"
       }
