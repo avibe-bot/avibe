@@ -34,6 +34,7 @@ async def _codex(binary: str, scope: NativeScope) -> list[PickerModel]:
             cwd=cwd,
             timeout_seconds=10,
             label="Codex native inventory",
+            hide_console=True,
             discard_stderr=True,
             max_output_bytes=_MAX_OUTPUT,
         )
