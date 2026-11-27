@@ -29,6 +29,17 @@ const held = [
 
 const api = { '/api/media/tok_region': regionUrl };
 
+/** A Codex route on an Agent with its own effort, at 极高. */
+const codexRoute = {
+  title: 'Inbox 未读数',
+  agent_id: null,
+  agent_name: 'codex',
+  agent_backend: 'codex',
+  agent_variant: 'codex',
+  model: 'gpt-5.6-sol',
+  reasoning_effort: 'xhigh',
+};
+
 // Sent while the turn runs, not yet answered: the reader's own row, keyed by its client id.
 const sending = queued('改完顺便跑一下 InboxPage 的单测。', 0, {
   id: 'client-sending',
@@ -135,6 +146,30 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(),
     fixtures: chatFixtures({ session: { title: 'Inbox 未读数' }, messages }),
+    click: ['button:has([data-route-trigger-parts])'],
+    render: chatPhone,
+  },
+  {
+    // The longest effort row the menu draws: an Agent with its own effort names it in 默认（高）, and the
+    // model offers 极高; every label stays inside its segment at the menu's narrowest width.
+    name: 'route-picker-long-efforts',
+    title: '输入框 · Agent 与模型 · 思考强度标签最长时（Codex：默认带 Agent 的强度，另有极高）',
+    width: 1192,
+    height: 720,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ session: codexRoute, messages }),
+    click: ['button:has([data-route-trigger-parts])'],
+    render: chatDesktop,
+  },
+  {
+    name: 'phone-route-picker-long-efforts',
+    title: '输入框 · Agent 与模型 · 思考强度标签最长时 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ session: codexRoute, messages }),
     click: ['button:has([data-route-trigger-parts])'],
     render: chatPhone,
   },
