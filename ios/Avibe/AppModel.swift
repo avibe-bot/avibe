@@ -634,12 +634,12 @@ final class AppModel: ObservableObject {
         guard directPathController != nil else {
             return nil
         }
-        return { [weak self] origin, soleDocument, reply in
+        return { [weak self] origin, other, reply in
             guard let controller = self?.directPathController else {
                 reply(.skipped(.notUsable))
                 return
             }
-            controller.handover(for: origin, soleDocument: soleDocument, reply: reply)
+            controller.handover(for: origin, other: other, reply: reply)
         }
     }
 

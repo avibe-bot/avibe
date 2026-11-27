@@ -566,7 +566,7 @@ final class MobileOnboardingTests: XCTestCase {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = store
         let page = WKWebView(frame: .zero, configuration: configuration)
-        DirectWebViewRegistry.shared.register(page)
+        DirectWebViewRegistry.shared.register(page, as: .runtime)
         let sheet = AvibePageViewController(
             page: .accountDeletion,
             controlPlane: MobileControlPlaneConfiguration.productionURL,
@@ -574,7 +574,7 @@ final class MobileOnboardingTests: XCTestCase {
             onFinish: { _ in }
         )
         XCTAssertTrue(sheet.webView.configuration.websiteDataStore === store)
-        XCTAssertEqual(DirectWebViewRegistry.shared.isSoleDocument(page, host: "instance-one.example"), true)
+        XCTAssertEqual(DirectWebViewRegistry.shared.otherDocument(than: page, host: "instance-one.example"), .sole)
     }
 
     // The bundled page names a page, never an address: each page has one

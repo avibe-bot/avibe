@@ -402,12 +402,20 @@ enum DirectRendezvous {
     /// has exactly `bind_ms`, `visible_ms`, `late` and `visible`; one the
     /// instance does not accept makes it ignore the list (and only the
     /// list). No identifier, address or time of day.
+    ///
+    /// `handovers`, when there are any: the hand-overs this instance's page
+    /// asked the App for (`DirectPathUse.Handover`), oldest first, at most
+    /// eight. Each entry has exactly `age_s`, `ms`, `refused`, `other`,
+    /// `closed`, `kept` and `path`; one the instance does not accept makes
+    /// it ignore the list (and only the list). An instance that does not
+    /// know the field ignores it.
     static func requestBody(
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
         slowStoreRemovalsMs: [Int] = [],
         pathUse: [DirectPathUse.Report] = [],
-        startup: [String] = []
+        startup: [String] = [],
+        handovers: [String] = []
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
@@ -432,6 +440,10 @@ enum DirectRendezvous {
         let starts = startup.suffix(ColdStartTimings.limit)
         if !starts.isEmpty {
             body += ",\"startup\":[" + starts.joined(separator: ",") + "]"
+        }
+        let asked = handovers.suffix(DirectPathUse.handoverLimit)
+        if !asked.isEmpty {
+            body += ",\"handovers\":[" + asked.joined(separator: ",") + "]"
         }
         return body + "}"
     }
