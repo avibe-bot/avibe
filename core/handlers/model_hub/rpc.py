@@ -222,6 +222,10 @@ async def dispatch_model_hub_rpc(
         return await service.quota_summary(force=payload.get("force") is True)
     if operation == "hosted_tools_status":
         return await asyncio.to_thread(service.hosted_tools_status)
+    if operation == "source_filter_status":
+        return await asyncio.to_thread(service.source_filter_status)
+    if operation == "set_source_filter":
+        return await service.set_source_filter(payload.get("enabled"))
     if operation == "set_hosted_tool":
         return await service.set_hosted_tool(payload.get("tool"), payload.get("setting"))
     if operation == "clear_hosted_refusals":

@@ -1,6 +1,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Desktop Welcome only: full account-window height includes its 94px header.
+   ui/design: desktop/sign-in/start. Other steps and non-compact iOS do not use these. */
+@custom-variant welcome-short (@media (height < 780px));
+@custom-variant welcome-tall (@media (height >= 900px));
+
 /* iOS visual-viewport height (px), kept in sync by useViewportHeightVar. Consumed
    ONLY by the md+ chat (iPad / landscape), whose desktop layout can't use the
    mobile body-lock; the mobile shell + chat use the static --app-shell-h instead.

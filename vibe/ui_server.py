@@ -5985,6 +5985,35 @@ async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/settings/experimental/source-filter", include_in_schema=False)
+async def model_hub_source_filter_get(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            return _model_hub_success(**await _model_hub_service().source_filter_status())
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/settings/experimental/source-filter", include_in_schema=False)
+async def model_hub_source_filter_put(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            body = _model_hub_json_object("invalid_parameter")
+            if set(body) != {"enabled"}:
+                raise ModelHubError("invalid_parameter", status=400)
+            return _model_hub_success(**await _model_hub_service().set_source_filter(body["enabled"]))
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.put("/api/models/hosted-tools/{tool}", include_in_schema=False)
 async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest):
     async def handler():

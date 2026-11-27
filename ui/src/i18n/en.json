@@ -198,9 +198,27 @@
       "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",
       "error": "Update failed — retry"
     },
+    "providerError": {
+      "accountConflict": "This email is linked to more than one account. Use another way to sign in.",
+      "serverError": "The sign-in service could not complete the request. Retry or choose another method.",
+      "denied": "Permission to sign in was not granted. Retry or choose another method.",
+      "timedOut": "Sign-in timed out. Please try again.",
+      "failed": "Sign-in could not be completed. Retry or choose another method."
+    },
     "providerCallback": {
-      "done": "You can close this tab and return to Avibe.",
-      "failed": "Sign-in didn’t finish. Return to Avibe to try again."
+      "done": "Sign-in complete. You can return to Avibe.",
+      "failed": "Sign-in could not be completed.",
+      "verifyInApp": "Return to Avibe to finish verifying your identity.",
+      "cancelled": "This sign-in was cancelled.",
+      "timedOut": "This sign-in timed out.",
+      "accountConflict": "This email is linked to multiple accounts. Sign-in with this method could not be completed.",
+      "serverError": "The sign-in service could not complete the request.",
+      "denied": "Permission to sign in was not granted.",
+      "emailUnverified": "Verify your email with your sign-in provider first.",
+      "retry": "Return to Avibe to retry or choose another sign-in method.",
+      "accountConflictNext": "Go back to Avibe and use another way to sign in.",
+      "details": "Details",
+      "openApp": "Open Avibe"
     }
   },
   "installHint": {
@@ -732,7 +750,8 @@
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
-      "access": "Access"
+      "access": "Access",
+      "experimental": "Experimental"
     },
     "navigationLabel": "Settings sections",
     "backToWorkbench": "Back to Workbench",
@@ -3296,6 +3315,26 @@
       "desktopDenied": "macOS hasn't allowed Avibe to send notifications, so this computer gets no alerts and you can't reply from them.",
       "openSystemSettings": "Open System Settings",
       "desktopSaveFailed": "Couldn't save the notification switch. Try again."
+    },
+    "experimental": {
+      "title": "Experimental",
+      "subtitle": "These features are on trial and may change between versions.",
+      "on": "On",
+      "off": "Off",
+      "loadFailed": "Could not load the source filter. Try again.",
+      "sourceFilter": {
+        "title": "Source filter",
+        "summary": "Run your own scripts on Vibey's web search and web fetch.",
+        "use": "Use source filter",
+        "guide": "How to write scripts",
+        "scripts": "Scripts",
+        "scriptsHint": "Put them in this folder; any that are missing are skipped.",
+        "copyFolder": "Copy the folder path",
+        "found": "Found",
+        "notFound": "Not found",
+        "lastFailed": "Last run failed",
+        "failure": "{{time}} · that call was blocked"
+      }
     }
   },
   "remoteAccess": {
@@ -6146,7 +6185,9 @@
           "fetch_unsupported_content": "The document type is not supported.",
           "fetch_refused": "The page request was refused.",
           "fetch_unavailable": "The page is unavailable.",
-          "fetch_sources_blocked": "All page-reading sources are blocked or disabled."
+          "fetch_sources_blocked": "All page-reading sources are blocked or disabled.",
+          "source_filter_blocked": "The source filter blocked this call.",
+          "source_filter_failed": "A source filter script failed, so this call was blocked."
         },
         "mode": {
           "native": "Native · {{provider}}",
