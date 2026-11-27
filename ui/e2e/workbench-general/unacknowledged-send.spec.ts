@@ -113,9 +113,15 @@ async function reopen(page: Page, chat: Instance, denied: string[], serveMore?: 
   denied.push(...await serveChat(next, chat));
   await serveMore?.(next);
   await next.setViewportSize({ width: 1200, height: 800 });
+  // Returned once the chat's bootstrap has answered: only then can a page give anything back.
+  const booted = next.waitForResponse(`**/api/sessions/${SESSION_ID}/bootstrap`);
   await open(next, `/chat/${SESSION_ID}`);
+  await booted;
   return next;
 }
+
+/** A restore pass runs shortly after the bootstrap: long enough for one, and for a draft save (600 ms). */
+const RESTORE_SETTLED_MS = 1_200;
 
 /** End a page the way the system ends a suspended App's: at once, running none of its code. */
 async function tearDown(page: Page) {
@@ -218,10 +224,12 @@ test('a send is never given back to another reader, even while the page still na
     });
   });
 
-  await expect(sendButton(next)).toBeVisible();
+  // Loaded, still on the replayed reader: nothing comes back.
+  await next.waitForTimeout(RESTORE_SETTLED_MS);
   await expect(editor(next)).toHaveText('');
   confirm();
   await expect.poll(() => records(next)).toEqual([]);
+  await next.waitForTimeout(RESTORE_SETTLED_MS);
   await expect(editor(next)).toHaveText('');
   expect(chat.draft.text).toBe('');
   expect(denied).toEqual([]);
@@ -236,7 +244,7 @@ test('a send still out in another tab is not given back there', async ({ page })
   await send(page, chat, 'Still on its way');
   // The sending page stays open, waiting for the answer.
   const other = await reopen(page, chat, denied);
-  await expect(sendButton(other)).toBeVisible();
+  await other.waitForTimeout(RESTORE_SETTLED_MS);
   await expect(editor(other)).toHaveText('');
   expect(await records(other)).toHaveLength(1);
   // Once the sending page is gone, the next page gives it back.

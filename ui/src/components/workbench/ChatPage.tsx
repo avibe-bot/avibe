@@ -1853,7 +1853,10 @@ export const ChatPage: React.FC = () => {
   // What the transcript and the queue last showed, by client id: a pass reads it
   // after its asynchronous check, and every later change runs this effect again.
   const heldClientIdsRef = useRef<{ sessionId: string; ids: Set<string> } | null>(null);
+  // The reader as the page last committed it, for a pass that resumes after its check.
+  const restoreReaderRef = useRef({ principal: readerPrincipal ?? null, provisional: readerProvisional });
   useEffect(() => {
+    restoreReaderRef.current = { principal: readerPrincipal ?? null, provisional: readerProvisional };
     if (!sessionId || hydratedTranscriptSessionId !== sessionId || !writable) return;
     const held = new Set<string>();
     for (const row of [...messages, ...queue]) {
@@ -1886,7 +1889,15 @@ export const ChatPage: React.FC = () => {
       current.running = false;
       const composer = composerRef.current;
       const shown = heldClientIdsRef.current;
-      if (restorePassRef.current !== current || !composer || shown?.sessionId !== sessionId) return;
+      // The page may have moved to another chat or reader meanwhile: the next run tries again.
+      const reader = restoreReaderRef.current;
+      if (
+        restorePassRef.current !== current || !composer || shown?.sessionId !== sessionId
+        || sessionIdRef.current !== sessionId || reader.principal !== principal || reader.provisional
+      ) {
+        if (restorePassRef.current === current) current.retry = true;
+        return;
+      }
       for (const send of unsent) {
         // Another reader's never comes back; one the instance holds is already shown.
         if (send.principal !== principal || shown.ids.has(send.clientId)) {

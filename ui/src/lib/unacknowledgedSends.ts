@@ -140,7 +140,8 @@ export async function unacknowledgedSends(sessionId: string): Promise<Unacknowle
   let live = new Set<string>();
   try {
     const state = await locks()?.query();
-    live = new Set((state?.held ?? []).map((lock) => lock.name ?? ''));
+    // A lock just asked for and not yet granted is as live as a held one.
+    live = new Set([...(state?.held ?? []), ...(state?.pending ?? [])].map((lock) => lock.name ?? ''));
   } catch {
     // Without Web Locks only this document's own sends are known to be out.
   }
