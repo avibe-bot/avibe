@@ -35,7 +35,7 @@ from aiohttp import ClientConnectionError, ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from fastapi.exception_handlers import http_exception_handler
-from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.datastructures import MutableHeaders, UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect, HTTPConnection
@@ -185,7 +185,25 @@ class _ShowEventDispatchOutcome(str, Enum):
 # served as a type browsers accept (an octet-stream manifest is rejected).
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
-app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
+_API_CACHE_DEFAULT = "private, no-store"
+
+
+class _UIApp(CompatApp):
+    """Backstop for middleware denials and framework errors that bypass after_request."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            return await super().__call__(scope, receive, send)
+
+        async def send_with_cache_policy(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message).setdefault("Cache-Control", _API_CACHE_DEFAULT)
+            await send(message)
+
+        await super().__call__(scope, receive, send_with_cache_policy)
+
+
+app = _UIApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
 register_mobile_routes(app)
 register_connection_routes(app)
 
@@ -3279,6 +3297,15 @@ def add_request_via_header(response: Response) -> Response:
     via = getattr(g, "remote_request_via", None)
     if via is not None and _answer_is_never_stored(response):
         response.headers[REQUEST_VIA_HEADER] = via
+    return response
+
+
+@app.after_request
+def apply_api_cache_default(response: Response) -> Response:
+    # Hooks run in reverse registration order: let the arrival-word hook see
+    # the policy that will actually go to the client.
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", _API_CACHE_DEFAULT)
     return response
 
 
