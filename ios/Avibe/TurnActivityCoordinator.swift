@@ -442,6 +442,7 @@ final class TurnActivityCoordinator {
     private func save() {
         if let data = try? JSONEncoder().encode(ledger) { defaults.set(data, forKey: Self.ledgerKey) }
     }
+
     /// A request that got no answer from the instance this soon lost its
     /// connection rather than ran out of time.
     static let lostConnectionWithin: TimeInterval = 5
