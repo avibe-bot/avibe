@@ -488,6 +488,11 @@ fn an_instance_the_direct_path_cannot_name_gets_no_session() {
         );
         // And nothing to keep looking for.
         assert!(!wiring.awaits(Some(&published)), "{account:?} {origin:?} {instance:?}");
+        // Nor a client before its view is created.
+        assert!(
+            !wiring.starts_at_creation(&published.target),
+            "{account:?} {origin:?} {instance:?}"
+        );
     }
 }
 
@@ -1092,31 +1097,22 @@ fn only_an_instance_that_could_be_routed_is_one_whose_page_gets_a_bridge() {
     assert!(Wiring::new(Routing::AtCreation, false, Choices::unsaved()).routable(ONE));
 }
 
+/// Where a window is routed live, every instance that may have a session is
+/// routed before its view first loads, whether or not it has answered
+/// before: WebKit never moves a view that connected by itself onto a route
+/// that came later, so only a view that starts on the listener can be handed
+/// over once a direct link is up.
 #[test]
-fn an_instance_that_answered_before_is_routed_before_its_view_first_loads() {
+fn a_view_is_routed_before_its_first_load_whether_or_not_its_instance_has_answered() {
     let now = Instant::now();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("direct-paths.json");
     let mut wiring = Wiring::new(Routing::Live, false, Choices::load(path.clone()));
 
-    // Never answered: the view is created as it always was, asked once it
-    // is shown, and routed with the first answer. WebKit already has its
-    // connection by then, so that view keeps the tunnel while it lives.
-    assert!(!wiring.starts_at_creation(&target(ONE)));
-    let first = opened(&mut wiring, ONE, "main-runtime-1", now);
-    assert_eq!(wiring.window_created(first, "show-1"), []);
-    assert_eq!(
-        wiring.probed(first, true),
-        [install(first, "main-runtime-1"), install(first, "show-1")]
-    );
-    assert_eq!(wiring.reconcile(None, |_| false, now), [retire(first, &[])]);
-
-    // From then on, also after a restart, its client starts before its view
-    // is created, and the view is routed as it is made: before its first
-    // load, without waiting for an answer.
-    let mut wiring = Wiring::new(Routing::Live, false, Choices::load(path));
+    // Never answered: its client still starts before its view is created,
+    // and the view is routed as it is made, without waiting for an answer.
     assert!(wiring.starts_at_creation(&target(ONE)));
-    assert!(!wiring.starts_at_creation(&target(TWO)));
+    assert!(wiring.starts_at_creation(&target(TWO)));
     let session = wiring.open(target(ONE), material(4300), None, now);
     assert_eq!(
         wiring.window_created(session, "main-runtime-2"),
@@ -1141,13 +1137,23 @@ fn an_instance_that_answered_before_is_routed_before_its_view_first_loads() {
     let published = shown(ONE, "main-runtime-2");
     assert_eq!(wiring.reconcile(Some(&published), |_| true, now), []);
     assert_eq!(wiring.asks_through(session), Some("main-runtime-2"));
-    // The first answer routes nothing twice.
-    assert_eq!(wiring.probed(session, true), []);
-    // An app window opened from the view joins it and is routed as it is made.
+    // An instance that does not answer yet (it offers no direct path, or
+    // this computer's permission is still to be given) keeps its session
+    // and its route: the listener carries its windows on the tunnel, and
+    // the windows made meanwhile are routed too.
+    assert_eq!(wiring.probed(session, false), []);
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now + Duration::from_secs(600)),
+        []
+    );
+    assert!(wiring.routes(session, "main-runtime-2") && wiring.routes(session, "show-1"));
     assert_eq!(
         wiring.app_window_created("show-2", ACCOUNT, ONE, None),
         [install(session, "show-2")]
     );
+    // The first answer routes nothing twice, and is remembered as before.
+    assert_eq!(wiring.probed(session, true), []);
+    assert!(Choices::load(path.clone()).reached(ACCOUNT, ONE));
     // It ends as any session does, and its route comes off every window.
     assert_eq!(
         wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
@@ -1166,6 +1172,89 @@ fn an_instance_that_answered_before_is_routed_before_its_view_first_loads() {
         choices.remember(ACCOUNT, ONE);
         assert!(!Wiring::new(routing, proxy_configured, choices).starts_at_creation(&target(ONE)));
     }
+    // Where a route is given only at creation, a first open still only
+    // asks: nothing here changes that.
+    assert!(!Wiring::new(Routing::AtCreation, false, Choices::unsaved()).starts_at_creation(&target(ONE)));
+}
+
+/// A view that was made without a route all the same (no client could be
+/// started for it, or its instance was not in the account's list yet) is
+/// not left out: it is asked from once it is open and routed with the first
+/// answer, as every first view was before. WebKit already has its
+/// connection by then, so that view keeps the tunnel while it lives.
+#[test]
+fn a_view_made_without_a_route_is_asked_once_open_and_routed_with_the_first_answer() {
+    let now = Instant::now();
+    let mut wiring = live();
+    assert!(wiring.starts_at_creation(&target(ONE)));
+    // No client came of it: the view is on show with no session.
+    let first = opened(&mut wiring, ONE, "main-runtime-1", now);
+    assert_eq!(wiring.window_created(first, "show-1"), []);
+    assert!(!wiring.routes(first, "main-runtime-1"));
+    assert_eq!(
+        wiring.probed(first, true),
+        [install(first, "main-runtime-1"), install(first, "show-1")]
+    );
+    // No client could be started once it was open either: asked again only
+    // after a pause, and then as before.
+    let mut wiring = live();
+    let published = shown(ONE, "main-runtime-1");
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now),
+        [open("main-runtime-1")]
+    );
+    wiring.declined("main-runtime-1", now);
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now + Duration::from_secs(59)),
+        []
+    );
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now + Duration::from_secs(60)),
+        [open("main-runtime-1")]
+    );
+}
+
+/// The window's browsing data says whether it took the route. One that did
+/// not is not a routed window: its page is not told "direct", nothing is
+/// taken off it when the session ends, and the session's next answer puts
+/// the route on it again.
+#[test]
+fn a_window_that_did_not_take_its_route_is_not_a_routed_one() {
+    let now = Instant::now();
+    let mut wiring = live();
+    let session = wiring.open(target(ONE), material(4300), None, now);
+    assert_eq!(
+        wiring.window_created(session, "main-runtime-1"),
+        [install(session, "main-runtime-1")]
+    );
+    assert_eq!(
+        wiring.app_window_created("show-1", ACCOUNT, ONE, None),
+        [install(session, "show-1")]
+    );
+    assert_eq!(wiring.routed_by("main-runtime-1"), Some(session));
+    wiring.route_refused(session, "main-runtime-1");
+    assert!(!wiring.routes(session, "main-runtime-1"));
+    assert_eq!(wiring.routed_by("main-runtime-1"), None);
+    assert!(wiring.unrouted("main-runtime-1"));
+    // The other window keeps its route; another session's, or a window
+    // that is not this session's, is not touched.
+    wiring.route_refused(session + 1, "show-1");
+    wiring.route_refused(session, "show-9");
+    assert!(wiring.routes(session, "show-1"));
+    // It is still the session's instance view: published, asked through,
+    // and routed again with the next answer, the others not twice.
+    let published = shown(ONE, "main-runtime-1");
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), []);
+    assert_eq!(wiring.asks_through(session), Some("main-runtime-1"));
+    assert_eq!(wiring.probed(session, false), []);
+    assert_eq!(wiring.probed(session, true), [install(session, "main-runtime-1")]);
+    assert!(wiring.routes(session, "main-runtime-1"));
+    // Refused again: the session ends with nothing to take off it.
+    wiring.route_refused(session, "main-runtime-1");
+    assert_eq!(
+        wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
+        [retire(session, &["show-1"])]
+    );
 }
 
 #[test]
