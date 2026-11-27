@@ -637,8 +637,15 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         index for index, step in enumerate(steps)
         if "-project ios/Avibe.xcodeproj" in step.get("run", "")
     ]
-    fast_step, = [step for step in steps if step.get('if') == 'inputs.fast-native']
+    py_step, prepare_selector, fast_step = [step for step in steps if step.get('if') == 'inputs.fast-native']
+    assert py_step['uses'].startswith('actions/setup-python@')
+    assert py_step['with']['python-version'] == '3.13' and str(py_step['with']['update-environment']).lower() == 'false'
+    assert prepare_selector['env']['SELECTOR_PYTHON'] == '${{ steps.' + py_step['id'] + '.outputs.python-path }}'
+    assert '"$SELECTOR_PYTHON" -m venv "$RUNNER_TEMP/native-pr-python"' in prepare_selector['run']
+    assert '--only-binary=:all: tree-sitter==0.25.2 tree-sitter-swift==0.7.4' in prepare_selector['run']
+    assert steps.index(prepare_selector) < prepare_index
     fast_script = fast_step['run']
+    assert 'source "$RUNNER_TEMP/native-pr-python/bin/activate"' in fast_script
     assert fast_step['name'] == 'Compile the app and run the native PR contracts'
     assert not fast_step.get('continue-on-error') and 'set -euo pipefail' in fast_script
     assert 'python3 -m scripts.ci_native_pr_tests' in fast_script
