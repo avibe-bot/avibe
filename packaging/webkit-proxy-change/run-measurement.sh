@@ -94,9 +94,9 @@ sudo -n ifconfig lo0 alias 127.0.0.2 255.0.0.0
 while read -r ip host; do
   [[ -z "$host" ]] && continue
   printf '%s %s %s\n' "$ip" "$host" "$marker" | sudo -n tee -a /etc/hosts >/dev/null
-done < <(python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" <<'PY'
+done < <(python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" "$probe_dir/late-cases.json" <<'PY'
 import json, sys
-for row in json.load(open(sys.argv[1])):
+for row in json.load(open(sys.argv[1])) + json.load(open(sys.argv[3])):
     ip = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
     print(ip, f"{row['id']}.webkit-proxy.test")
 for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
@@ -126,10 +126,10 @@ for _ in {1..100}; do
   sleep 0.1
 done
 curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and d["instanceCases"] == 10 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
-bounded 20 python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" <<'PY'
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and d["instanceCases"] == 10 and d["lateCases"] == 6 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+bounded 20 python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" "$probe_dir/late-cases.json" <<'PY'
 import json, socket, sys
-for row in json.load(open(sys.argv[1])):
+for row in json.load(open(sys.argv[1])) + json.load(open(sys.argv[3])):
     host = row["id"] + ".webkit-proxy.test"
     expected = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
     actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}

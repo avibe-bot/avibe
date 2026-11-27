@@ -138,3 +138,39 @@ Synthetic evidence tests exercise the interpreter, not WebKit. Simulator results
 cannot qualify real-device Local Network permission, suspension, radio changes,
 real Cloudflare behavior, or future OS transports. No iOS version is qualified by
 API availability, compilation, or this harness's synthetic tests.
+
+## Late-route cells (branch `experiment/webkit-late-route`, 2026-11-27)
+
+Question: the App's listener was not ready at an instance's first load, so
+the store loaded the host with no route; the route is added afterwards. The
+matrix already says a route added while the store has a live or pooled
+connection to the host is not used (`idle`, `inflight-install`, lifecycle
+`reload` and `recreate`). These six cells (`late-cases.json`) ask what
+happens once that connection ends, and whether a `421` ends it:
+
+| Cell | Old connection | Ended by |
+| --- | --- | --- |
+| `late-close-h1`, `late-close-h2` | warm, idle | the origin destroys the socket |
+| `late-goaway-h2` | warm, idle | the origin closes the HTTP/2 session (GOAWAY) |
+| `late-close-live-h2` | carries an open EventSource | the origin destroys the socket |
+| `late-421-h2` | warm, idle | nothing: one request is answered `421` by the origin |
+| `late-421-live-h2` | carries an open EventSource | the same |
+
+Each cell warms the direct connection, adds the route to the working CONNECT
+proxy (`allowFailover=false`), makes one fetch as its own control (expected
+on the old connection), ends or refuses, then observes: two fetches a second
+apart, four seconds for an EventSource to reconnect by itself, the old stream
+if any, a fetch, a new EventSource and a new WebSocket. `route` in each result
+says which server answered: `origin` (no route used) or `proxy-backend`.
+`late-observations.json` lists every step and every attempt the servers saw
+for the cell's host, so a retry the page never hears of is visible.
+
+Nothing is asserted about the route. A cell fails only when its precondition
+is missing (the warm pool, or the connection in use not among those ended)
+and is then unmeasured. The `421` is measured only: who would send it in the
+product, and how that would be bounded, is not decided.
+
+`MEASURE_ONLY=late` (set in this branch's workflow) runs the build and the
+minimal gates, then these cells. The 27-cell matrix, the lifecycle cases and
+the instance cells are not run on this branch. GET only; the newest simulator
+runtime only; a loopback fixture, not Cloudflare; no device.

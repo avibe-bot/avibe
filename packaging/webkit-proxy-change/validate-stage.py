@@ -42,7 +42,7 @@ def validate_bundle(app: Path, build_log: Path) -> None:
             require(isinstance(value, str) and bool(value) and "$" not in value,
                     f"{bundle.name}: missing/invalid {key}")
         if bundle == test:
-            for name in ("Anchor.der", "matrix.json", "instance-cases.json"):
+            for name in ("Anchor.der", "matrix.json", "instance-cases.json", "late-cases.json"):
                 require((bundle / name).is_file(), f"{bundle.name}: missing {name}")
         else:
             require((bundle / "Anchor.der").is_file(), f"{bundle.name}: missing Anchor.der")
@@ -229,7 +229,60 @@ def validate_lifecycle(out: Path) -> None:
                                                    for item in observations)}))
 
 
+def validate_late(out: Path, cases_path: Path) -> None:
+    """Write what each late-route cell observed. No route is asserted: where
+    the next connection went is the measurement. Only execution is required:
+    one passing XCTest, and every cell either complete or explicitly unmeasured."""
+    cases = json.loads(cases_path.read_text())
+    events = []
+    for line in (out / "cert/fixture.jsonl").read_text().splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            break  # A writer may have been stopped in its final record.
+    kept = ("ok", "route", "protocol", "connection", "tcpConnection", "proxyConnection", "status", "error",
+            "closed", "connections", "mode", "count", "errors", "identities", "originalCount", "unmeasured")
+    report = {}
+    for case in cases:
+        rows = [e for e in events if e.get("event") == "client" and e.get("case") == case["id"]]
+        steps = []
+        for row in rows:
+            result = row.get("result") if isinstance(row.get("result"), dict) else {}
+            item = {"step": row.get("step"), **{k: result[k] for k in kept if k in result}}
+            for name in ("first", "last"):
+                if name in result:
+                    values = result[name] if isinstance(result[name], list) else [result[name]]
+                    item[name] = [{k: v.get(k) for k in ("route", "connection", "stream", "proxyConnection")}
+                                  for v in values if isinstance(v, dict)]
+            steps.append(item)
+        host = case["id"] + ".webkit-proxy.test"
+        # Every attempt the servers saw for this host, in order: a retry the
+        # page never hears of is here.
+        attempts = [{k: e.get(k) for k in ("sequence", "event", "route", "protocol", "connection", "proxyConnection",
+                                           "path", "id")}
+                    for e in events if e.get("host") == host and e.get("event") in ("request", "misdirected", "websocket")]
+        ended = [{k: e.get(k) for k in ("sequence", "event", "closed", "connections")}
+                 for e in events if e.get("host") == host and e.get("event") in ("origin_forced_close", "origin_goaway")]
+        names = [item["step"] for item in steps]
+        report[case["id"]] = {"action": case["action"], "complete": "case_complete" in names,
+                              "unmeasured": "case_unmeasured" in names, "steps": steps,
+                              "serverAttempts": attempts, "ended": ended}
+    (out / "late-observations.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+    missing = [name for name, item in report.items() if not item["complete"] and not item["unmeasured"]]
+    require(not missing, f"late cells neither complete nor unmeasured: {missing}")
+    log = (out / "late-routes.log").read_text()
+    counts = re.findall(r"Executed (\d+) tests?, with (\d+) failures?", log)
+    require(bool(counts) and all(n == "1" for n, _ in counts), f"late XCTest execution missing: {counts}")
+    print(json.dumps({"stage": "late-routes", "cells": len(report),
+                      "complete": sum(item["complete"] for item in report.values()),
+                      "unmeasured": sum(item["unmeasured"] for item in report.values()),
+                      "transportQualified": False}))
+
+
 def validate_evidence(stage: str, out: Path, matrix_path: Path) -> None:
+    if stage == "late-routes":
+        validate_late(out, matrix_path.with_name("late-cases.json"))
+        return
     if stage == "instance-routes":
         report = write_report(out, matrix_path.with_name("instance-cases.json"))
         require(report["measuredCases"] == report["expectedCases"] == 10,

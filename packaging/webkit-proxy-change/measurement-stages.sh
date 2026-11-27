@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Production stage/control owner. Sourcing defines functions only; no tools run.
 measurement_stage_names=(build-for-testing product-validation simulator-ready install test-launch lifecycle controls-health direct-minimal cold-minimal full-matrix instance-health instance-routes)
+# MEASURE_ONLY=late: the late-route cells alone, after the same build and
+# minimal gates. The 27-cell matrix, the lifecycle cases and the instance
+# cells are not run and are not listed as skipped: their results stand as
+# measured before, on their own commits.
+if [[ "${MEASURE_ONLY:-}" == "late" ]]; then
+  measurement_stage_names=(build-for-testing product-validation simulator-ready install test-launch controls-health direct-minimal cold-minimal late-health late-routes)
+fi
 
 finalize_summary() {
   local status=$1 shell_status=$1 report_status=0 summary_status=0
@@ -126,7 +133,7 @@ PY
   if [[ "$status" -eq 0 ]]; then status=${pipeline_status[1]}; fi
   set -e
   # Preserve partial observation reports even when execution itself failed.
-  if [[ "$stage" == "lifecycle" || "$stage" == "full-matrix" || "$stage" == "instance-routes" || ( "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal ) ) ]]; then
+  if [[ "$stage" == "lifecycle" || "$stage" == "full-matrix" || "$stage" == "instance-routes" || "$stage" == "late-routes" || ( "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal ) ) ]]; then
     set +e
     python3 "$probe_dir/validate-stage.py" "$stage" "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
     pipeline_status=("${PIPESTATUS[@]}")
@@ -233,6 +240,14 @@ run_measurement_stages() {
   run_stage simulator-ready "product-validation" python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
   run_stage install "simulator-ready" python3 "$probe_dir/validate-stage.py" timeout 60 xcrun simctl install "$device_id" "$app"
   run_stage test-launch "install" test_method test-launch testHostLaunch 150
+  if [[ "${MEASURE_ONLY:-}" == "late" ]]; then
+    run_stage controls-health "test-launch" fixture_health controls-health
+    run_stage direct-minimal "controls-health" test_method direct-minimal testDirectTLSMinimal 120
+    run_stage cold-minimal "direct-minimal" test_method cold-minimal testColdMinimal 120
+    run_stage late-health "cold-minimal" fixture_health late-health
+    run_stage late-routes "cold-minimal late-health" test_method late-routes testLateRoutes 900
+    return
+  fi
   run_stage lifecycle "test-launch" run_lifecycle
   # Lifecycle is an observation branch. Its failure is retained, not a global
   # blocker. Recheck the real fixture before another branch consumes it.

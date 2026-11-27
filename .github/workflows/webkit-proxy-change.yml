@@ -3,7 +3,7 @@ name: WebKit proxy change measurement
 on:
   push:
     branches:
-      - experiment/webkit-proxy-change
+      - experiment/webkit-late-route
 
 permissions:
   contents: read
@@ -19,6 +19,8 @@ jobs:
         runtime: ["newest"]
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      # This branch measures the late-route cells only (late-cases.json).
+      MEASURE_ONLY: late
     steps:
       - name: Check out experiment
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

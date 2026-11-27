@@ -315,6 +315,50 @@ final class WebKitProxyChangeTests: XCTestCase {
         XCTAssertEqual(fixtureFailures, 0, "Fixture/precondition failures are unmeasured, not proxy conclusions; inspect JSONL")
     }
 
+    /// A route added after the store's first load of the host, as the App's
+    /// late first bind would add it: what ends the old connection, and where
+    /// the next one goes. Every outcome is an observation; only a missing
+    /// precondition fails a cell.
+    @MainActor
+    func testLateRoutes() async throws {
+        let bundle = Bundle(for: Self.self)
+        let cases = try JSONDecoder().decode([ProbeCase].self, from: Data(contentsOf: XCTUnwrap(bundle.url(forResource: "late-cases", withExtension: "json"))))
+        let anchorData = try Data(contentsOf: XCTUnwrap(bundle.url(forResource: "Anchor", withExtension: "der")))
+        let anchor = try XCTUnwrap(SecCertificateCreateWithData(nil, anchorData as CFData))
+        _ = try await control("/health")
+        emit(["step":"late_start", "os":UIDevice.current.systemVersion,
+              "system":ProcessInfo.processInfo.operatingSystemVersionString, "cases":cases.count])
+        var fixtureFailures = 0
+        for fixture in cases {
+            let browser = Browser(fixture: fixture, anchor: anchor)
+            do {
+                try await run(fixture, browser)
+                await browser.record("case_complete", ["executionComplete":true, "qualification":"not asserted", "replaySafety":"unmeasured: GET only"])
+            } catch {
+                fixtureFailures += 1
+                await browser.record("case_unmeasured", ["ok":false, "error":String(describing:error)])
+            }
+            await browser.close()
+        }
+        emit(["step":"late_complete", "fixtureFailures":fixtureFailures, "cases":cases.count])
+        XCTAssertEqual(fixtureFailures, 0, "Fixture/precondition failures are unmeasured, not route conclusions; inspect JSONL")
+    }
+
+    /// After the old connection was ended or refused: two fetches a second
+    /// apart, then, once an EventSource has had time to reconnect by itself,
+    /// the old stream if there is one, a new stream and a new WebSocket.
+    @MainActor
+    private func afterLateRoute(_ browser: Browser, live: Bool) async throws {
+        try await afterMutation(browser)
+        try await Task.sleep(for: .seconds(4))
+        if live {
+            _ = try await browser.observe("old-sse-after", expression:"window.probe.streamSnapshot('\(browser.fixture.id)-old-sse')")
+        }
+        _ = try await browser.fetch("after-reconnect-wait")
+        _ = try await browser.observe("rebuilt-sse", expression:"window.probe.openEvents('\(browser.fixture.id)-rebuilt-sse')")
+        _ = try await browser.observe("new-websocket", expression:"window.probe.webSocket('\(browser.fixture.id)-new-websocket')")
+    }
+
     @MainActor
     private func warm(_ browser: Browser, viaProxy: Bool) async throws {
         if viaProxy { await browser.route("direct") }
@@ -467,6 +511,37 @@ final class WebKitProxyChangeTests: XCTestCase {
             _ = try await browser.observe("old-sse-after", expression:"window.probe.streamSnapshot('\(fixture.id)-old-sse')")
             _ = try await browser.observe("rebuilt-sse", expression:"window.probe.openEvents('\(fixture.id)-new-sse')")
             _ = try await browser.observe("new-websocket", expression:"window.probe.webSocket('\(fixture.id)-new-websocket')")
+        case "lateClose", "lateGoaway", "lateCloseLive":
+            let live = fixture.action == "lateCloseLive"
+            try await warm(browser, viaProxy:false)
+            if live { try await establishOldStream(browser) }
+            await browser.route("direct")
+            // Expected on the old connection (measured: `idle`); kept as
+            // this cell's own control.
+            let before = try await browser.fetch("late-before-end")
+            let path = fixture.action == "lateGoaway" ? "/goaway-origin" : "/close-origin"
+            let closed = try await control("\(path)?host=\(fixture.host)")
+            await browser.record("ended-origin-connections", closed)
+            // The connection that request used is among those ended: a
+            // socket for a close, an HTTP/2 session for a GOAWAY.
+            let ended = closed["connections"] as? [String] ?? []
+            guard (closed["closed"] as? Int ?? 0) > 0,
+                  [before["tcpConnection"] as? String, before["connection"] as? String]
+                      .compactMap({ $0 }).contains(where: { ended.contains($0) })
+            else { throw ProbeError("the connection in use was not ended: \(before) / \(closed)") }
+            try await afterLateRoute(browser, live: live)
+        case "late421", "late421Live":
+            let live = fixture.action == "late421Live"
+            try await warm(browser, viaProxy:false)
+            if live { try await establishOldStream(browser) }
+            await browser.route("direct")
+            _ = try await browser.fetch("late-before-421")
+            // The origin answers 421 on this path; the proxy's backend
+            // answers it normally. The result says which answered, and the
+            // fixture log has every attempt.
+            _ = try await browser.observe("misdirected",
+                expression:"window.probe.fetch('\(fixture.id)-misdirected', '/misdirected')")
+            try await afterLateRoute(browser, live: live)
         default: throw ProbeError("unknown action")
         }
     }

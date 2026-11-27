@@ -18,7 +18,10 @@ const lifecycleCases = [
   {id: 'lifecycle-recreate', origin: 'h1', proxy: 'h1'},
   {id: 'lifecycle-relaunch', origin: 'h1', proxy: 'h1'},
 ];
-const byHost = new Map([...cases, ...lifecycleCases].map(c => [`${c.id}.webkit-proxy.test`, c]));
+// A route added after the store's first load of the host (the App's late
+// first bind): what ends the old connection, and where the next one goes.
+const lateCases = JSON.parse(fs.readFileSync(new URL('./late-cases.json', import.meta.url)));
+const byHost = new Map([...cases, ...lifecycleCases, ...lateCases].map(c => [`${c.id}.webkit-proxy.test`, c]));
 for (const c of instanceHosts) byHost.set(c.host, c);
 const key = fs.readFileSync(`${out}/key.pem`);
 const cert = fs.readFileSync(`${out}/cert.pem`);
@@ -27,6 +30,7 @@ let sequence = 0;
 let connectionID = 0;
 const proxyConnections = new Map();
 const originConnections = new Map();
+const originSessions = new Map();
 const proxyModes = new Map();
 const upstreamConnections = new Map();
 const listening = new Set();
@@ -155,6 +159,15 @@ function makeOrigin(route, protocol, host, port) {
   server.on('request', (req, res) => {
     const details = describe(req);
     log('request', details);
+    if (route === 'origin' && req.httpVersionMajor === 2 && details.case) {
+      const session = req.stream.session;
+      const sessions = originSessions.get(details.host) ?? new Map();
+      if (!sessions.has(session)) {
+        sessions.set(session, details.connection);
+        originSessions.set(details.host, sessions);
+        session.once('close', () => sessions.delete(session));
+      }
+    }
     res.on('error', error => log('response_error', {...details, error:String(error)}));
     res.on('finish', () => log('response_finished', details));
     res.on('close', () => log('response_closed', {...details, finished:res.writableFinished}));
@@ -190,6 +203,15 @@ function makeOrigin(route, protocol, host, port) {
         res.end(JSON.stringify(details).slice(1));
       }, 4000);
       res.on('close', () => clearTimeout(timer));
+      return;
+    }
+    if (details.path === '/misdirected' && route === 'origin') {
+      // Only the origin says so: the same request through the proxy is
+      // answered by the proxy's backend, which is authoritative for it.
+      log('misdirected', details);
+      res.setHeader('content-type', 'application/json');
+      res.writeHead(421);
+      res.end(JSON.stringify({...details, status:421}));
       return;
     }
     if (details.path === '/' || details.path === '/page') {
@@ -301,6 +323,14 @@ const control = http.createServer(async (req,res) => {
         connections.push(id); entry.client.destroy(); entry.upstream.destroy();
       }
       result = log('proxy_forced_close', {ok:true, host, closed:connections.length, connections});
+    } else if (url.pathname === '/goaway-origin') {
+      // Graceful: GOAWAY now, the socket once its streams have ended.
+      const host = url.searchParams.get('host'); const connections = [];
+      for (const [session, connection] of [...(originSessions.get(host) ?? [])]) {
+        connections.push(connection);
+        session.close();
+      }
+      result = log('origin_goaway', {ok:true, host, closed:connections.length, connections});
     } else if (url.pathname === '/close-origin') {
       const host = url.searchParams.get('host'); const connections = [];
       for (const socket of originConnections.get(host) ?? []) {
@@ -340,6 +370,7 @@ const control = http.createServer(async (req,res) => {
       const ports = [443,18443,18444,18080,18082,18083,18090];
       result = {ok:servers.every(server => server.listening) && ports.every(port => listening.has(port)),
         cases:cases.length, lifecycleCases:lifecycleCases.length, instanceCases:instanceCases.length,
+        lateCases:lateCases.length,
         listening:[...listening].sort(), originAddresses:['127.0.0.1:443','127.0.0.2:443']};
     } else { throw new Error('unknown control operation'); }
     res.setHeader('content-type','application/json'); res.end(JSON.stringify(result));
