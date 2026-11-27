@@ -113,10 +113,10 @@ const ShowPageRoute = lazy(() =>
 // Settings → Models (Model Hub, L4). Lazy so its code + framer-motion Reorder
 // stay out of the main entry. The backend capability gate below must accept the
 // route before React renders this lazy component and requests its chunk.
-// Its copy is the Settings surface's (src/i18n/settingsCopy.ts), which loads with it.
+// Its copy is the Settings surface's (src/i18n/surfaceCopy.ts), which loads with it.
 const SettingsModelsPage = lazy(() =>
-  Promise.all([import('./components/settings/models/SettingsModelsPage'), loadSettingsCopy()])
-    .then(([m]) => ({ default: m.SettingsModelsPage })),
+  withCopy('settings', () => import('./components/settings/models/SettingsModelsPage'))
+    .then((m) => ({ default: m.SettingsModelsPage })),
 );
 import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
@@ -145,7 +145,7 @@ import { AccessBlocked } from './components/AccessBlocked';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
 import { installNavigationMotion } from './lib/navigationMotion';
 import { VoiceInputFallbackNotice } from './components/voice/VoiceInputFallbackNotice';
-import { loadSettingsCopy } from './i18n/settingsCopy';
+import { withCopy } from './i18n/surfaceCopy';
 
 const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
   const { hash } = useLocation();
