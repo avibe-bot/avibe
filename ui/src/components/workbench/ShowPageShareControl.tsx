@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, FileText, Image as ImageIcon, LayoutGrid, Loader2, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
+import { ErrorBoundary } from '../ui/error-boundary';
 import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Switch } from '../ui/switch';
@@ -23,10 +24,18 @@ import {
 import { isIosDevice, isRealMobileSafari, isRealSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
+import { lazyPage } from '../../lib/lazyPage';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
-import { ShowPageSharingSettings } from './ShowPageSharingSettings';
 import { ShowPageSystemEntryGuide, type ShowPageSystemEntryMode } from './ShowPageSystemEntryGuide';
+
+// The public-sharing settings draw only inside the open share popover, and only for someone who
+// can publish, so their code stays off a conversation's first screen
+// (docs/plans/web-ui-first-load.md). It is fetched once the access says the section will show,
+// well before a press opens the popover.
+const ShowPageSharingSettings = lazyPage(
+  () => import('./ShowPageSharingSettings').then((module) => module.ShowPageSharingSettings),
+);
 
 type ShowExportKind = Exclude<NativeShareKind, 'link'>;
 
@@ -195,6 +204,11 @@ export const ShowPageShareControl: React.FC<{
     setAccess(initialAccess);
     setAccessError(false);
   }, [initialAccess, sessionId]);
+
+  const canPublishPublic = access?.can_publish_public === true;
+  useEffect(() => {
+    if (canPublishPublic) ShowPageSharingSettings.preload().catch(() => {});
+  }, [canPublishPublic]);
 
   const refresh = () => {
     const seq = ++reqSeq.current;
@@ -465,13 +479,17 @@ export const ShowPageShareControl: React.FC<{
 
         {access?.can_publish_public ? (
           <div className="border-t border-border pt-3">
-            <ShowPageSharingSettings
-              active={open}
-              canManage
-              sessionId={sessionId}
-              onApplied={handleShowAccessApplied}
-              ownerWindowId={ownerWindowId}
-            />
+            <ErrorBoundary variant="inline">
+              <Suspense fallback={null}>
+                <ShowPageSharingSettings
+                  active={open}
+                  canManage
+                  sessionId={sessionId}
+                  onApplied={handleShowAccessApplied}
+                  ownerWindowId={ownerWindowId}
+                />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         ) : null}
 
