@@ -1,0 +1,14 @@
+# Effective model menu: producer and consumer contract
+
+The native backend's selectable inventory, a user's menu and permission to run a model are three different things. The first implementation boundary is `core.handlers.direct_model_menu`. It adds no CLI invocation, scheduler, new SQLite schema or remote feed fields.
+
+| Caller | Contract |
+| --- | --- |
+| Native discovery (controller, background) | Capture the **native** source identity before starting a probe. `publish_inventory(backend, identity, rows)` records one complete answer, including `[]`. A failed/partial/signed-out probe is **not** `[]`: skip publication or pass `None`. Serialize probes of the same scope; do not relabel an in-flight answer with a later identity. |
+| Direct menu (Web, IM, CLI) | Resolve the **current** trusted identity and call `read_menu(backend, identity, fallback=public_rows)`. No probe, no waiting for a running probe. `Snapshot.observed_at` dates the last good answer. If absent, only public fallback may be used; an observed empty answer wins over fallback. Never use a previous user's rows as fallback. |
+| Hub `native_cli` Source | `read_inventory(backend, identity)` only with the identity of the credential actually bound to that Source. No timestamp means **unknown**; no fallback or Direct user removals apply. Engine-backed Sources and existing Hub `removed_model_ids` stay in ModelHubService. |
+| Owner curation | `PUT /api/backend/{backend}/models/visibility` with `{"model_id":"opus","removed":true}` hides an ID; `false` explicitly restores it. The operation is idempotent and changes only the Direct preference. Owner settings can request `read_menu(..., removed=True)` for restorable rows from the **current** inventory. Do not return a raw deletion history to the picker. |
+
+`PickerModel.id` is the native selection key, not its display name or resolved target (e.g. `opus`, or OpenCode `provider/id`). Snapshots persist in the existing instance `state_meta`, keyed by backend and a digest of an adapter-provided identity. Identity is a server-side, nonsecret key, never a URL parameter, token, shared `default`, Hub projection or a guess. Include the existing OpenCode working-directory boundary; when the adapter cannot establish scope, readers use `None` and discovery must not publish private rows. User removals are a separate document per **Direct backend**, independent of account, CLI upgrade or snapshot age. A confirmed withdrawal is not a user deletion. No changes to existing sessions, pins, Hub state or stable clients are needed to read these additive keys.
+
+Use storage calls off the controller/ASGI event loop. This contract lands before its producers (Direct discovery and Hub source reconciliation) and shared user-facing menu consumers. Those integrations must verify actual identity changes and read/refresh separation on the regression instance; store-level tests do not establish a vendor account's access.

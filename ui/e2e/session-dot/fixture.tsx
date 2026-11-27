@@ -106,6 +106,10 @@ window.fetch = async (input) => {
     status: 200, headers: { 'Content-Type': 'application/json' },
   });
   if (url.pathname === '/api/csrf-token') return reply({ csrf_token: 'fixture' });
+  // The Workbench event transport is negotiated from /api/session before it
+  // opens a stream. A local answer without `event_stream_transport` (an older
+  // Runtime) selects EventSource, which is this fixture's event transport.
+  if (url.pathname === '/api/session') return reply({ remote: false });
   if (url.pathname === '/api/projects' || url.pathname === '/api/workbench/projects-bootstrap') {
     return reply({ projects, sessions: {} });
   }

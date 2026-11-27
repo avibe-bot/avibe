@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 
@@ -19,7 +20,6 @@ def test_hosted_email_routes_and_clients_are_removed() -> None:
         "authorized-emails",
         "get_show_page_authorized_emails",
         "replace_show_page_authorized_emails",
-        "/visibility",
         "/rotate-share",
         "/share-id",
         "set_show_page_visibility",
@@ -30,6 +30,8 @@ def test_hosted_email_routes_and_clients_are_removed() -> None:
 
     for source_path in production_sources:
         source = source_path.read_text(encoding="utf-8")
+        # The retired route was a Show Page operation, not a ban on unrelated model menus.
+        assert not re.search(r"/show-pages/[^\n\"']*/visibility\b", source), source_path
         for symbol in forbidden:
             assert symbol not in source, f"legacy hosted-email surface remains in {source_path}: {symbol}"
 
