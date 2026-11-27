@@ -267,7 +267,7 @@ Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one conn
 
 ## 9. Lifetime: launch, background, resume, and the listener's recovery
 
-**Cold launch.** With a transport registered and a stored selection, the App first binds and checks the listener, then writes the route for that host. Only then does it let the store's first load (the bootstrap) begin. The wait has a bound, set from measurement. On a bind or check failure, or past the bound, no route is written in this launch, everything uses WebKit's normal path, and diagnostics record it.
+**Cold launch.** With a transport registered and a stored selection, the App first binds and checks the listener, then writes the route for that host. Only then does it let the store's first load (the bootstrap) begin. The wait has a bound: 2 s for an ordinary host (1 s until 2026-11-27), 10 s for a 「仅直连和中继」 host (`DirectPathTiming`). On a bind or check failure, or past the bound, no route is written in this launch, everything uses WebKit's normal path, and diagnostics record it.
 
 **Background.** Two candidates, decided by device cell Q5:
 

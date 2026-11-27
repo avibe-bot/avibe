@@ -303,7 +303,13 @@ final class DirectRouteOwner {
 /// Proposed bounds for the controller (docs/plans/remote-direct-ios.md
 /// section 9). Not measurements.
 struct DirectPathTiming: Sendable {
-    /// How long a runtime's first load waits for the listener and its route.
+    /// How long a runtime's first load waits for the listener and its route:
+    /// a 「仅直连和中继」 host (`strictOpenSeconds`), and any other host
+    /// (`listenerWaitSeconds`). An ordinary host whose wait runs out loads on
+    /// WebKit's normal path and gets its route when the bind is confirmed
+    /// (`lateRoute`). The ordinary wait is 2 s since 2026-11-27 (1 s before):
+    /// a cold start's first bind can take longer than a second, and every
+    /// load that goes first starts on the public path.
     let strictOpenSeconds: TimeInterval
     let listenerWaitSeconds: TimeInterval
     /// How long the return to the foreground may take to re-bind and check
@@ -347,7 +353,7 @@ struct DirectPathTiming: Sendable {
         self.portProbeSeconds = portProbeSeconds
     }
 
-    static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
+    static let standard = DirectPathTiming(listenerWaitSeconds: 2, rebindSeconds: 2)
 }
 
 /// One failed attempt to bind the listener's port or to check that the
