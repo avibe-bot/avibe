@@ -86,8 +86,9 @@ Desktop acceptance is deferred. Never operate the active installed app windows.
 
 ## Implementation evidence (2026-11-27)
 
-The Avibe branch was rebased to `0a01fa4af8`. Show SDK PR #79 is
-`e7829d306a97a2043217684ad2d258cbfaa6572a`. The paired fixture records source and
+The Avibe branch was synchronized with master `79ad754c53` after the first-load
+locale splits. Show SDK PR #79 is
+`0754cfe597bd1cc0ada8c2b1b0674f9aed33f9a0` (both reviews and CI passed). The paired fixture records source and
 artifact SHA256 values, so its pre-commit provenance remains tied to the exact
 transport bytes tested.
 
@@ -120,13 +121,15 @@ Evidence is in the owner's `2026-11-27-desktop-full-acceptance/findings/`:
 
 ### First-load budget
 
-Unmodified master `fee3ce6063` measures home 624,602 B and chat 927,841 B, against
-624,640 / 927,744 B allowances (master already exceeds chat by 97 B). This PR
-on `0a01fa4af8` measures 625,575 / 928,804 B: +973 / +963 B for the shared
-transport/negotiation/parser, which is needed on the first screen. The separate
-budget gate exceeds its unchanged limits by 935 / 1,060 B. Main owns resolution
-of the baseline/allowance; this lane does not raise it or hide immediately used
-code behind an asynchronous import. PR #4365 is independent and not stacked.
+Fresh isolated master `79ad754c53` measures home **584,963 B** and chat
+**882,649 B**. This PR measures **585,894 / 883,598 B**: **+931 / +949 B**
+for transport negotiation/parser behavior required on the first screen. Both
+routes pass master's **614,400 / 921,600 B** budgets, leaving **28,506 / 38,002 B**.
+The budget and sharing-settings lazy-loading structure are unchanged from
+master. Earlier baseline failures were resolved by the master locale splits;
+PR #4365 remains independent. The synchronized branch passes 751 Runtime,
+authorization and Show tests, 59 UI stream/negotiation tests and the real Vite
+upgrade-proxy regression. Exact evidence: `first-load-79ad754-results.json`.
 
 ### Review and native-share follow-up
 
@@ -163,13 +166,18 @@ old EventSource and WS; the adapter does not add a retry owner. SDK subscription
 instead own their EventSource-like lifecycle and use the rejection-terminal
 contract above. No `/api/events` GET is used as a non-streaming probe.
 
-The independent review also identified an existing anonymous public-share
-revocation gap in the shared SSE generator. Main assigned it separately; this
-transport PR does not claim to fix it or weaken the existing behavior.
+The independent review identified an anonymous public-share revocation gap in
+the shared SSE generator. Main assigned it separately; the synchronized master
+now includes that generator fix. Both transports continue to use the same
+authorization/generator implementation; the full Show suite passes after sync.
 
 ### Final paired SDK admission checks
 
-SDK #79 e7829d3 passes 293 unit/consumer tests and a full workspace build.
+SDK #79 0754cfe passes 332 unit/consumer tests (50 mounted Provider cases) and
+workspace checks. Exact-head Codex and the independent lifecycle review pass.
+Provider identity survives source changes; obsolete completions are isolated,
+while source release follows passive effects to preserve Suspense/Activity
+behavior. Missing render-time tokens retain the existing call-time fallback.
 The paired production fixture passes 36 browser scenarios on Chromium/WebKit:
 401/403/404 produce exactly one WS attempt and one finite admission GET before
 CLOSED; 503 retries with bounded backoff; closing during the probe cancels it
@@ -178,3 +186,11 @@ covered by these real network tests. The final fixture SHA256 is
 `bac65599592d552bf2ccaf015ebf744290f1f2dbbeb07e9cf390063ecd6fec8b`.
 The actual Runtime paired test passes both engines with this fixture and the
 single-owner close implementation, preserving replay and broker release.
+
+
+The latest SDK transport matrix passes 36 scenarios (`event-transport-browser-results-0754cfe.json`):
+SSE fetch waits 2006.9–2188 ms, while eight WS sources permit fetch in 0.6–3 ms.
+The fixture imports index.js, not the React Provider; Provider coverage is from
+mounted React tests. Its identical transport bytes were paired again with the
+synchronized actual Runtime (`event-real-runtime-79ad754.log`). Signed Desktop
+package acceptance and release artifact integration remain main-owned steps.
