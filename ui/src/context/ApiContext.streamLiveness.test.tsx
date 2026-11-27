@@ -731,23 +731,25 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(1);
 
     // Back to the public path and direct again at once: re-armed, but not
-    // sooner than the spacing allows, so flips cause no storm.
+    // sooner than the short spacing allows, so flips cause no storm.
     for (let sequence = 3; sequence < 13; sequence += 2) {
       shell.emit({ preferred: 'tunnel', sequence, closure: 0 });
       shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 0 });
       await vi.advanceTimersByTimeAsync(0);
     }
+    await vi.advanceTimersByTimeAsync(4_000);
     expect(shell.handovers()).toBe(1);
     expect(FakeEventSource.instances).toHaveLength(2);
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Direct again once the short spacing has passed: followed at once.
+    await vi.advanceTimersByTimeAsync(1_000);
     shell.emit({ preferred: 'tunnel', sequence: 13, closure: 0 });
     shell.emit({ preferred: 'direct', sequence: 14, closure: 0 });
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(2);
   });
 
-  it('skips the hand-over while the page uses the network, and tries again on a resume', async () => {
+  it('waits while the page uses the network, however long, and hands over when its last request ends', async () => {
     const shell = await handoverShell();
     const first = FakeEventSource.latest();
     const { beginPageRequest } = await import('../lib/pageConnections');
@@ -755,19 +757,41 @@ describe('ApiProvider workbench stream liveness', () => {
 
     shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
     await vi.advanceTimersByTimeAsync(10_000);
-    // A request still waiting for its answer: nothing is closed.
+    // A request still waiting for its answer: nothing is closed, and the
+    // hand-over is not given up.
     expect(shell.handovers()).toBe(0);
     expect(first.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(shell.handovers()).toBe(0);
+    expect(first.closed).toBe(false);
+
+    // The request ends: handed over the next time the page is looked at
+    // (once a second by now), with no event of the shell, no resume and no
+    // spacing in between.
     done();
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(shell.handovers()).toBe(0);
-
-    // The next resume reads the status, still direct, and the page is quiet.
-    setVisibility('hidden');
-    setVisibility('visible');
-    await shell.answer(1, 0, 1, 'direct');
     expect(shell.handovers()).toBe(1);
     expect(first.closed).toBe(true);
+  });
+
+  it('gives up a hand-over it was waiting for once the shell prefers the public path', async () => {
+    const shell = await handoverShell();
+    const first = FakeEventSource.latest();
+    const { beginPageRequest } = await import('../lib/pageConnections');
+    const done = beginPageRequest();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(2_000);
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 0 });
+    done();
+    await vi.advanceTimersByTimeAsync(5_000);
+    // No longer wanted when the page went quiet: nothing was closed.
+    expect(shell.handovers()).toBe(0);
+    expect(first.closed).toBe(false);
+
+    // Direct again: the arm was not spent by waiting.
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
   });
 
   it('goes public, direct, lost, public, then direct again', async () => {
@@ -973,19 +997,21 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 
-  it('keeps the spacing when the path flaps between the public one and a direct address', async () => {
+  it('keeps the short spacing when the path flaps between the public one and a direct address', async () => {
     const shell = await pathShell();
     shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(1);
-    // Each stretch starts on a direct address: no upgrade, so the spacing holds.
+    // Each flap arrives at the direct address again: none is followed
+    // sooner than the short spacing after the last hand-over.
     for (let sequence = 2; sequence < 12; sequence += 2) {
       shell.emit({ preferred: 'tunnel', sequence, closure: 0 });
       shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 0, path: 'ipv4' });
       await vi.advanceTimersByTimeAsync(0);
     }
+    await vi.advanceTimersByTimeAsync(4_000);
     expect(shell.handovers()).toBe(1);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(1_000);
     shell.emit({ preferred: 'tunnel', sequence: 12, closure: 0 });
     shell.emit({ preferred: 'direct', sequence: 13, closure: 0, path: 'ipv4' });
     await vi.advanceTimersByTimeAsync(0);
@@ -1011,7 +1037,7 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(1);
   });
 
-  it('re-arms once for the upgrade without the spacing, and keeps the spacing after that', async () => {
+  it('follows each arrival at a direct address after the short spacing, and repeats on it only after the long one', async () => {
     const shell = await pathShell();
     // The shell keeps a busy connection every time, so each hand-over arms again.
     shell.call.mockImplementation((method: string) =>
@@ -1021,34 +1047,71 @@ describe('ApiProvider workbench stream liveness', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(1);
 
-    // Lost and back, first over the relay: nothing. Then the direct address,
-    // seconds after the last hand-over: once more, not held to the spacing.
+    // Lost and back, first over the relay: nothing. Then a direct address,
+    // a second after the last hand-over: not yet.
     shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
     await vi.advanceTimersByTimeAsync(0);
     shell.emit({ preferred: 'direct', sequence: 3, closure: 1, path: 'relay' });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(shell.handovers()).toBe(1);
     shell.emit({ preferred: 'direct', sequence: 4, closure: 1, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // From the relay to the address again, once the short spacing has
+    // passed: followed at once, whatever went before in this stretch.
+    await vi.advanceTimersByTimeAsync(4_000);
+    shell.emit({ preferred: 'direct', sequence: 5, closure: 1, path: 'relay' });
+    shell.emit({ preferred: 'direct', sequence: 6, closure: 1, path: 'ipv4' });
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(2);
 
-    // Flapping between the relay and the address in the same stretch: armed
-    // (the shell kept a connection), but held to the spacing.
-    for (let sequence = 5; sequence < 15; sequence += 2) {
-      shell.emit({ preferred: 'direct', sequence, closure: 1, path: 'relay' });
-      shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 1, path: 'ipv4' });
-      await vi.advanceTimersByTimeAsync(0);
-    }
+    // On the same address, a stream that still came in another way: armed,
+    // and held to the long spacing.
+    emitHandshakeVia(9, 'other');
+    await vi.advanceTimersByTimeAsync(29_000);
     expect(shell.handovers()).toBe(2);
-    await vi.advanceTimersByTimeAsync(30_000);
-    shell.emit({ preferred: 'direct', sequence: 15, closure: 1, path: 'relay' });
-    shell.emit({ preferred: 'direct', sequence: 16, closure: 1, path: 'ipv4' });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(shell.handovers()).toBe(3);
   });
 
+  it('follows an arrival after the short spacing though a retry was already set for later', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // The stream still came in another way: a repeat, set for the long spacing.
+    emitHandshakeVia(2, 'other');
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The shell goes to the relay and arrives at the address again.
+    shell.emit({ preferred: 'direct', sequence: 2, closure: 0, path: 'relay' });
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(shell.handovers()).toBe(1);
+    // By itself when the short spacing ends, not when the long one would.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('makes at most six hand-overs however the path flaps between kinds, until ten minutes pass without one', async () => {
+    const shell = await pathShell();
+    let sequence = 0;
+    const arrive = async (path: 'ipv4' | 'ipv6') => {
+      shell.emit({ preferred: 'direct', sequence: sequence += 1, closure: 0, path: 'relay' });
+      shell.emit({ preferred: 'direct', sequence: sequence += 1, closure: 0, path });
+      await vi.advanceTimersByTimeAsync(0);
+    };
+    for (let round = 1; round <= 9; round += 1) {
+      await arrive(round % 2 === 0 ? 'ipv6' : 'ipv4');
+      // A new kind of path each time: the total holds all the same.
+      expect(shell.handovers()).toBe(Math.min(round, 6));
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await arrive('ipv4');
+    expect(shell.handovers()).toBe(7);
+  });
+
   // The hand-over comes back by itself, within bounds (ui/src/context/ApiContext.tsx,
-  // DIRECT_HANDOVER_MAX_PER_PATH and DIRECT_HANDOVER_MAX_FRUITLESS).
+  // DIRECT_HANDOVER_MAX and DIRECT_HANDOVER_MAX_FRUITLESS).
 
   it('comes back when the spacing ends, while the stream still says it came in another way', async () => {
     const shell = await pathShell();
@@ -1138,20 +1201,20 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(7);
   });
 
-  it('tries a busy page again after the spacing, and closes nothing meanwhile', async () => {
+  it('hands a busy page over when it goes quiet, and closes nothing meanwhile', async () => {
     const shell = await pathShell();
     const first = FakeEventSource.latest();
     emitHandshakeVia(1, 'other');
     const { beginPageRequest } = await import('../lib/pageConnections');
     const done = beginPageRequest();
     shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(9_000);
     expect(shell.handovers()).toBe(0);
     expect(first.closed).toBe(false);
+    // Within a quarter of a second of the request ending, in the first
+    // seconds of the wait.
     done();
-    await vi.advanceTimersByTimeAsync(29_000);
-    expect(shell.handovers()).toBe(0);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(250);
     expect(shell.handovers()).toBe(1);
     expect(first.closed).toBe(true);
   });
@@ -1182,9 +1245,9 @@ describe('ApiProvider workbench stream liveness', () => {
     emitHandshakeVia(2, 'other');
     shell.emit({ preferred: 'tunnel', sequence: 2, closure: 0 });
     shell.emit({ preferred: 'direct', sequence: 3, closure: 0 });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(4_000);
     expect(shell.handovers()).toBe(1);
-    // The preference goes to the public path before the spacing ends.
+    // The preference goes to the public path before the short spacing ends.
     shell.emit({ preferred: 'tunnel', sequence: 4, closure: 0 });
     for (let waited = 0; waited < 60_000; waited += 20_000) {
       await vi.advanceTimersByTimeAsync(20_000);
@@ -1194,7 +1257,7 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(1);
     expect(FakeEventSource.instances).toHaveLength(2);
 
-    // Direct again: handed over, as the spacing has long passed.
+    // Direct again: handed over, as the short spacing has long passed.
     shell.emit({ preferred: 'direct', sequence: 5, closure: 0 });
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(2);
