@@ -250,7 +250,7 @@ final class HealthSyncCoordinator: ObservableObject {
             _ = beginCleanup(unregister: true)
         case .authorizationUnavailable:
             guard !cleanupPending else { return }
-            if connecting != nil { _ = beginCleanup(unregister: true) }
+            if connecting != nil, connectionAttempt?.preservesConnection != true { _ = beginCleanup(unregister: true) }
             else { pauseAuthority() }
         case .authenticated(let accountID, let instances):
             if startupBindingUntrusted {
@@ -311,6 +311,15 @@ final class HealthSyncCoordinator: ObservableObject {
     private func pauseAuthority() {
         authorizationPaused = true
         epoch = UUID()
+        if let attempt = connectionAttempt, attempt.preservesConnection {
+            // An interrupted expansion retires only its foreground attempt.
+            // Existing credentials, approval intent and durable uploads survive.
+            connecting = nil
+            connectionAttempt = nil
+            answerConsent(false)
+            attempt.work?.cancel()
+            attempt.finish("failed")
+        }
         retireConvergence()
         authorizationResumeID = nil
         authorizationResumePending = false

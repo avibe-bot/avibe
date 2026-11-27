@@ -8057,14 +8057,17 @@
       "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first."
     },
     "landing": {
-      "authorize": "Read this iPhone’s steps, activity, workouts and sleep, and sync them to this instance. Next, choose access in Avibe and iOS.",
+      "authorize": "Read this iPhone’s {{metrics}}, and sync them to this instance. Next, choose access in Avibe and iOS.",
       "openConversations": "Open conversations"
     },
     "metric": {
       "steps": "Steps",
       "activity": "Activity",
       "workouts": "Workouts",
-      "sleep": "Sleep"
+      "sleep": "Sleep",
+      "heart_rate": "Heart rate",
+      "resting_heart_rate": "Resting heart rate",
+      "hrv": "Heart rate variability"
     },
     "metricSeparator": ", ",
     "waitingRefresh": "Waiting for your iPhone to process this request."

@@ -230,18 +230,20 @@ class MobileStore:
             if operation == "health.refresh" and not device:
                 raise MobileError("not_connected", 409)
             device_id = device["id"] if operation == "health.refresh" else None
-            existing = conn.execute(
+            selected = list(names) if expand else json.loads(device["metrics"]) if device else list(names)
+            consent_device_id = device["id"] if expand else None
+            candidates = conn.execute(
                 "SELECT * FROM requests WHERE operation=? AND device_id IS ? AND instance_id=? "
-                "AND owner=? AND state IN ('queued','claimed') ORDER BY created_at LIMIT 1",
+                "AND owner=? AND state IN ('queued','claimed') ORDER BY created_at",
                 (operation, device_id, identity["id"], identity["owner"]),
-            ).fetchone()
-            if (existing and bool(existing["consent_device_id"]) == expand
-                    and (not expand or set(names) <= set(json.loads(existing["metrics"])))):
+            ).fetchall()
+            existing = next((row for row in candidates if row["consent_device_id"] == consent_device_id
+                             and set(selected) <= set(json.loads(row["metrics"]))), None)
+            if existing:
                 # Refresh always queries all consented groups. A coalesced caller
                 # cannot change the original request's continuation owner.
                 return self._request(existing), False
             request_id = "mreq_" + secrets.token_hex(16)
-            selected = list(names) if expand else json.loads(device["metrics"]) if device else list(names)
             conn.execute(
                 "INSERT INTO requests(id,operation,device_id,instance_id,owner,metrics,state,created_at,"
                 "expires_at,callback_session,callback_run,waiter_id,waiter_until,caller) "

@@ -113,22 +113,6 @@
         }
       }
     },
-    "health.summary.metrics" : {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sync your %@ to %@, keeping the last 30 days."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "将你的%@数据同步到 %@，保留最近 30 天。"
-          }
-        }
-      }
-    },
     "AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE": {
       "extractionState": "manual",
       "localizations": {
@@ -328,13 +312,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sync your steps, activity, workouts, and sleep to %@, keeping the last 30 days."
+            "value": "Sync this data to %@, keeping the last 30 days."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "将你的步数、活动、锻炼和睡眠数据同步到 %@，保留最近 30 天。"
+            "value": "将这些数据同步到 %@，保留最近 30 天。"
           }
         }
       }

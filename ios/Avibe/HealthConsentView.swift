@@ -37,7 +37,7 @@ struct HealthConsentView: View {
                     }
                 }
                 Section {
-                    Text(String.localizedStringWithFormat(String(localized: "health.summary.metrics"), metricList, request.target.name))
+                    Text(String.localizedStringWithFormat(String(localized: "health.summary"), request.target.name))
                 }
                 Section {
                     Text(String(localized: "health.access_summary"))

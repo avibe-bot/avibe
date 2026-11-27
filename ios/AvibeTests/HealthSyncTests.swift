@@ -1818,6 +1818,41 @@ final class HealthSyncTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountDiscoveryInterruptionDuringHeartConsentPreservesTheExistingDeviceAndOutbox() async throws {
+        for systemSheet in [false, true] {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            let upload = try pendingUpload(in: fixture.directory)
+            await fixture.coordinator.resume(foreground: false)
+            let before = fixture.credentials.identity
+            fixture.reader.holdAuthorization = systemSheet
+            let expanding = Task { await fixture.coordinator.connect(requestID: "heart-request", pairingCode: "heart-code",
+                origin: fixture.origin, options: .init(supportedMetrics: HealthQueryWindow.metrics,
+                    requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
+            try await eventually { fixture.coordinator.consent != nil }
+            if systemSheet {
+                fixture.coordinator.answerConsent(true)
+                try await eventually { fixture.reader.authorizations == 1 }
+            }
+            fixture.coordinator.accountIDProvider = { nil }
+            fixture.coordinator.accountEvent(.authorizationUnavailable)
+            let reply = await expanding.value
+            XCTAssertEqual(reply, "failed")
+            fixture.reader.releaseAuthorization()
+            XCTAssertNil(fixture.coordinator.consent)
+            XCTAssertEqual(fixture.credentials.identity, before)
+            let paused = try HealthDeviceStore(directory: fixture.directory).state
+            XCTAssertEqual(paused.uploads, [upload.id])
+            XCTAssertEqual(paused.completed["request-1"]?.uploadID, upload.id)
+            XCTAssertFalse(paused.cleanupPending)
+            fixture.coordinator.accountIDProvider = { "account-1" }
+            fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+            try await eventually { fixture.reader.observer != nil }
+            XCTAssertEqual(fixture.credentials.identity, before)
+            XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" || $0.path.hasSuffix("/pair") })
+        }
+    }
+
+    @MainActor
     func testAnOlderManifestResponseCannotUndoApprovedHeartConsent() async throws {
         let fixture = try coordinatorFixture(savedIdentity: true)
         fixture.client.holdManifest = true

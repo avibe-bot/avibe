@@ -56,7 +56,7 @@ export function HealthRequestCard({ request, readOnly }: { request: HealthReques
 }
 
 /** ui/design: health/landing — a notification trampoline; no health values or settings. */
-export function HealthLandingView({ state, operation = 'health.connect', busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
+export function HealthLandingView({ state, operation = 'health.connect', metrics = ['steps', 'activity', 'workouts', 'sleep'], busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
   const { t } = useTranslation();
   const connected = state === 'connected' || state === 'succeeded';
   const authorize = state === 'authorize';
@@ -66,7 +66,8 @@ export function HealthLandingView({ state, operation = 'health.connect', busy, b
         {connected ? <Check className="size-7" /> : state === 'waiting' ? <Smartphone className="size-7" /> : <HeartPulse className="size-7" />}
       </div>
       <h1 className="mt-5 text-xl font-semibold leading-tight text-foreground">{t(authorize ? 'health.title.connect' : `health.status.${state}`)}</h1>
-      <p className="mt-3 text-sm leading-6 text-muted" aria-live="polite">{t(authorize ? 'health.landing.authorize' : state === 'waiting' && operation === 'health.refresh' ? 'health.waitingRefresh' : `health.note.${state}`)}</p>
+      <p className="mt-3 text-sm leading-6 text-muted" aria-live="polite">{t(authorize ? 'health.landing.authorize' : state === 'waiting' && operation === 'health.refresh' ? 'health.waitingRefresh' : `health.note.${state}`,
+        { metrics: metrics.map(metric => t(`health.metric.${metric}`, { defaultValue: metric })).join(t('health.metricSeparator')) })}</p>
       {loadError && <p role="status" className="mt-3 text-sm text-muted">{t('health.loadError')}</p>}
       {busyPhase === 'unresponsive' && <p role="status" className="mt-3 text-sm text-muted">{t('health.reopenApp')}</p>}
       <div className="mt-7 flex w-full flex-col gap-2.5">
@@ -85,7 +86,7 @@ function HealthLandingRequest({ id }: { id: string }) {
     <p role="status">{t(live.loadError ? 'health.loadError' : 'health.loading')}</p>
     <Button asChild variant="outline"><Link to="/inbox">{t('health.landing.openConversations')}</Link></Button>
   </div>;
-  return <HealthLandingView {...live} readOnly={!live.canAuthorize} state={live.state} operation={live.request.operation} onAuthorize={live.authorize} />;
+  return <HealthLandingView {...live} readOnly={!live.canAuthorize} state={live.state} operation={live.request.operation} metrics={live.request.metrics} onAuthorize={live.authorize} />;
 }
 
 export default function HealthLandingPage() {

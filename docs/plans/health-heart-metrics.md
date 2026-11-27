@@ -41,14 +41,15 @@ Filter before durable enqueue; preserve immutable queued request/upload scopes. 
 
 ## 4. Copy changes (original → replacement)
 
-Only substitute the data list in v4; keep title, destination, address, access/retention text, buttons and layout. Render the negotiated list; an expansion lists the three additions while retaining the same explanation and 30-day promise.
+Keep the v4 title, destination, address, access text, buttons and layout. The first card renders the negotiated list (seven types or the three additions). Per Max’s 2026-11-27 16:54 decision, the second card uses the same short summary for both scopes.
 
 | Surface | Original → replacement |
 |---|---|
 | `health.metrics` EN / ZH | “Steps, activity, workouts, and sleep” → “Steps, activity, workouts, sleep, heart rate, resting heart rate, and heart rate variability”; “步数、活动、锻炼和睡眠” → “步数、活动、锻炼、睡眠、心率、静息心率和心率变异性”. Expansion list: “Heart rate, resting heart rate, and heart rate variability” / “心率、静息心率和心率变异性”. |
-| `health.summary` EN | “Sync your steps, activity, workouts, and sleep to %@, keeping the last 30 days.” → “Sync your steps, activity, workouts, sleep, heart rate, resting heart rate, and heart rate variability to %@, keeping the last 30 days.” Expansion uses the three-type list. |
-| `health.summary` ZH | “将你的步数、活动、锻炼和睡眠数据同步到 %@，保留最近 30 天。” → “将你的步数、活动、锻炼、睡眠、心率、静息心率和心率变异性数据同步到 %@，保留最近 30 天。” Expansion uses the three-type list. |
+| `health.summary` EN | “Sync your steps, activity, workouts, and sleep to %@, keeping the last 30 days.” → “Sync this data to %@, keeping the last 30 days.” |
+| `health.summary` ZH | “将你的步数、活动、锻炼和睡眠数据同步到 %@，保留最近 30 天。” → “将这些数据同步到 %@，保留最近 30 天。” |
 | `NSHealthShareUsageDescription` (Info.plist + localized strings) | EN replace “steps, activity, workouts, and sleep” with “steps, activity, workouts, sleep, heart rate, resting heart rate, and heart rate variability”; ZH replace “步数、活动、锻炼和睡眠” with “步数、活动、锻炼、睡眠、心率、静息心率和心率变异性”. All remaining wording unchanged. |
+| Web cards and notification landing | Raw heart metric keys / a fixed four-type sentence → localized labels and the actual request metric list in English and Chinese. The native v4 layout remains unchanged. |
 | Skill description | “Read steps, activity, workouts and sleep synced…” → “Read steps, activity, workouts, sleep, heart rate, resting heart rate and heart rate variability synced…”. |
 | Skill authorization guidance | “Authorization happens once…” → “Confirm additional metrics on iPhone when requested. Use connect --metric for metrics outside the confirmed set; empty data does not reveal HealthKit permission status.” Add the exact shapes/units, SDNN meaning, multi-source rules and selective CLI example. |
 

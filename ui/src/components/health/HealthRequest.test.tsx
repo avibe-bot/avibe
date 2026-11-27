@@ -5,6 +5,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
 import { healthRequestView, type HealthRequest } from '@/lib/healthRequests';
 import HealthLandingPage, { HealthRequestCard } from './HealthRequest';
 
@@ -38,6 +39,23 @@ beforeEach(() => {
 afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'avibeNative'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('Health request production consumers (synthetic server and native peer)', () => {
+  it.each([
+    ['en', ['Heart rate', 'Resting heart rate', 'Heart rate variability']],
+    ['zh', ['心率', '静息心率', '心率变异性']],
+  ] as const)('localizes heart metrics on the %s request card and landing page', async (lng, labels) => {
+    const localized = createInstance();
+    await localized.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } } });
+    installBridge({ health: 2 });
+    current = { ...request, metrics: ['heart_rate', 'resting_heart_rate', 'hrv'], minimum_health_version: 2 };
+    const result = render(<I18nextProvider i18n={localized}><MemoryRouter initialEntries={[`/mobile/health/${request.id}`]}>
+      <HealthRequestCard request={current} />
+      <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>
+    </MemoryRouter></I18nextProvider>);
+    await screen.findByRole('heading', { name: localized.t('health.title.connect') });
+    for (const label of labels) expect(result.container.textContent?.split(label).length).toBeGreaterThanOrEqual(3);
+    expect(result.container.textContent).not.toContain('heart_rate');
+  });
+
   it('requires the new native capability before expanding an existing connection', () => {
     installBridge({ health: 1 });
     const expansion = { ...request, minimum_health_version: 2, metrics: ['hrv'] };

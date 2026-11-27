@@ -1796,6 +1796,22 @@ def test_legacy_device_on_new_instance_keeps_four_metric_claims(store):
     assert result["confirmation_required"]
     assert result["items"][0]["availability"] == "not_synced"
 
+@pytest.mark.parametrize("expand", [False, True])
+def test_selective_connect_coalesces_only_a_covering_request_without_stealing_its_owner(store, expand):
+    if expand:
+        pair_device(store)
+    first, _ = store.create_request("health.connect", IDENTITY, names=["heart_rate"], expand=expand,
+                                    callback_session="first-owner")
+    second, created = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=expand,
+                                          callback_session="second-owner")
+    assert created and second["id"] != first["id"]
+    assert second["metrics"] == ["hrv"]
+    repeated, created = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=expand,
+                                            callback_session="later-owner")
+    assert not created and repeated["id"] == second["id"]
+    with store.transaction() as conn:
+        assert conn.execute("SELECT callback_session FROM requests WHERE id=?", (second["id"],)).fetchone()[0] == "second-owner"
+
 
 def test_heart_expansion_migration_preserves_released_rows_and_old_named_writers(store):
     paired, request = pair_device(store)
