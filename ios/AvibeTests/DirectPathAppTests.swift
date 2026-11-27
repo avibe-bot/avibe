@@ -7597,7 +7597,7 @@ final class DirectPathAppTests: XCTestCase {
     /// design: the listener's first bind or its check failed (seen on CI
     /// after one of the simulator's system services was interrupted, run
     /// 44934936305), and nothing is selected and no listener serves; or
-    /// they were slower than the App's listener wait (1 s), and the host
+    /// they were slower than the App's listener wait (2 s), and the host
     /// gets its route once the bind is confirmed, which the App records as
     /// `late` with the bind's duration.
     @MainActor

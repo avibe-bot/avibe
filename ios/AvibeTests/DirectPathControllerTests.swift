@@ -3395,5 +3395,10 @@ extension DirectPathControllerTests {
         XCTAssertEqual(DirectBackgroundCheck(.fault), .foreign)
         XCTAssertEqual(DirectPathTiming.standard.portProbeSeconds, 0.3)
         XCTAssertEqual(DirectPathTiming.standard.ownCloseSeconds, 3)
+        // An ordinary host's first load waits 2 s for the listener (11-27);
+        // the foreground watchdog's bound stays above it.
+        XCTAssertEqual(DirectPathTiming.standard.listenerWaitSeconds, 2)
+        XCTAssertEqual(DirectPathTiming.standard.strictOpenSeconds, 10)
+        XCTAssertGreaterThan(DirectPathTiming.standard.foregroundSeconds, DirectPathTiming.standard.listenerWaitSeconds)
     }
 }
