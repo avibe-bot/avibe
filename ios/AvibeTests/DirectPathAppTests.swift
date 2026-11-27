@@ -4647,13 +4647,13 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
         if let directTransport {
-            // The transport is selected only for a routed host. A listener
-            // fault, or a first bind slower than the App's listener wait,
-            // leaves the host on the public path with no selection at all;
-            // say which rather than fail below on a selection that was
-            // never made.
-            XCTAssertFalse(
-                app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+            // What follows needs the host routed at its first load. A
+            // listener fault leaves it on the public path with no selection
+            // at all, and a first bind slower than the App's listener wait
+            // routes it only afterwards; say which rather than fail below
+            // on what never happened.
+            XCTAssertTrue(
+                hostWasRoutedAtItsFirstLoad(by: app),
                 whyNoHostIsRouted(by: app),
                 file: file,
                 line: line
@@ -5623,12 +5623,12 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
-        // The transport is selected only for a routed host. A listener fault,
-        // or a first bind slower than the App's listener wait, leaves the
-        // host on the public path with no selection at all; say which rather
-        // than time out below.
-        XCTAssertFalse(
-            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+        // What follows needs the host routed at its first load. A listener
+        // fault leaves it on the public path with no selection at all, and a
+        // first bind slower than the App's listener wait routes it only
+        // afterwards; say which rather than time out below.
+        XCTAssertTrue(
+            hostWasRoutedAtItsFirstLoad(by: app),
             whyNoHostIsRouted(by: app)
         )
         // The transport's selection follows the browser asynchronously: wait
@@ -7583,18 +7583,32 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
-    /// Why the App routed no host, as far as the App itself says. Two things
-    /// leave a host on the public path with nothing selected and no listener
-    /// to find, both by design: the listener's first bind or its check
-    /// failed (seen on CI after one of the simulator's system services was
-    /// interrupted, run 44934936305), or they were slower than the App's
-    /// listener wait (1 s). The App records only the first.
+    /// The premise of a test that follows WebKit's own connections through
+    /// the listener: the host had its route before its first load. Read
+    /// through WebKit's own store and the App's own record.
+    @MainActor
+    private func hostWasRoutedAtItsFirstLoad(by app: AppModel) -> Bool {
+        !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty
+            && !app.directListenerFailures.contains { $0.step == .late }
+    }
+
+    /// Why the host was not routed at its first load, as far as the App
+    /// itself says. Two things leave it on the public path then, both by
+    /// design: the listener's first bind or its check failed (seen on CI
+    /// after one of the simulator's system services was interrupted, run
+    /// 44934936305), and nothing is selected and no listener serves; or
+    /// they were slower than the App's listener wait (1 s), and the host
+    /// gets its route once the bind is confirmed, which the App records as
+    /// `late` with the bind's duration.
     @MainActor
     private func whyNoHostIsRouted(by app: AppModel) -> String {
-        let failures = app.directListenerFailures
-            .map { "\($0.step.rawValue) \($0.code.map(String.init) ?? "-")" }
+        let record = app.directListenerFailures
+        if let late = record.last(where: { $0.step == .late }) {
+            return "The App routed the host only after its first load: the listener's first bind took \(late.code.map(String.init) ?? "?") ms, longer than the listener wait, so the first load went on the public path and nothing of it passed through the listener."
+        }
+        let failures = record.map { "\($0.step.rawValue) \($0.code.map(String.init) ?? "-")" }
         return failures.isEmpty
-            ? "The App routed no host and recorded no listener failure: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+            ? "The App has routed no host and recorded no listener failure: its first bind is slower than the listener wait, so the host loaded on the public path and gets its route when the bind is confirmed."
             : "The App routed no host: its listener failed (\(failures.joined(separator: ", "))), so the host loads on the public path and nothing is selected."
     }
 
@@ -7605,7 +7619,8 @@ final class DirectPathAppTests: XCTestCase {
     /// run.
     @MainActor
     private func theSimulatorRefusedABind(of app: AppModel) -> Bool {
-        !app.directListenerFailures.isEmpty
+        // A first bind confirmed late is on the same record and is none.
+        app.directListenerFailures.contains { $0.step != .late }
     }
 
     /// The App's direct listener, found from outside: the one new listening
@@ -7620,8 +7635,8 @@ final class DirectPathAppTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> NWEndpoint.Port {
-        XCTAssertFalse(
-            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+        XCTAssertTrue(
+            hostWasRoutedAtItsFirstLoad(by: app),
             whyNoHostIsRouted(by: app),
             file: file,
             line: line
@@ -7699,8 +7714,9 @@ final class DirectPathAppTests: XCTestCase {
         // up first, `504` here, and four streams). So the dial is held until
         // the App has recorded that CONNECT's end; WebKit sends it once its
         // processes are running.
-        guard !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty else {
-            // Nothing of the runtime's goes through the listener then.
+        guard hostWasRoutedAtItsFirstLoad(by: app) else {
+            // Nothing of the runtime's first load goes through the listener
+            // then.
             XCTFail(whyNoHostIsRouted(by: app))
             throw DirectTestTimeout()
         }
