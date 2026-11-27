@@ -1601,10 +1601,12 @@ final class AppModel: ObservableObject {
         if old?.id != new.id || old?.phase != new.phase {
             signposter.emitEvent("runtime open stage", "\(String(describing: new.phase), privacy: .public)")
             // The first frame that uncovers the instance (`ColdStartTimings`):
-            // its cached page, shown uncovered, or connected from under its
-            // cover (straight to `.documentLoaded`); or its live document.
+            // its cached page, shown uncovered (live to touch, or with the
+            // offline or unreachable row, which can come straight from under
+            // the cover), or connected from under its cover (straight to
+            // `.documentLoaded`); or its live document.
             let fromCache: [RuntimeOpenPhase] = [.showingCached, .showingCachedLive, .cachedUnreachable, .cachedOffline]
-            if new.phase == .showingCachedLive {
+            if [.showingCachedLive, .cachedOffline, .cachedUnreachable].contains(new.phase) {
                 ColdStartTimings.shared.firstVisible(.cached, attemptID: new.id)
             } else if new.phase == .documentLoaded {
                 let cached = old?.id == new.id && old.map { fromCache.contains($0.phase) } == true
