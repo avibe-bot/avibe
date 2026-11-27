@@ -412,8 +412,129 @@ final class TurnActivityTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(cards.first).state, .active)
         calls.removeAll()
         await owner.reconcile(target: target)
-        XCTAssertEqual(calls.map { $0.0 }, ["PUT"])
+        // No answer at once is a lost connection: made once more, and no
+        // more than that.
+        XCTAssertEqual(calls.map { $0.0 }, ["PUT", "PUT"])
         await owner.endAll(reason: "logout")
+    }
+
+    /// The card's hidden WebView does not hold off the instance page's
+    /// direct hand-over, so a hand-over may close the connection one of its
+    /// requests was about to use. That request gets no answer at once and
+    /// is made once more; the card is registered by the second.
+    func testARequestThatGotNoAnswerAtOnceIsMadeOnceMore() async throws {
+        try await registersOnTheSecondRequest(afterTheFirst: { .init(status: 0, json: nil, redirected: false) })
+    }
+
+    func testARequestWhoseDocumentWasLostAtOnceIsMadeOnceMore() async throws {
+        try await registersOnTheSecondRequest(afterTheFirst: { throw VoiceCaptureInstanceClient.Failure.offline })
+    }
+
+    private func registersOnTheSecondRequest(
+        afterTheFirst lost: @escaping @MainActor () throws -> VoiceCaptureInstanceClient.Response
+    ) async throws {
+        var puts = 0
+        let owner = coordinator(response: { _, method, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            if method == "PUT" {
+                puts += 1
+                if puts == 1 { return try lost() }
+            }
+            return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
+        })
+        await start(owner)
+        XCTAssertEqual(puts, 2)
+        // Registered: the next foreground reads the row, it does not
+        // register again.
+        calls.removeAll()
+        await owner.reconcile(target: target)
+        XCTAssertEqual(calls.map { $0.0 }, ["GET"])
+        await owner.endAll(reason: "logout")
+    }
+
+    /// A redirect (to sign-in, say) is not followed and so carries no
+    /// status either, but it is the instance's answer: not made again.
+    func testARedirectAtOnceIsAnAnswerAndIsNotMadeAgain() async throws {
+        var puts = 0
+        let owner = coordinator(response: { _, method, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            guard method == "PUT" else { return .init(status: 200, json: nil, redirected: false) }
+            puts += 1
+            return .init(status: 0, json: nil, redirected: true)
+        })
+        await start(owner)
+        XCTAssertEqual(puts, 1)
+        await owner.endAll(reason: "logout")
+    }
+
+    /// A request that waited out its deadline is not made again: the
+    /// instance is not answering, and a second wait helps nobody.
+    func testARequestThatRanOutOfTimeWithNoAnswerIsNotMadeAgain() async throws {
+        try await registersOnce(whenEvery: { .init(status: 0, json: nil, redirected: false) })
+    }
+
+    func testARequestWhoseDocumentWasLostAfterItsWaitIsNotMadeAgain() async throws {
+        try await registersOnce(whenEvery: { throw VoiceCaptureInstanceClient.Failure.offline })
+    }
+
+    private func registersOnce(
+        whenEvery slow: @escaping @MainActor () throws -> VoiceCaptureInstanceClient.Response
+    ) async throws {
+        var clock = Date(timeIntervalSince1970: 1795001000)
+        var puts = 0
+        let owner = coordinator(now: { clock }, response: { _, method, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            guard method == "PUT" else { return .init(status: 200, json: nil, redirected: false) }
+            puts += 1
+            // The request took as long as a lost connection never does.
+            clock += TurnActivityCoordinator.lostConnectionWithin
+            return try slow()
+        })
+        await start(owner)
+        XCTAssertEqual(puts, 1)
+        await owner.endAll(reason: "logout")
+    }
+
+    /// A voice take's hidden WebView holds off the instance page's direct
+    /// hand-over for as long as it lives; the card's does not.
+    func testOnlyAVoiceTakesHiddenWebViewHoldsOffAHandover() async throws {
+        for (holdsOff, sole) in [(true, false), (false, true)] {
+            let store = UUID()
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: store)
+            var page: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+            DirectWebViewRegistry.shared.register(try XCTUnwrap(page))
+            var client: VoiceCaptureInstanceClient? = VoiceCaptureInstanceClient(
+                target: VoiceCaptureTarget(
+                    accountID: "account-a", instanceID: "",
+                    origin: try XCTUnwrap(WebOrigin.parseConfigured("https://one.invalid")),
+                    storeIdentifier: store
+                ),
+                gate: { .open }, isActive: { true }, sleep: { _ in },
+                holdsOffHandover: holdsOff
+            )
+            // Nothing answers at that name: the load fails, and the client
+            // keeps its WebView until it is closed.
+            _ = try? await client?.request("GET", "/api/web-push/live-activities/turn")
+            XCTAssertNotNil(client?.releaseBarrier, "the client holds a WebView")
+            let answer = DirectWebViewRegistry.shared.isSoleDocument(try XCTUnwrap(page), host: "one.invalid")
+            // Counted, it is another document of the host, or one with no
+            // address left after its failed load: refused either way.
+            XCTAssertEqual(answer == true, sole, "holds off: \(holdsOff), answered \(String(describing: answer))")
+
+            // Both WebViews of the named store this case made are let go,
+            // and the store is removed (or left to WebKit, which alone may
+            // still hold it).
+            client?.close()
+            let owners: [@MainActor () -> Bool] = [
+                { [weak page] in page != nil },
+                { [weak client] in client != nil },
+            ]
+            page = nil
+            client = nil
+            let failure = await FixtureStoreRemoval.remove(store) { owners.contains { $0() } }
+            XCTAssertNil(failure, String(describing: failure))
+        }
     }
 
     func testUnregisteredExpiresAfterEightHoursWithoutAdvancingStaleDate() async throws {

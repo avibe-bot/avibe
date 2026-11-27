@@ -84,7 +84,11 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         self.webView = webView
         super.init()
-        DirectWebViewRegistry.shared.register(webView)
+        // Not registered with `DirectWebViewRegistry`: this WebView only ever
+        // holds avibe.bot (its navigation policy below refuses any other
+        // origin), so it is never another document of an instance. Counted,
+        // it refused every direct hand-over from its creation until its
+        // first request, while it had no address to tell by.
         webView.navigationDelegate = self
     }
 
