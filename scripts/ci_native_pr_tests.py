@@ -162,6 +162,76 @@ def enumeration(report, target):
     return enabled, disabled
 
 
+# Only diagnostics from this enumeration process (or its own errors array),
+# never test identifiers, earlier build output or later execution failures.
+ENUM_HOST_DEATH = re.compile(
+    r"Mach error -308 - \(ipc/mig\) server died|"
+    r"\b(?:test runner(?: process)?|test host(?: process)?) (?:crashed|died|exited unexpectedly)\b|"
+    r"\blost connection to (?:the )?test (?:runner|host)\b",
+    re.I,
+)
+
+
+# Match explicit fatal records, not words like "Finished with error" in the
+# launch report above. Apply the same cause policy to these and catalog.errors.
+ENUM_FATAL_LINE = re.compile(r"^\s*(?:xcodebuild:\s*)?(?:fatal\s+)?error:\s*(.*)$", re.I)
+
+
+def enumerate_tests(common, target, temp):
+    for attempt in (1, 2):
+        with tempfile.TemporaryDirectory(dir=temp) as directory:
+            catalog = Path(directory) / "catalog.json"
+            cmd = [
+                *common,
+                "test-without-building",
+                "-enumerate-tests",
+                "-test-enumeration-style",
+                "flat",
+                "-test-enumeration-format",
+                "json",
+                "-test-enumeration-output-path",
+                str(catalog),
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+            print(proc.stdout, end="", flush=True)
+            # A catalog with entries must stand on its own. Never turn an
+            # identity/schema/configuration failure into an infrastructure retry.
+            report = json.loads(catalog.read_text()) if catalog.is_file() else None
+            errors = report.get("errors") if isinstance(report, dict) else None
+            if errors:
+                print(
+                    f"{target} enumeration attempt {attempt}: catalog errors: {json.dumps(errors)[:1200]}", flush=True
+                )
+            if catalog.is_file() and not (isinstance(report, dict) and isinstance(errors, list)):
+                raise ValueError(f"{target} enumeration attempt {attempt}: malformed catalog")
+            values = report.get("values", []) if report is not None else []
+            if values != []:
+                result = enumeration(report, target)
+                proc.check_returncode()
+                return result
+
+            # No catalog, or explicitly no values: only known discovery errors
+            # are compatible with a host crash. A separate error vetoes recovery.
+            diagnostic = proc.stdout
+            fatal_messages = [match[1] for line in proc.stdout.splitlines() if (match := ENUM_FATAL_LINE.match(line))]
+            for error in [*(errors or []), *fatal_messages]:
+                if not isinstance(error, str) or not (
+                    ENUM_HOST_DEATH.fullmatch(error.strip().rstrip(".")) or error == "Unable to enumerate"
+                ):
+                    raise ValueError(
+                        f"{target} enumeration attempt {attempt}: independent or unknown fatal diagnostic: {str(error)[:300]}"
+                    )
+                diagnostic += "\n" + error
+            signature = ENUM_HOST_DEATH.search(diagnostic)
+            if attempt == 2 or not signature:
+                proc.check_returncode()
+                raise ValueError(f"{target} enumeration attempt {attempt}: no valid catalog")
+            note = f'{target}: enumeration host failure ({signature[0]}); retrying enumeration once before tests.'
+            print(note, flush=True)
+            with (temp / 'native-enumeration-retry.txt').open('a') as evidence:
+                print(note, file=evidence)
+
+
 def selection(target, sources, enabled, disabled):
     required = {s for s in CONTRACTS if s.startswith(target + "/")}
     selectors = set(required)
@@ -275,22 +345,7 @@ def main():
         ]
         subprocess.run([*common, "build-for-testing"], check=True)
         verify_membership(target, sources, temp / "AvibeDerivedData")
-        catalog = temp / f"{target}-enumerated.json"
-        subprocess.run(
-            [
-                *common,
-                "test-without-building",
-                "-enumerate-tests",
-                "-test-enumeration-style",
-                "flat",
-                "-test-enumeration-format",
-                "json",
-                "-test-enumeration-output-path",
-                str(catalog),
-            ],
-            check=True,
-        )
-        enabled, disabled = enumeration(json.loads(catalog.read_text()), target)
+        enabled, disabled = enumerate_tests(common, target, temp)
         selectors, required = selection(target, sources, enabled, disabled)
         if not selectors:  # All touched fixture classes were genuinely deleted.
             continue
