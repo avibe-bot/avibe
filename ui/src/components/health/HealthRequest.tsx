@@ -5,6 +5,7 @@ import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { HealthRequest, HealthViewState } from '@/lib/healthRequests';
+import { hasNativeCapability } from '@/lib/native';
 import { useHealthRequest } from './useHealthRequest';
 
 const variants: Record<HealthViewState, BadgeProps['variant']> = {
@@ -25,8 +26,19 @@ type ViewProps = {
   onAuthorize?: () => void;
 };
 
-/** ui/design: health/request-card — the approved card, driven by request metadata only. */
-export function HealthRequestCardView({ state, operation = 'health.connect', metrics = ['steps', 'activity', 'workouts', 'sleep'], minimumHealthVersion = 1, busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
+const legacyMetrics = ['steps', 'activity', 'workouts', 'sleep'];
+
+function displayedMetrics(operation: HealthRequest['operation'], metrics: string[], minimumHealthVersion: number) {
+  // The health:1 bridge cannot receive the new types in its native confirmation.
+  // Keep expansion scope visible: its existing health:2 gate asks for an update.
+  const legacyInitial = operation === 'health.connect' && minimumHealthVersion < 2
+    && typeof window !== 'undefined' && window.avibeNative?.platform === 'ios'
+    && hasNativeCapability('health', 1) && !hasNativeCapability('health', 2);
+  return legacyInitial ? metrics.filter(metric => legacyMetrics.includes(metric)) : metrics;
+}
+
+/** ui/design: health/request-card — request metadata with the shell's supported consent scope. */
+export function HealthRequestCardView({ state, operation = 'health.connect', metrics = legacyMetrics, minimumHealthVersion = 1, busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-xl border border-edge bg-surface px-3.5 py-3 shadow-elevation-0">
@@ -38,7 +50,7 @@ export function HealthRequestCardView({ state, operation = 'health.connect', met
           <span className="text-xs text-muted">{t(operation === 'health.connect' ? 'health.title.connect' : 'health.title.refresh')}</span>
           {state !== 'authorize' && <Badge variant={variants[state]}>{t(`health.status.${state}`)}</Badge>}
         </div>
-        <span className="text-health-metric font-semibold text-foreground">{metrics.map(metric => t(`health.metric.${metric}`, { defaultValue: metric })).join(t('health.metricSeparator'))}</span>
+        <span className="text-health-metric font-semibold text-foreground">{displayedMetrics(operation, metrics, minimumHealthVersion).map(metric => t(`health.metric.${metric}`, { defaultValue: metric })).join(t('health.metricSeparator'))}</span>
         <span className="text-xs leading-5 text-muted">{t(state === 'needsUpdate' && operation === 'health.connect' && minimumHealthVersion >= 2 ? 'health.note.needsUpdateExpansion' : state === 'waiting' && operation === 'health.refresh' ? 'health.waitingRefresh' : `health.note.${state}`)}</span>
         {loadError && <span role="status" className="text-xs leading-5 text-muted">{t('health.loadError')}</span>}
         {busyPhase === 'unresponsive' && <span role="status" className="text-xs leading-5 text-muted">{t('health.reopenApp')}</span>}
@@ -57,10 +69,10 @@ export function HealthRequestCard({ request, readOnly }: { request: HealthReques
 }
 
 /** ui/design: health/landing — a notification trampoline; no health values or settings. */
-export function HealthLandingView({ state, operation = 'health.connect', metrics = ['steps', 'activity', 'workouts', 'sleep'], minimumHealthVersion = 1, busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
+export function HealthLandingView({ state, operation = 'health.connect', metrics = legacyMetrics, minimumHealthVersion = 1, busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
-  const metricList = new Intl.ListFormat(language, { type: 'conjunction' }).format(metrics.map(metric => {
+  const metricList = new Intl.ListFormat(language, { type: 'conjunction' }).format(displayedMetrics(operation, metrics, minimumHealthVersion).map(metric => {
     const label = t(`health.metric.${metric}`, { defaultValue: metric });
     return language.startsWith('en') ? label.toLocaleLowerCase(language) : label;
   }));

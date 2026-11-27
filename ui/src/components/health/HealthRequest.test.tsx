@@ -40,6 +40,34 @@ afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'avibeNative'); vi.u
 
 describe('Health request production consumers (synthetic server and native peer)', () => {
   it.each([
+    ['en', 1, 'card'], ['en', 1, 'landing'],
+    ['en', 2, 'card'], ['en', 2, 'landing'],
+    ['zh', 1, 'card'], ['zh', 1, 'landing'],
+    ['zh', 2, 'card'], ['zh', 2, 'landing'],
+  ] as const)('shows the initial scope supported by the %s health:%s shell on the %s', async (lng, version, surface) => {
+    const localized = createInstance();
+    await localized.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } } });
+    installBridge({ health: version });
+    const legacy = ['steps', 'activity', 'workouts', 'sleep'];
+    const heart = ['heart_rate', 'resting_heart_rate', 'hrv'];
+    current = { ...request, metrics: [...legacy, ...heart], minimum_health_version: 1 };
+    const result = render(<I18nextProvider i18n={localized}><MemoryRouter initialEntries={[`/mobile/health/${request.id}`]}>
+      {surface === 'card' ? <HealthRequestCard request={current} />
+        : <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>}
+    </MemoryRouter></I18nextProvider>);
+    await screen.findByRole('button', { name: localized.t('health.authorize') });
+    const text = result.container.textContent?.toLocaleLowerCase(lng);
+    for (const metric of legacy) expect(text).toContain(localized.t(`health.metric.${metric}`).toLocaleLowerCase(lng));
+    for (const metric of heart) {
+      const label = localized.t(`health.metric.${metric}`).toLocaleLowerCase(lng);
+      if (version === 1) expect(text).not.toContain(label);
+      else expect(text).toContain(label);
+    }
+    // Presentation must not narrow the server request or its eventual native payload.
+    expect(current.metrics).toEqual([...legacy, ...heart]);
+  });
+
+  it.each([
     ['en', ['Heart rate', 'Resting heart rate', 'Heart rate variability']],
     ['zh', ['心率', '静息心率', '心率变异性']],
   ] as const)('localizes heart metrics on the %s request card and landing page', async (lng, labels) => {
@@ -70,6 +98,11 @@ describe('Health request production consumers (synthetic server and native peer)
     </MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(screen.getAllByText(message)).toHaveLength(2));
     expect(screen.queryByText(localized.t('health.note.needsUpdate'))).toBeNull();
+    expect(screen.queryByRole('button', { name: localized.t('health.authorize') })).toBeNull();
+    for (const metric of current.metrics) {
+      expect(screen.getByText((text, node) => node?.tagName === 'SPAN'
+        && text.includes(localized.t(`health.metric.${metric}`)))).toBeTruthy();
+    }
   });
 
   it('uses sentence-case metric names and the locale conjunction on the English landing', async () => {
