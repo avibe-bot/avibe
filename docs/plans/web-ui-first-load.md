@@ -86,6 +86,13 @@ home and 900 KiB chat (temporarily up to 610 and 906 until 2026-11-27, when the
 locale was split by surface; the history is in the script). Raise one only in the change that needs it, with the reason;
 first move what the first screen does not draw off it.
 
+Every run prints each route's remaining room. A route within 10 KiB of its
+budget (home 590, chat 890 today; the margin follows the budget) still passes,
+with a warning: in the log, and in CI as a warning annotation on the run and a
+line in the job summary. Crossing that line means the next locale slice, or
+another move off the first screen, gets scheduled; it is not a reason to delete
+copy or to raise a budget.
+
 ## 5. Brotli
 
 Not in this change. Precompressed at quality 11, the split build's first screen
