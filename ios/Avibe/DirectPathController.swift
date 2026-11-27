@@ -169,12 +169,33 @@ enum DirectHandoverSkip: String, Equatable, Sendable {
     case otherDocuments = "other_documents"
 }
 
-/// Answers `direct.handover` for an instance origin. `soleDocument` is
-/// whether the calling WebView is the only live document of its data store
-/// with that host loaded: `nil` when the App cannot tell.
+/// What else of the calling WebView's data store has the instance loaded
+/// when a page asks to hand over (`DirectWebViewRegistry`). Anything but
+/// `sole` refuses the hand-over; which one it was goes into the hand-over's
+/// record (`DirectPathUse.Handover`), in these words.
+enum DirectOtherDocument: String, Equatable, Sendable {
+    /// Nothing: the caller is the only live document of its store with the
+    /// host loaded.
+    case sole = "none"
+    /// A voice take's hidden WebView.
+    case voice
+    /// A window a page of the runtime opened.
+    case child
+    /// A runtime's own page: an earlier runtime not freed yet, or the page
+    /// that opened the calling window.
+    case runtime
+    /// A WebView of the store with no address yet, whatever it is: the App
+    /// cannot tell what it will load.
+    case unloaded
+    /// The caller itself is not one of the App's listed WebViews.
+    case unknown
+}
+
+/// Answers `direct.handover` for an instance origin. `other` is what else
+/// of the calling WebView's data store has that host loaded.
 typealias DirectHandoverProvider = @MainActor (
     WebOrigin,
-    _ soleDocument: Bool?,
+    _ other: DirectOtherDocument,
     @escaping @MainActor (DirectHandoverOutcome) -> Void
 ) -> Void
 
@@ -303,7 +324,13 @@ final class DirectRouteOwner {
 /// Proposed bounds for the controller (docs/plans/remote-direct-ios.md
 /// section 9). Not measurements.
 struct DirectPathTiming: Sendable {
-    /// How long a runtime's first load waits for the listener and its route.
+    /// How long a runtime's first load waits for the listener and its route:
+    /// a 「仅直连和中继」 host (`strictOpenSeconds`), and any other host
+    /// (`listenerWaitSeconds`). An ordinary host whose wait runs out loads on
+    /// WebKit's normal path and gets its route when the bind is confirmed
+    /// (`lateRoute`). The ordinary wait is 2 s since 2026-11-27 (1 s before):
+    /// a cold start's first bind can take longer than a second, and every
+    /// load that goes first starts on the public path.
     let strictOpenSeconds: TimeInterval
     let listenerWaitSeconds: TimeInterval
     /// How long the return to the foreground may take to re-bind and check
@@ -347,7 +374,7 @@ struct DirectPathTiming: Sendable {
         self.portProbeSeconds = portProbeSeconds
     }
 
-    static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
+    static let standard = DirectPathTiming(listenerWaitSeconds: 2, rebindSeconds: 2)
 }
 
 /// One failed attempt to bind the listener's port or to check that the
@@ -744,6 +771,9 @@ final class DirectPathController {
     private var lateRouteTask: Task<Void, Never>?
     /// When the first bind of the listener that is there now was started.
     private var firstBindStarted: ContinuousClock.Instant?
+    /// Listeners started in this process: only the first one's bind is a
+    /// cold start's (`ColdStartTimings`).
+    private var listenersStarted = 0
     /// Hosts whose route was added after their first load, until one of
     /// their connections reaches the listener. Their documents are told
     /// `tunnel` meanwhile: nothing of theirs passes through the listener
@@ -864,14 +894,29 @@ final class DirectPathController {
     /// get there) are closed, so WebKit's next connection takes
     /// the route to the direct backend. Busy relays are kept; nothing is
     /// replayed. Only when the caller is the sole live document of the store
-    /// with that host loaded (`soleDocument == true`): a relay of another
+    /// with that host loaded (`other == .sole`): a relay of another
     /// document's connection is never closed for this one.
+    ///
+    /// Each ask is counted in its minute when it is made, and recorded once
+    /// it is answered, with how it ended (`DirectPathUse.Handover`).
     func handover(
         for origin: WebOrigin,
-        soleDocument: Bool?,
+        other: DirectOtherDocument,
         reply: @escaping @MainActor (DirectHandoverOutcome) -> Void
     ) {
         settleRecordedFault()
+        let asked = ContinuousClock.now
+        let scope = useScope(origin.host)
+        let path = pathInUse(for: origin.host)
+        let pathUse = pathUse
+        // An ask is counted when it is made and recorded when it is
+        // answered, with the path present when it was asked.
+        let answer: @MainActor (DirectHandoverOutcome, DirectOtherDocument) -> Void = { outcome, other in
+            pathUse.handoverAnswered(
+                outcome, refusedBy: other, took: asked.duration(to: .now), scope: scope, path: path
+            )
+            reply(outcome)
+        }
         guard
             !isResuming,
             preferred == .direct,
@@ -880,16 +925,16 @@ final class DirectPathController {
             directAuthorized(for: target.authority),
             let listener
         else {
-            pathUse.handover(refused: .notUsable, scope: useScope(origin.host), path: pathInUse(for: origin.host))
-            reply(.skipped(.notUsable))
+            pathUse.handover(refused: .notUsable, scope: scope, path: path)
+            answer(.skipped(.notUsable), .sole)
             return
         }
-        guard soleDocument == true else {
-            pathUse.handover(refused: .otherDocuments, scope: useScope(origin.host), path: pathInUse(for: origin.host))
-            reply(.skipped(.otherDocuments))
+        guard other == .sole else {
+            pathUse.handover(refused: .otherDocuments, scope: scope, path: path)
+            answer(.skipped(.otherDocuments), other)
             return
         }
-        pathUse.handover(refused: nil, scope: useScope(origin.host), path: pathInUse(for: origin.host))
+        pathUse.handover(refused: nil, scope: scope, path: path)
         let host = origin.host
         Task {
             let result = await listener.closeQuietRelays(
@@ -902,7 +947,7 @@ final class DirectPathController {
                 "Direct hand-over: closed \(result.closed, privacy: .public), kept \(result.kept, privacy: .public) public relays"
             )
             await MainActor.run {
-                reply(.done(closed: result.closed, kept: result.kept))
+                answer(.done(closed: result.closed, kept: result.kept), .sole)
             }
         }
     }
@@ -2115,6 +2160,8 @@ final class DirectPathController {
     }
 
     private func startListener() -> Task<Bool, Never> {
+        listenersStarted += 1
+        let firstInProcess = listenersStarted == 1
         // The failure callback names the listener it came from, so one from
         // a listener that was replaced or stopped does nothing.
         let listenerBox = DirectListenerBox()
@@ -2178,6 +2225,16 @@ final class DirectPathController {
                 self.listenerPort = binding.port
                 self.listenerGeneration = binding.generation
                 self.disarmWatchdog()
+                if firstInProcess, let started = self.firstBindStarted {
+                    // The process's first listener only: a later one (after
+                    // the first failed or was retired) is no cold start's.
+                    // A host that loaded while this bind was under way gets
+                    // its route late (`lateRoute`).
+                    ColdStartTimings.shared.firstBindConfirmed(
+                        took: started.duration(to: ContinuousClock.now),
+                        late: self.lateRoute != nil
+                    )
+                }
                 return true
             }
         }
@@ -3116,42 +3173,66 @@ struct DirectRebindAttempts: Equatable {
     }
 }
 
-/// Every WKWebView the App makes, held weakly, so a hand-over can tell
-/// whether another live document of the same data store has a host loaded
-/// (`direct.handover`). A WebView is listed from creation until it is
-/// deallocated, whether or not it is on screen: one that still exists may
-/// still hold connections.
+/// Every WKWebView the App makes that may load an instance, held weakly,
+/// so a hand-over can tell whether another live document of the same data
+/// store has a host loaded (`direct.handover`). A WebView is listed from
+/// creation until it is deallocated, whether or not it is on screen: one
+/// that still exists may still hold connections.
 @MainActor
 final class DirectWebViewRegistry {
     static let shared = DirectWebViewRegistry()
 
+    /// What a listed WebView is, for the record of a hand-over it refused.
+    enum Kind: Sendable {
+        /// A runtime's own page.
+        case runtime
+        /// A window a page of the runtime opened.
+        case child
+        /// A voice take's hidden WebView.
+        case voice
+
+        var other: DirectOtherDocument {
+            switch self {
+            case .runtime: return .runtime
+            case .child: return .child
+            case .voice: return .voice
+            }
+        }
+    }
+
     private final class Entry {
         weak var webView: WKWebView?
+        let kind: Kind
 
-        init(_ webView: WKWebView) {
+        init(_ webView: WKWebView, _ kind: Kind) {
             self.webView = webView
+            self.kind = kind
         }
     }
 
     private var entries: [Entry] = []
 
-    func register(_ webView: WKWebView) {
+    func register(_ webView: WKWebView, as kind: Kind) {
         entries.removeAll { $0.webView == nil }
         guard !entries.contains(where: { $0.webView === webView }) else {
             return
         }
-        entries.append(Entry(webView))
+        entries.append(Entry(webView, kind))
     }
 
-    /// Whether `webView` is the only live WebView of its data store with
-    /// `host` loaded or loading. `nil` when that cannot be told: the caller
-    /// is not registered, or another WebView of the store has no URL yet.
-    func isSoleDocument(_ webView: WKWebView, host: String) -> Bool? {
+    /// What else of `webView`'s data store has `host` loaded or loading:
+    /// `sole` when nothing has. Of several, one that has the host loaded is
+    /// named before one with no address yet, and among those a voice take
+    /// before a child window before a runtime's page. `unknown` when the
+    /// caller is not listed.
+    func otherDocument(than webView: WKWebView, host: String) -> DirectOtherDocument {
         entries.removeAll { $0.webView == nil }
         guard entries.contains(where: { $0.webView === webView }) else {
-            return nil
+            return .unknown
         }
         let store = webView.configuration.websiteDataStore
+        var loaded: [Kind] = []
+        var unloaded = false
         for entry in entries {
             guard let other = entry.webView, other !== webView else {
                 continue
@@ -3164,12 +3245,16 @@ final class DirectWebViewRegistry {
                 continue
             }
             guard let url = other.url else {
-                return nil
+                unloaded = true
+                continue
             }
             if url.host?.lowercased() == host.lowercased() {
-                return false
+                loaded.append(entry.kind)
             }
         }
-        return true
+        for kind in [Kind.voice, .child, .runtime] where loaded.contains(kind) {
+            return kind.other
+        }
+        return unloaded ? .unloaded : .sole
     }
 }

@@ -34,6 +34,8 @@ import {
 //  * The send settles its pending entry at the POST's outcome, whatever it is.
 //  * It belongs to the reader who sent it: a different reader or a cleared store
 //    drops it, as it drops everything else the page showed for them.
+//  * Its words outlive the page only as an unanswered composer send
+//    (lib/unacknowledgedSends): a later page gives them back as a draft.
 
 const CLIENT_MESSAGE_ID = 'client_message_id';
 
@@ -66,7 +68,8 @@ const appendShown = (live: WorkbenchMessage[], shown: PendingSend[], place: Pend
   return here.length > 0 ? [...live, ...here.map((entry) => entry.message)] : live;
 };
 
-const clientMessageIdOf = (message: WorkbenchMessage): string | null => {
+/** The client id a server row carries for the send it came from, if any. */
+export const clientMessageIdOf = (message: WorkbenchMessage): string | null => {
   const value = message.metadata?.[CLIENT_MESSAGE_ID];
   return typeof value === 'string' && value ? value : null;
 };

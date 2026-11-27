@@ -1292,6 +1292,14 @@ class Controller:
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
         try:
+            from core.native_inventory_refresh import NativeInventoryRefresh
+
+            self.native_inventory_refresh = NativeInventoryRefresh(self)
+            self.native_inventory_refresh.start()
+        except Exception:
+            logger.exception("Failed to start native inventory refresh")
+
+        try:
             self.update_checker.start()
         except Exception as e:
             logger.error(f"Failed to start update checker: {e}", exc_info=True)
@@ -2254,6 +2262,8 @@ class Controller:
         if callable(drain_activity):
             await drain_activity()
 
+        if refresh := getattr(self, "native_inventory_refresh", None):
+            await refresh.stop()
         await self._stop_model_hub_snapshot_reconciliation()
 
         service_stops: list[tuple[str, asyncio.Task[None]]] = []

@@ -1456,6 +1456,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         from vibe import api
 
         cfg = V2Config.default()
+        cfg.agents.antigravity.auth_mode = "gemini-api-key"
+        cfg.agents.antigravity.api_key = "fixture-key"
         cfg.save()
         models = ("gemini-pro-orchestrator", "gemini-4-carbon", "gemini-4-neon")
         for model, levels in zip(models, ((), ("low", "medium", "high"), ("low", "medium", "high", "xhigh"))):

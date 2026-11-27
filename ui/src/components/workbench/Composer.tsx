@@ -546,6 +546,9 @@ export interface ComposerProps {
   readVoiceContext?: () => VoiceContextSource;
 }
 
+/** A message given back to the composer: what it held when it was sent. */
+export type UnsentSubmission = { text: string; attachments: readonly SessionDraftAttachment[] };
+
 export interface ComposerHandle {
   /** Stage + upload files from outside the composer — e.g. a chat-page-wide
    *  drag-and-drop that drops onto the transcript rather than the input row. */
@@ -570,6 +573,17 @@ export interface ComposerHandle {
    *  the end — the home's suggestion cards seed a starting task the user then
    *  edits. It never sends, and refuses while voice capture owns the draft. */
   setDraft: (text: string) => void;
+  /** Put back a message whose send was never answered (the page that sent it
+   *  closed first): its text and attachments return to the box as a refused
+   *  send's do, without focus. Text the box holds stays, and the message follows
+   *  it on a new paragraph. False, changing nothing, while the box is disabled,
+   *  sending, or voice capture owns the draft. */
+  restoreUnsent: (unsent: UnsentSubmission) => boolean;
+  /** Whether ``restoreUnsent`` would take a message now. */
+  canRestoreUnsent: () => boolean;
+  /** Take a restored message back out of the box once the conversation shows
+   *  it after all, only while the box holds exactly it. True when it emptied. */
+  withdrawUnsent: (unsent: UnsentSubmission) => boolean;
   /** Handle the Chat page's configured voice chord. Starting may be gated by
    *  the page, while an active recording can always be completed. */
   handleVoiceShortcut: (event: KeyboardEvent, allowStart: boolean) => boolean;
@@ -2123,6 +2137,51 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // focusing here would put the caret at the pre-seed offset (0) instead of
       // after the text the user is meant to edit.
       seedFocusRef.current = true;
+    },
+    canRestoreUnsent: () => !(disabledRef.current || pendingRef.current || voiceDraftLocked()),
+    restoreUnsent: ({ text, attachments: unsent }: UnsentSubmission) => {
+      if (disabledRef.current || pendingRef.current || voiceDraftLocked()) return false;
+      const typed = valueRef.current;
+      if (text) {
+        const next = typed.trim() ? `${typed}\n\n${text}` : text;
+        draftEditedRef.current = true;
+        valueRef.current = next;
+        setHasText(next.trim().length > 0);
+        if (useMentions) {
+          // Appended, the typed text keeps its chips; an empty box takes it whole.
+          if (typed.trim()) mentionRef.current?.append(text, '\n\n');
+          else mentionRef.current?.setText(text, { focus: false });
+        } else {
+          setValue(next);
+        }
+        onDraftChange?.(next);
+      }
+      if (unsent.length) {
+        setAttachments((current) => [
+          ...current,
+          ...unsent
+            .filter((attachment) => !current.some((held) => held.token === attachment.token))
+            .map((attachment): ComposerAttachment => ({ ...attachment, localId: newLocalId(), status: 'ready' })),
+        ]);
+      }
+      return true;
+    },
+    withdrawUnsent: ({ text, attachments: unsent }: UnsentSubmission) => {
+      if (pendingRef.current || voiceDraftLocked()) return false;
+      if (valueRef.current.trim() !== text.trim()) return false;
+      if (
+        attachments.length !== unsent.length
+        || attachments.some((attachment, index) => attachment.token !== unsent[index]?.token)
+      ) return false;
+      const focused = Boolean(composerRootRef.current?.contains(document.activeElement));
+      valueRef.current = '';
+      setValue('');
+      setHasText(false);
+      if (useMentions) mentionRef.current?.clear(focused ? undefined : { blur: true });
+      setAttachments([]);
+      setInputSurface(undefined);
+      onDraftChange?.('');
+      return true;
     },
     handleVoiceShortcut,
   }));

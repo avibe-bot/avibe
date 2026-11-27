@@ -40,7 +40,7 @@ struct LaunchServices: Equatable {
     /// (`TurnActivityFixtureLaunch`).
     private static var showsOnlyAFixtureCard: Bool {
         #if DEBUG
-        TurnActivityFixtureLaunch.requested != nil
+        TurnActivityFixtureLaunch.anyRequested
         #else
         false
         #endif
@@ -111,19 +111,28 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // The start of a cold start's measured times (`ColdStartTimings`).
+        MainActor.assumeIsolated { ColdStartTimings.shared.launched() }
         // Before any scene draws: a locked App opens behind its lock (docs/plans/app-lock.md).
         if LaunchServices.current.appLock {
             MainActor.assumeIsolated { AppLockController.shared.start() }
         }
         VoiceCaptureLaunch.markLaunched()
         #if DEBUG
-        Task { @MainActor in await TurnActivityFixtureLaunch.run() }
+        Task { @MainActor in
+            await TurnActivityFixtureLaunch.run()
+            await TurnActivityFixtureLaunch.runVoice()
+        }
+        let fixtureCard = TurnActivityFixtureLaunch.anyRequested
+        #else
+        let fixtureCard = false
         #endif
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
-            await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            // A fixture voice card is not a leftover (DEBUG only).
+            if !fixtureCard { await VoiceCaptureController.shared.endLeftoversAtLaunch() }
             await VoiceCaptureController.shared.restoreOutbox()
             if LaunchServices.current.healthSync { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }

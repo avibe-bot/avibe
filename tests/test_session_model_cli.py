@@ -304,6 +304,8 @@ def test_antigravity_direct_models_use_authoritative_live_menu(monkeypatch, tmp_
     engine = _setup(monkeypatch, tmp_path)
 
     cfg = V2Config.default()
+    cfg.agents.antigravity.auth_mode = "gemini-api-key"
+    cfg.agents.antigravity.api_key = "fixture-key"
     cfg.save()
     record_antigravity_live_models(cfg, {
         "configOptions": [{
@@ -359,6 +361,8 @@ def test_agent_run_model_change_clears_only_inherited_incompatible_effort(
     engine = _setup(monkeypatch, tmp_path)
     if backend == "antigravity":
         cfg = V2Config.default()
+        cfg.agents.antigravity.auth_mode = "gemini-api-key"
+        cfg.agents.antigravity.api_key = "fixture-key"
         cfg.save()
         options = [{"id": "model", "category": "model", "currentValue": model,
                     "options": [{"value": model}]}]

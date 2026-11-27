@@ -32,7 +32,6 @@ from vibe.claude_model_catalog import (
     get_catalog_path as get_claude_catalog_path,
     load_catalog_models,
 )
-from vibe.codex_config import get_codex_home
 from vibe.codex_launch_failure import CodexLaunchError, launch_failure_from_stderr
 
 if TYPE_CHECKING:
@@ -1389,18 +1388,13 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
         blocked = (
             set()
-            if local_catalog
+            if local_catalog is not None
             else _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
         )
     else:
-        local_catalog = _read_codex_models_cache()
         remote_entries = backend_model_entries("codex", remote_catalog)
-        blocked = _codex_blocked_model_ids(
-            remote_catalog,
-            local_catalog,
-            bundled_catalog,
-        )
-        sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)
+        blocked = _codex_blocked_model_ids(remote_catalog, bundled_catalog)
+        sources = _codex_sources(remote_entries, bundled_catalog)
 
     merged = merge_model_sources(sources, blocked_model_ids=blocked)
     default_efforts = _DEFAULT_REASONING_EFFORTS[backend_key]
@@ -1415,6 +1409,34 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         efforts = entry.get("reasoning_efforts") or default_efforts
         reasoning_options[entry["id"]] = _reasoning_option_items(efforts)
 
+    if backend_key == "codex":
+        # Cut over the existing picker and its metadata together. The separate
+        # builtin/Hub APIs never use an ambient account as a source binding.
+        from config.v2_config import V2Config, is_model_hub_enabled
+        from core.handlers.direct_inventory_identity import inventory_identity
+        from core.handlers.direct_model_menu import PickerModel, read_menu
+
+        try:
+            config = V2Config.load(persist_migrations=False)
+        except (ValueError, OSError):
+            config = None
+        if config is None or not is_model_hub_enabled() or config.model_hub.agents["codex"].mode == "direct":
+            # Unknown mode has no private authority. It still has the same
+            # saved removals; only a positively identified Hub bypasses them.
+            identity = inventory_identity("codex", config) if config is not None else None
+            public = tuple(
+                PickerModel(entry["id"], entry.get("label"), reasoning_efforts=entry.get("reasoning_efforts") or default_efforts)
+                for entry in merged
+            )
+            menu = read_menu("codex", identity, fallback=public)
+            models = [row.id for row in menu.models]
+            model_labels = {row.id: row.label for row in menu.models if row.label and row.label != row.id}
+            reasoning_options = {"": _reasoning_option_items(default_efforts)}
+            for row in menu.models:
+                efforts = row.reasoning_efforts if row.reasoning_efforts is not None else default_efforts
+                reasoning_options[row.id] = _reasoning_option_items(efforts)
+            if menu.observed_at is not None:
+                sources = [("native", models)]
     cached_payload = _cached_remote_payload(source_key=remote_source_key)
     notes = []
     error = cached_payload.get("error")
@@ -1430,7 +1452,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         "sources": [name for name, entries in sources if entries],
         "source": " + ".join(name for name, entries in sources if entries),
         "live": False,
-        "authoritative": backend_key == "antigravity" and bool(local_catalog),
+        "authoritative": backend_key == "antigravity" and local_catalog is not None,
         "notes": notes or None,
         "catalog_refresh_pending": remote_catalog_refresh_pending(
             refresh_token,
@@ -1506,19 +1528,14 @@ def backend_builtin_snapshot(
         sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
         blocked = (
             set()
-            if local_catalog
+            if local_catalog is not None
             else _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
         )
     else:
-        local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
-        local_complete = not cli_installed or local_catalog_read
+        local_complete = True
         remote_entries = backend_model_entries("codex", remote_catalog)
-        blocked = _codex_blocked_model_ids(
-            remote_catalog,
-            local_catalog,
-            bundled_catalog,
-        )
-        sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)
+        blocked = _codex_blocked_model_ids(remote_catalog, bundled_catalog)
+        sources = _codex_sources(remote_entries, bundled_catalog)
 
     merged = merge_model_sources(sources, blocked_model_ids=blocked)
     return _versioned_builtin_snapshot(
@@ -1659,59 +1676,18 @@ def _claude_sources(
 
 def _codex_sources(
     remote_entries: list[dict[str, Any]],
-    local_catalog: list[dict[str, Any]],
     bundled_catalog: dict[str, Any],
 ) -> list[tuple[str, list[dict[str, Any]]]]:
-    visible_local = [entry for entry in local_catalog if not _model_hidden(entry)]
-    local_by_id = {entry["id"]: entry for entry in visible_local}
     bundled_entries = backend_model_entries("codex", bundled_catalog)
     built_in = [
         {"id": model, "reasoning_efforts": _DEFAULT_REASONING_EFFORTS["codex"]}
         for model in _CODEX_BUILT_IN_MODELS
     ]
     return [
-        (
-            "remote",
-            _overlay_local_reasoning_efforts(
-                [entry for entry in remote_entries if not _model_hidden(entry)],
-                local_by_id,
-            ),
-        ),
-        ("bundled", _overlay_local_reasoning_efforts(bundled_entries, local_by_id)),
-        ("local", visible_local),
+        ("remote", [entry for entry in remote_entries if not _model_hidden(entry)]),
+        ("bundled", bundled_entries),
         ("legacy", built_in),
     ]
-
-
-def _overlay_local_reasoning_efforts(
-    catalog_entries: list[dict[str, Any]],
-    local_by_id: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    overlaid = []
-    for entry in catalog_entries:
-        merged = dict(entry)
-        local_efforts = local_by_id.get(entry["id"], {}).get("reasoning_efforts")
-        if local_efforts:
-            merged["reasoning_efforts"] = list(local_efforts)
-        overlaid.append(merged)
-    return overlaid
-
-
-def _read_codex_models_cache() -> list[dict[str, Any]]:
-    return _read_codex_models_cache_with_status()[0]
-
-
-def _read_codex_models_cache_with_status() -> tuple[list[dict[str, Any]], bool]:
-    cache_path = get_codex_home() / "models_cache.json"
-    try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return [], False
-    raw_models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(raw_models, list):
-        return [], False
-    entries = [_normalize_model_entry(item) for item in raw_models]
-    return [entry for entry in entries if entry], True
 
 
 def _legacy_claude_reasoning_efforts(model: str) -> list[str]:
@@ -1766,19 +1742,19 @@ def _bundled_retired_model_ids(
 def _antigravity_sources(
     remote_catalog: dict[str, Any],
     bundled_catalog: dict[str, Any],
-    local_catalog: Sequence[dict[str, Any]],
+    local_catalog: Sequence[dict[str, Any]] | None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     remote_entries = backend_model_entries("antigravity", remote_catalog)
     visible_remote = [entry for entry in remote_entries if not _model_hidden(entry)]
     bundled_entries = backend_model_entries("antigravity", bundled_catalog)
 
-    live_entries = local_catalog
+    live_entries = local_catalog or ()
     normalized_live = [
         entry
         for item in live_entries
         if (entry := _normalize_model_entry(item)) and not _model_hidden(entry)
     ]
-    if normalized_live:
+    if local_catalog is not None:
         metadata_by_id: dict[str, dict[str, Any]] = {}
         for fallback_entry in (*bundled_entries, *visible_remote):
             model_id = fallback_entry["id"]
@@ -1831,7 +1807,6 @@ def _claude_blocked_model_ids(
 
 def _codex_blocked_model_ids(
     remote_catalog: dict[str, Any],
-    local_catalog: Sequence[dict[str, Any]],
     bundled_catalog: dict[str, Any],
 ) -> set[str]:
     remote_entries = backend_model_entries("codex", remote_catalog)
@@ -1844,13 +1819,7 @@ def _codex_blocked_model_ids(
     retired = _bundled_retired_model_ids("codex", remote_catalog, bundled_catalog) | {
         model for model in _RETIRED_CODEX_MODELS if model not in explicit_catalog_models
     }
-    return retired | {
-        entry["id"] for entry in remote_entries if _model_hidden(entry)
-    } | {
-        entry["id"]
-        for entry in local_catalog
-        if _model_hidden(entry) and entry["id"] not in explicit_catalog_models
-    }
+    return retired | {entry["id"] for entry in remote_entries if _model_hidden(entry)}
 
 
 def _ordered_entries(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

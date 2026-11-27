@@ -762,6 +762,17 @@ def test_a_watch_links_every_session_chat_actually_serves(tmp_path: Path) -> Non
 NEW_YORK = "America/New_York"
 
 
+def test_next_run_at_during_fall_back(monkeypatch) -> None:
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromisoformat("2026-11-01T01:50:00-04:00").astimezone(tz)
+
+    monkeypatch.setattr("storage.background.datetime", Frozen)
+    later = "2026-11-01T01:10:00-05:00"
+    assert compute_next_run_at(enabled=True, schedule_type="at", cron=None, run_at=later, timezone_name=NEW_YORK) == later
+
+
 def test_next_run_at_carries_the_offset_of_the_fire_time_not_of_today() -> None:
     """A daily task fires at the same wall-clock time year round, and the row
     prints that instant on the reader's clock.

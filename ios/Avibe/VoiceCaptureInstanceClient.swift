@@ -159,6 +159,12 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     static let mainSessionID = "ses_main"
 
     let target: VoiceCaptureTarget
+    /// Whether the instance page's direct hand-over is refused while this
+    /// client's hidden WebView lives (`DirectWebViewRegistry`). True for a
+    /// voice take: a connection closed just as it sends would lose audio the
+    /// user spoke. False for a caller whose requests are safe to make again
+    /// and that makes them again itself (the Lock Screen Turn card).
+    private let holdsOffHandover: Bool
     /// One id per take for its transcription: sending the take again
     /// repeats it, so the service can tell the same take from a new one.
     let dictationID: String
@@ -193,9 +199,11 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         backgroundCheck: (@MainActor () async -> DirectBackgroundCheck)? = nil,
         isActive: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
         sleep: @escaping (Duration) async -> Void = { try? await Task.sleep(for: $0) },
-        notePortCheck: @escaping (String) -> Void = { VoiceCapturePortChecks.note($0) }
+        notePortCheck: @escaping (String) -> Void = { VoiceCapturePortChecks.note($0) },
+        holdsOffHandover: Bool = true
     ) {
         self.target = target
+        self.holdsOffHandover = holdsOffHandover
         self.dictationID = dictationID
         let origin = target.origin
         let store = target.storeIdentifier
@@ -668,7 +676,9 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             forIdentifier: target.storeIdentifier
         )
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        DirectWebViewRegistry.shared.register(webView)
+        if holdsOffHandover {
+            DirectWebViewRegistry.shared.register(webView, as: .voice)
+        }
         webView.navigationDelegate = self
         self.webView?.navigationDelegate = nil
         self.webView = webView

@@ -712,6 +712,47 @@ def test_startup_is_bounded_and_independent_of_the_offer_and_path_use(instance, 
         assert ask(invalid) == []
 
 
+def test_handovers_log_each_ask_in_order_without_changing_the_offer(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    first = dict(age_s=86400, ms=2**31 - 1, refused="none", other="none", closed=2**31 - 1, kept=1, path="lan")
+    last = dict(age_s=0, ms=0, refused="other_documents", other="unloaded", closed=0, kept=0, path="relay")
+    answer = _post(client, {**_body(), "handovers": [first] * 7 + [last]})
+    assert answer.status_code == 200 and answer.get_json() == baseline
+    assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_rendezvous"] == [
+        "direct rendezvous handover age_s=86400 ms=2147483647 refused=none other=none closed=2147483647 kept=1 path=lan"
+    ] * 7 + ["direct rendezvous handover age_s=0 ms=0 refused=other_documents other=unloaded closed=0 kept=0 path=relay"]
+
+
+def test_malformed_handover_batches_leave_other_diagnostics_intact(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    good = dict(age_s=0, ms=1, refused="not_usable", other="none", closed=0, kept=0, path="none")
+    invalid = [None, [], good, [good] * 9, [good, None], [good, {}], [good, {**good, "app": "1"}]]
+    for key in ("age_s", "ms", "closed", "kept"):
+        for value in (True, 0.5, -1, 86401 if key == "age_s" else 2**31):
+            invalid.append([good, {**good, key: value}])
+    invalid.extend([[good, {**good, "refused": refused, "other": other}] for refused, other in (
+        ("none", "voice"), ("not_usable", "unknown"), ("other_documents", "none"),
+    )])
+    for key in ("refused", "other", "path"):
+        for value in ({}, None, "unrecognized"):
+            invalid.append([good, {**good, key: value}])
+    for entries in invalid:
+        caplog.clear()
+        answer = _post(client, {**_body(), "handovers": entries, "slow_store_removals_ms": [10]})
+        assert answer.status_code == 200 and answer.get_json() == baseline
+        assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_rendezvous"] == [
+            "direct rendezvous slow_store_removal ms=10"
+        ]
+
+
 def test_slow_store_removals_are_logged_in_milliseconds_without_changing_the_offer(instance, caplog):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))

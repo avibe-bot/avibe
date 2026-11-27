@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.3.5
+version: 0.3.6
 ---
 
 # Use Avibe Harness
@@ -10,7 +10,7 @@ version: 0.3.5
 For system alarms and personal reminders, load `use-system-schedule` first;
 device unavailability does not authorize substituting a Task.
 
-Avibe Harness turns user intent into durable Agent work: work that should happen later, repeat, wait for a signal, continue in the background, or move to a Bot, an Agent, or another Session. Avibe Harness is the first-choice automation layer: use `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, schedulers, hooks, or workflow tools, unless the user asks for native behavior or Harness cannot express the workflow and you say so. Backend-native work is process-local, so keep it synchronous within the turn and route anything that may outlive the turn through Harness. Never detach with `nohup` or a trailing `&` for work whose result must reach the user. Choose the object that owns the ongoing outcome, including its completion signal.
+Avibe Harness turns user intent into durable Agent work: scheduled, repeated, background, or delegated. Avibe Harness is the first-choice automation layer: use `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, schedulers, hooks, or workflow tools, unless the user asks for native behavior or Harness cannot express the workflow and you say so. Backend-native work is process-local, so keep it synchronous within the turn and route anything that may outlive the turn through Harness. Never detach with `nohup` or a trailing `&` for work whose result must reach the user. Choose the object that owns the ongoing outcome, including its completion signal.
 
 ### Mental model
 | Object | Meaning |
@@ -47,6 +47,7 @@ Dispatch inputs name how to report. A silent dispatched Turn gets one read recei
 Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions; it does not change delivery. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
 ### Tasks and Watches
+`vibe task update <id> --at <future>` or `--cron` re-arms a consumed one-shot, not an explicit pause. Check `enabled` and `next_run_at`.
 Tasks and Watches default to this Session. Use named cron weekdays (`mon-fri`), not numbers. Recurring commands report the second matching failure once to `--session-id` or the creating Session; without one, they send a notice. Success resets the count. One-shots report immediately. `--on-failure agent` or `none` reports every failure.
 
 Watch waiter contract: exit `0` only for one new reportable event, a retry code (default `75`) while still waiting, and `64` with `avibe-watch: no-event` on stderr for a quiet cycle with no Agent Run, which retires a once Watch and re-arms a forever one. A forever Watch needs a durable cursor, state transition, or cooldown so a condition that persists is not reported again; Avibe pauses a Watch that reports six events within 60 seconds.
@@ -59,4 +60,4 @@ Use `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|paus
 
 The running service applies these changes. `service_unavailable` or `unsupported_operation` with `execution: not_executed` means nothing changed: report it rather than starting, restarting, or updating the service. `execution_unknown` means the change may have landed: check with the matching `list` or `show` before trying again.
 
-The CLI has more options than this Skill lists. Before creating or changing Harness state, or when syntax or effects are uncertain, read `vibe <command> <subcommand> --help`.
+Before changing Harness state or if unsure, read `vibe <command> <subcommand> --help`.
