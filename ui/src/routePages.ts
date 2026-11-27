@@ -16,6 +16,7 @@ import { DeferredMentionEditor } from './components/workbench/deferredMentionEdi
 import { DeferredInboxPreview } from './components/workbench/InboxHoverPopover';
 import { DeferredMarkdown } from './components/ui/deferredMarkdown';
 import { LazyNewProjectDialog } from './components/workbench/LazyNewProjectDialog';
+import { loadSettingsCopy } from './i18n/settingsCopy';
 
 // The chat composer's editor arrives with the page, so the composer never waits on it.
 export const ChatPage = lazyPage(() => Promise.all([
@@ -33,8 +34,12 @@ export const SetupRemoteAccess = lazyPage(() => import('./components/onboarding/
 // The App routes' host: a native App window's body, or the page's own app route.
 export const StandaloneAppRoute = lazyPage(() => import('./components/apps/StandaloneAppRoute').then((m) => m.StandaloneAppRoute));
 
-// One chunk for all of Settings (settingsRoutePages.ts).
-const settings = () => import('./components/settings/settingsRoutePages');
+// One chunk for all of Settings (settingsRoutePages.ts). It loads with the copy
+// only Settings draws (src/i18n/settingsCopy.ts), and draws once both are here.
+const settings = () => Promise.all([
+  import('./components/settings/settingsRoutePages'),
+  loadSettingsCopy(),
+]).then(([m]) => m);
 
 export const SettingsLayout = lazyPage(() => settings().then((m) => m.SettingsLayout));
 export const SettingsGeneralPage = lazyPage(() => settings().then((m) => m.SettingsGeneralPage));

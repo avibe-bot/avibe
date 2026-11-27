@@ -3,7 +3,7 @@ import { initReactI18next } from 'react-i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 
 import { forDevicePlatform } from './device';
-import { APP_LANGUAGES, I18N_OPTIONS, type AppLanguage } from './options';
+import { APP_LANGUAGES, I18N_OPTIONS, SETTINGS_COPY_NAMESPACE, type AppLanguage } from './options';
 
 // The Web UI's copy, one language at a time (docs/plans/web-ui-first-load.md):
 // each locale is its own chunk, and the first screen downloads only the one it
@@ -12,9 +12,22 @@ import { APP_LANGUAGES, I18N_OPTIONS, type AppLanguage } from './options';
 // before the first render costs no extra round trip. A later switch (the
 // language picker, or the instance's saved language) keeps the current
 // language on screen until the other one's copy has arrived.
-const BUNDLES: Record<AppLanguage, () => Promise<{ default: object }>> = {
-  en: () => import('./en.json'),
-  zh: () => import('./zh.json'),
+//
+// Each language is also split by surface (scripts/localeSurfaces.ts): the
+// first screen's copy is `translation`, and the copy only the Settings pages
+// (with the Model Hub) draw is the `settings` namespace, which loads with them
+// (./settingsCopy.ts). Keys are the catalog's own in both: a lookup that misses
+// `translation` reads `settings`.
+type Bundle = () => Promise<{ default: object }>;
+const BUNDLES: Record<AppLanguage, Record<string, Bundle>> = {
+  en: {
+    translation: () => import('virtual:avibe-copy/en/first'),
+    [SETTINGS_COPY_NAMESPACE]: () => import('virtual:avibe-copy/en/settings'),
+  },
+  zh: {
+    translation: () => import('virtual:avibe-copy/zh/first'),
+    [SETTINGS_COPY_NAMESPACE]: () => import('virtual:avibe-copy/zh/settings'),
+  },
 };
 
 const isAppLanguage = (code: string): code is AppLanguage => (APP_LANGUAGES as readonly string[]).includes(code);
@@ -22,16 +35,17 @@ const isAppLanguage = (code: string): code is AppLanguage => (APP_LANGUAGES as r
 const lazyBundles: BackendModule = {
   type: 'backend',
   init() {},
-  read(language, _namespace, callback) {
+  read(language, namespace, callback) {
     // A locale's copy lives under its base code. A regional or unsupported code
     // ('zh-CN', 'fr') resolves through that base, or through English, so it
     // reads nothing of its own.
-    if (!isAppLanguage(language)) {
+    const bundle = isAppLanguage(language) ? BUNDLES[language][namespace] : undefined;
+    if (!bundle) {
       callback(null, {});
       return;
     }
-    BUNDLES[language]().then(
-      (bundle) => callback(null, forDevicePlatform(bundle.default)),
+    bundle().then(
+      (loaded) => callback(null, forDevicePlatform(loaded.default)),
       (error: unknown) => callback(error instanceof Error ? error : String(error), false),
     );
   },
@@ -44,6 +58,9 @@ export const i18nReady: Promise<void> = i18n
   .use(initReactI18next)
   .init({
     ...I18N_OPTIONS,
+    ns: ['translation'],
+    defaultNS: 'translation',
+    fallbackNS: SETTINGS_COPY_NAMESPACE,
     // Chinese reads no English fallback, so a Chinese page never downloads the
     // English copy: both locales carry exactly the same keys
     // (src/i18n/keyCoverage.test.ts resolves every key the app asks for in each

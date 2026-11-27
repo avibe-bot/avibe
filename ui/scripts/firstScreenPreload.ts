@@ -17,7 +17,8 @@
 // A wrong guess only costs that download later, or one that goes unused.
 import type { Plugin, Rolldown } from 'vite';
 
-const LOCALES = { en: '/src/i18n/en.json', zh: '/src/i18n/zh.json' } as const;
+// The first screen's copy in each language (scripts/localeSurfaces.ts).
+const LOCALES = { en: 'virtual:avibe-copy/en/first', zh: 'virtual:avibe-copy/zh/first' } as const;
 const CHAT_MODULES = ['/src/components/workbench/ChatPage.tsx', '/src/components/workbench/MentionEditor.tsx'];
 // The key src/lib/pwaRouteMemory.ts stores the restorable page under.
 const PWA_LAST_ROUTE_KEY = 'avibe.pwa.last-route.v1';

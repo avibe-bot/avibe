@@ -27,6 +27,13 @@ export const rememberLanguageChoice = (code: string): void => {
   }
 };
 
+/**
+ * The Web UI's copy only the Settings pages (with the Model Hub) draw
+ * (scripts/localeSurfaces.ts). Its keys are the same as in the
+ * catalog: `t('settings.…')` reads `translation`, then this namespace.
+ */
+export const SETTINGS_COPY_NAMESPACE = 'settings';
+
 /** What every i18next instance of the app is initialized with, wherever its copy comes from. */
 export const I18N_OPTIONS = {
   fallbackLng: 'en',
