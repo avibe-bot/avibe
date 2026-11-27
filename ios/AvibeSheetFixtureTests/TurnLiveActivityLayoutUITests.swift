@@ -120,3 +120,119 @@ final class TurnLiveActivityLayoutUITests: XCTestCase {
             .press(forDuration: 0.1, thenDragTo: springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)))
     }
 }
+
+/// The Action Button's voice card as the system draws it, through the same
+/// DEBUG seam (`AVIBE_FIXTURE_VOICE_ACTIVITY`): a listening take's expanded
+/// island must show its clock at the island's trailing side, not off-centre
+/// above the title (11-26: a timer text of unbounded width filled its region
+/// and drew at that region's leading edge).
+final class VoiceLiveActivityLayoutUITests: XCTestCase {
+    private let app = XCUIApplication(bundleIdentifier: "bot.avibe.ios")
+    private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    private let titles: Set<String> = ["Listening", "正在听"]
+    private let sends: Set<String> = ["Send", "发送"]
+    private let clockPattern = #"^\d+:\d\d$"#
+
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+    }
+
+    override func tearDown() {
+        // No card outlives the test: the island would sit over later pages.
+        springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
+            .press(forDuration: 0.1, thenDragTo: springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)))
+        app.launchEnvironment = ["AVIBE_FIXTURE_VOICE_ACTIVITY": "end"]
+        app.launch()
+        XCUIDevice.shared.press(.home)
+        let gone = XCTNSPredicateExpectation(
+            predicate: NSPredicate { [self] _, _ in elements().allSatisfy { $0.kind != .clock } },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 30), .completed, "The fixture voice card did not end")
+        app.terminate()
+        super.tearDown()
+    }
+
+    func testAListeningTakesClockSitsAtTheExpandedIslandsTrailingSide() {
+        app.launchEnvironment["AVIBE_FIXTURE_VOICE_ACTIVITY"] = #"{"elapsed":54}"#
+        app.launch()
+        XCUIDevice.shared.press(.home)
+
+        // The compact island first: the card is up (the extension's cold start can take 30 s on CI).
+        var last: [Shown] = []
+        let compact = XCTNSPredicateExpectation(
+            predicate: NSPredicate { [self] _, _ in
+                last = elements()
+                return last.contains { $0.kind == .clock && onScreen($0.frame) }
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [compact], timeout: 90), .completed, "No voice card in the compact island: \(last)")
+
+        springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.035)).press(forDuration: 1.5)
+        var clock: Shown?, title: Shown?, send: Shown?
+        let expanded = XCTNSPredicateExpectation(
+            predicate: NSPredicate { [self] _, _ in
+                last = elements()
+                clock = last.first { $0.kind == .clock }
+                title = last.first { $0.kind == .title }
+                send = last.first { $0.kind == .send }
+                return [clock, title, send].allSatisfy { $0.map { onScreen($0.frame) } ?? false }
+            },
+            object: nil
+        )
+        let result = XCTWaiter.wait(for: [expanded], timeout: 30)
+        // The frame itself, for a person to look at, whatever the result.
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "voice expanded island"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let tree = XCTAttachment(string: springboard.debugDescription)
+        tree.name = "voice expanded island SpringBoard elements"
+        tree.lifetime = .keepAlways
+        add(tree)
+        XCTAssertEqual(result, .completed, "The expanded voice island is not on screen: \(last)")
+        guard let clock, let title, let send else { return }
+        // To the right of the title, and at the island's trailing side: its
+        // middle right of the Send button's, which fills the right half of
+        // the island's width. A clock standing above the title fails both.
+        XCTAssertGreaterThanOrEqual(clock.frame.minX, title.frame.maxX, "clock \(clock.frame), title \(title.frame)")
+        XCTAssertGreaterThan(clock.frame.midX, send.frame.midX, "clock \(clock.frame), Send \(send.frame)")
+    }
+
+    private enum Kind { case clock, title, send }
+
+    private struct Shown: CustomStringConvertible {
+        let label: String
+        let frame: CGRect
+        let kind: Kind
+        var description: String { "\(label) \(frame)" }
+    }
+
+    /// One snapshot of SpringBoard, read here: its query engine does not
+    /// match the clock's label by pattern.
+    private func elements() -> [Shown] {
+        guard let root = try? springboard.snapshot() else { return [] }
+        var found: [Shown] = []
+        var pending: [XCUIElementSnapshot] = [root]
+        while let element = pending.popLast() {
+            pending.append(contentsOf: element.children)
+            let label = element.label
+            if label.range(of: clockPattern, options: .regularExpression) != nil {
+                found.append(Shown(label: label, frame: element.frame, kind: .clock))
+            } else if titles.contains(label) {
+                found.append(Shown(label: label, frame: element.frame, kind: .title))
+            } else if sends.contains(label) {
+                found.append(Shown(label: label, frame: element.frame, kind: .send))
+            }
+        }
+        return found
+    }
+
+    private func onScreen(_ frame: CGRect) -> Bool {
+        let screen = springboard.frame
+        return [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+            && frame.width > 0 && frame.height > 0 && screen.contains(frame)
+    }
+}
