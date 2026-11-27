@@ -24,7 +24,7 @@ def add_mobile_parser(subparsers) -> None:
     commands = health.add_subparsers(dest="mobile_command", required=True)
     commands.add_parser("status", help="Show device connection and sync freshness")
     read = commands.add_parser("read", help="Read daily health data from this instance")
-    read.add_argument("--metric", default=",".join(METRICS), help="Comma-separated steps,activity,workouts,sleep")
+    read.add_argument("--metric", default=",".join(METRICS), help="Comma-separated health metrics")
     window = read.add_mutually_exclusive_group()
     window.add_argument("--period", choices=["today", "yesterday", "last7d", "last30d"])
     window.add_argument("--from", dest="from_day", metavar="YYYY-MM-DD")
@@ -34,6 +34,7 @@ def add_mobile_parser(subparsers) -> None:
     read.add_argument("--wait", type=float, default=None, metavar="S", help="Seconds to wait for refresh (default 20)")
     connect = commands.add_parser("connect", help="Request authorization on iPhone")
     connect.add_argument("--wait", type=float, default=0, metavar="S")
+    connect.add_argument("--metric", default=",".join(METRICS), help="Metrics to confirm on iPhone")
     for parser in (read, connect):
         callbacks = parser.add_mutually_exclusive_group()
         callbacks.add_argument("--callback-session-id", metavar="ID")
@@ -96,7 +97,7 @@ def _callback(args) -> str | None:
     return session_id
 
 
-def _request(store, operation, identity, args, *, names=METRICS, caller="local"):
+def _request(store, operation, identity, args, *, names=METRICS, caller="local", expand=False):
     seconds = _seconds(args.wait)
     callback = _callback(args)
     waiter_id = secrets.token_hex(16) if seconds else None
@@ -108,7 +109,7 @@ def _request(store, operation, identity, args, *, names=METRICS, caller="local")
     try:
         request, created = store.create_request(
             operation, identity, names=names, caller=caller, callback_session=callback,
-            waiter_id=waiter_id, wait_seconds=seconds,
+            waiter_id=waiter_id, wait_seconds=seconds, expand=expand,
         )
         if created:
             try:
@@ -164,10 +165,14 @@ def execute(args) -> dict:
     if command == "status":
         return {"kind": "mobile_health", **store.status()}
     if command == "connect":
-        if store.status()["connected"]:
-            return {"kind": "mobile_health", **store.status()}
+        status = store.status()
+        names = metrics(args.metric.split(","))
+        if status["connected"]:
+            names = [name for name in names if name not in status["confirmed_metrics"]]
+            if not names:
+                return {"kind": "mobile_health", **status}
         return {"kind": "mobile_request", "request": _request(
-            store, "health.connect", identity, args, caller=caller,
+            store, "health.connect", identity, args, names=names, caller=caller, expand=status["connected"],
         )}
     names = metrics(args.metric.split(","))
     start, end = _window(args, today=store.calendar_today())

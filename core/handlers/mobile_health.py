@@ -63,6 +63,7 @@ def request_metadata(request: dict) -> dict:
         "id", "operation", "state", "created_at", "expires_at", "requires_user", "metrics",
     )}
     error = request.get("error")
+    metadata["minimum_health_version"] = request.get("minimum_health_version", 1)
     metadata["error"] = {"code": error["code"]} if error and error.get("code") in PHONE_ERRORS else None
     return metadata
 

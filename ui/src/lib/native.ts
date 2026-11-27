@@ -375,7 +375,7 @@ export function desktopDeviceDescription(): unknown {
 }
 
 /** Establishes a connection only; request completion comes from the instance API. */
-export async function nativeHealthConnect(params: { requestId: string; pairingCode: string }): Promise<{ state: 'connected' | 'declined' | 'failed' } | null> {
+export async function nativeHealthConnect(params: { requestId: string; pairingCode: string; supportedMetrics?: string[]; requestedMetrics?: string[]; expansion?: boolean }): Promise<{ state: 'connected' | 'declined' | 'failed' } | null> {
   return callNative('health', 'health.connect', params);
 }
 

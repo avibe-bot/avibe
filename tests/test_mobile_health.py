@@ -498,7 +498,7 @@ def test_device_http_auth_scope_owner_pairing_and_no_cookie_health_read(store, m
     status = client.get(f"/api/mobile/requests/{request['id']}")
     assert status.status_code == 200
     assert set(status.get_json()) == {
-        "id", "operation", "state", "created_at", "expires_at", "requires_user", "metrics", "error",
+        "id", "operation", "state", "created_at", "expires_at", "requires_user", "metrics", "error", "minimum_health_version",
     }
     for path in ("/api/mobile/health", "/api/mobile/device/v1/health/days"):
         assert client.get(path, headers=headers).status_code in {404, 405}
@@ -1678,3 +1678,137 @@ def test_native_health_push_filters_owner_and_keeps_budget_across_endpoint_rotat
     clock[0] += timedelta(hours=1)
     mobile_health.notify_phone(store, request, IDENTITY, caller="synthetic Agent")
     assert len(sent) == 4 and "987654321" not in json.dumps(sent)
+
+
+def test_replacement_cannot_recover_days_no_longer_readable_on_phone(store):
+    """A retained day outside routine resync is lost if HealthKit cannot backfill it."""
+    first, _ = pair_device(store)
+    store.upload(device_for(store, first), upload_payload(day="2026-11-01"))
+    assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"]
+    second, _ = pair_device(store)
+    store.upload(device_for(store, second), upload_payload(day="2026-11-01", empty=True))
+    assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"] is None
+
+
+def heart_manifest(names, **extra):
+    return dict(contract=1, app_version="2", os_version="26", timezone="Asia/Shanghai",
+                metrics=names, background_delivery=True, push_wake=False, **extra)
+
+
+def test_heart_expansion_preserves_identity_history_and_request_scopes(store):
+    from core.mobile_health_contract import METRICS
+    paired, _ = pair_device(store)
+    old = device_for(store, paired)
+    store.upload(old, upload_payload(day="2026-11-01"))
+    refresh, _ = store.create_request("health.refresh", IDENTITY)
+    expansion, _ = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=True)
+    assert expansion["minimum_health_version"] == 2
+    assert expansion["metrics"] == ["hrv"]
+    code = store.issue_pairing(expansion["id"], IDENTITY)
+    assert code["supported_metrics"] == list(METRICS)
+    assert code["expansion"] is True
+    assert all(r["id"] != expansion["id"] for r in store.claim(old["id"], maximum=10)["requests"])
+    response = store.manifest(old, heart_manifest(["steps", "sleep", "hrv"],
+                              pairing_code=code["pairing_code"], request_id=expansion["id"]))
+    assert response["confirmed_metrics"] == ["steps", "sleep", "hrv"]
+    assert device_for(store, paired)["device_seq"] == 1
+    assert store.show_request(refresh["id"])["metrics"] == ["steps", "sleep"]
+    assert store.read(["steps"], "2026-11-01", "2026-11-01", caller="test")["metrics"]["steps"]["items"][0]["value"]
+    # The exact approved request is idempotent after the response was lost.
+    assert store.manifest(old, heart_manifest(["steps", "sleep", "hrv"],
+                          pairing_code=code["pairing_code"], request_id=expansion["id"]))["confirmed_metrics"] == response["confirmed_metrics"]
+    with pytest.raises(MobileError):
+        store.manifest(old, heart_manifest(list(METRICS)))
+
+
+def test_heart_values_and_missing_rows_are_distinct(store):
+    values = {"heart_rate": {"min_bpm": 50, "average_bpm": 70.5, "max_bpm": 130},
+              "resting_heart_rate": {"bpm": 55}, "hrv": {"sdnn_ms": 42.5}}
+    paired, _ = pair_device(store, names=list(values))
+    device = device_for(store, paired)
+    payload = upload_payload(names=tuple(values))
+    for row in payload["items"]:
+        row["value"] = values[row["metric"]]
+    store.upload(device, payload)
+    result = store.read(list(values), "2026-11-17", "2026-11-18", caller="test")
+    for name, value in values.items():
+        assert result["metrics"][name]["items"][0]["availability"] == "not_synced"
+        assert result["metrics"][name]["items"][1]["value"] == value
+    payload["items"][0]["value"]["average_bpm"] = 140
+    with pytest.raises(MobileError, match="invalid_payload"):
+        validate_upload(payload, allowed_metrics=list(values))
+
+
+@pytest.mark.parametrize("failure", ["wrong-device", "expired", "overbroad", "revoked", "missing-code"])
+def test_heart_expansion_failure_cannot_change_existing_data_or_consent(store, clock, failure):
+    paired, _ = pair_device(store)
+    original = device_for(store, paired)
+    store.upload(original, upload_payload(day="2026-11-01"))
+    request, _ = store.create_request("health.connect", IDENTITY, names=["hrv"], expand=True)
+    code = store.issue_pairing(request["id"], IDENTITY)["pairing_code"]
+    target = original
+    names = ["steps", "sleep", "hrv"]
+    if failure == "wrong-device":
+        other, _ = pair_device(store, installation="other-phone")
+        target = device_for(store, other)
+    elif failure == "expired":
+        clock[0] += timedelta(minutes=6)
+    elif failure == "overbroad":
+        names.append("heart_rate")
+    elif failure == "revoked":
+        store.revoke(device_id=original["id"])
+    elif failure == "missing-code":
+        code = "invalid-code"
+    with pytest.raises(MobileError):
+        store.manifest(target, heart_manifest(names, pairing_code=code, request_id=request["id"]))
+    if failure != "revoked":
+        assert json.loads(device_for(store, paired)["metrics"]) == ["steps", "sleep"]
+        with store.transaction() as conn:
+            assert conn.execute("SELECT count(*) FROM health_days WHERE device_id=?", (original["id"],)).fetchone()[0] == 2
+    else:
+        assert store.show_request(request["id"])["state"] == "canceled"
+
+
+@pytest.mark.parametrize("metric,value", [
+    ("heart_rate", {"min_bpm": 70, "average_bpm": 50, "max_bpm": 80}),
+    ("heart_rate", {"min_bpm": 50, "average_bpm": 70, "max_bpm": float("inf")}),
+    ("resting_heart_rate", {"bpm": True}),
+    ("resting_heart_rate", {"bpm": -1}),
+    ("hrv", {"sdnn_ms": float("nan")}),
+    ("hrv", {"sdnn_ms": 40, "sample_count": 2}),
+])
+def test_heart_values_reject_invalid_numbers_and_unknown_fields(metric, value):
+    payload = upload_payload(names=(metric,))
+    payload["items"][0]["value"] = value
+    with pytest.raises(MobileError, match="invalid_payload"):
+        validate_upload(payload, allowed_metrics=[metric])
+
+
+def test_legacy_device_on_new_instance_keeps_four_metric_claims(store):
+    from core.mobile_health_contract import LEGACY_METRICS, METRICS
+    paired, _ = pair_device(store, names=list(LEGACY_METRICS))
+    device = device_for(store, paired)
+    response = store.manifest(device, heart_manifest(list(LEGACY_METRICS)))
+    assert response["supported_metrics"] == list(METRICS)
+    refresh, _ = store.create_request("health.refresh", IDENTITY, names=["hrv"])
+    assert refresh["metrics"] == list(LEGACY_METRICS)
+    result = store.read(["hrv"], "2026-11-18", "2026-11-18", caller="test")["metrics"]["hrv"]
+    assert result["confirmation_required"]
+    assert result["items"][0]["availability"] == "not_synced"
+
+
+def test_heart_expansion_migration_preserves_released_rows_and_old_named_writers(store):
+    paired, request = pair_device(store)
+    store.upload(device_for(store, paired), upload_payload())
+    with store.transaction() as conn:
+        before = {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
+                  for table in ("devices", "health_days", "metric_sync")}
+        conn.execute("ALTER TABLE requests DROP COLUMN consent_device_id")
+    upgraded = MobileStore(store.path)
+    with upgraded.transaction() as conn:
+        for table, rows in before.items():
+            assert [dict(row) for row in conn.execute(f"SELECT * FROM {table}")] == rows
+        # The original, named UPDATE ignores the additive column after downgrade.
+        conn.execute("UPDATE requests SET caller=? WHERE id=?", ("released-writer", request["id"]))
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert upgraded.show_request(request["id"])["minimum_health_version"] == 1

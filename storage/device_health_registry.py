@@ -27,6 +27,9 @@ def issue_pairing(store, request_id, identity, viewer):
         except DeviceError:
             raise MobileError("device_unauthorized", 401) from None
         result = store.issue_pairing(request_id, identity)
+        if result.get("expansion"):
+            # This device keeps its original registry link and sign-out lifecycle.
+            return result
         conn.execute(
             links.insert().values(
                 mobile_id="mdev_" + secrets.token_hex(16),

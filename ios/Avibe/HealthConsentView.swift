@@ -5,6 +5,21 @@ struct HealthConsentView: View {
     let answer: (Bool) -> Void
     @State private var showsPrivacyDetails = false
 
+    private var metricList: String {
+        let labels = request.metrics.map { metric in
+            switch metric {
+            case "steps": String(localized: "health.metric.steps")
+            case "activity": String(localized: "health.metric.activity")
+            case "workouts": String(localized: "health.metric.workouts")
+            case "sleep": String(localized: "health.metric.sleep")
+            case "heart_rate": String(localized: "health.metric.heart_rate")
+            case "resting_heart_rate": String(localized: "health.metric.resting_heart_rate")
+            default: String(localized: "health.metric.hrv")
+            }
+        }
+        return ListFormatter.localizedString(byJoining: labels)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -15,14 +30,14 @@ struct HealthConsentView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                     Label {
-                        Text(String(localized: "health.metrics"))
+                        Text(metricList.prefix(1).uppercased() + metricList.dropFirst())
                     } icon: {
                         Image(systemName: "heart")
                             .foregroundStyle(AvibeStyle.accent)
                     }
                 }
                 Section {
-                    Text(String.localizedStringWithFormat(String(localized: "health.summary"), request.target.name))
+                    Text(String.localizedStringWithFormat(String(localized: "health.summary.metrics"), metricList, request.target.name))
                 }
                 Section {
                     Text(String(localized: "health.access_summary"))

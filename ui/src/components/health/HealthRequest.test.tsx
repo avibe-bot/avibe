@@ -38,6 +38,31 @@ beforeEach(() => {
 afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'avibeNative'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('Health request production consumers (synthetic server and native peer)', () => {
+  it('requires the new native capability before expanding an existing connection', () => {
+    installBridge({ health: 1 });
+    const expansion = { ...request, minimum_health_version: 2, metrics: ['hrv'] };
+    expect(healthRequestView(expansion)).toBe('needsUpdate');
+    expect(healthRequestView(request)).toBe('authorize');
+    installBridge({ health: 2 });
+    expect(healthRequestView(expansion)).toBe('authorize');
+  });
+
+  it('forwards the negotiated types only to a shell supporting expansion', async () => {
+    const call = installBridge({ health: 2 });
+    current = { ...request, minimum_health_version: 2, metrics: ['hrv'] };
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === `/api/mobile/requests/${request.id}`) return Response.json(current);
+      return Response.json({ pairing_code: 'synthetic-code', supported_metrics: ['steps', 'hrv'], metrics: ['hrv'], expansion: true });
+    });
+    mount(<Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Authorize on iPhone' }));
+    await screen.findByRole('heading', { name: 'Connected' });
+    expect(call).toHaveBeenCalledWith('health.connect', {
+      requestId: request.id, pairingCode: 'synthetic-code', supportedMetrics: ['steps', 'hrv'],
+      requestedMetrics: ['hrv'], expansion: true,
+    });
+  });
+
   it('binds pairing to the request with CSRF and keeps connected distinct from sync completion', async () => {
     const call = installBridge();
     mount(<Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>);

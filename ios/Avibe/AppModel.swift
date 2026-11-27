@@ -954,9 +954,9 @@ final class AppModel: ObservableObject {
 
     /// App metadata is read by the Runtime on document load. The catalog,
     /// rather than the runtime's creation-time snapshot, owns its display name.
-    func connectHealth(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
+    func connectHealth(requestID: String, pairingCode: String, origin: WebOrigin, options: HealthConnectionOptions) async -> String {
         guard !route.coversRuntime, let healthSync else { return "failed" }
-        return await healthSync.connect(requestID: requestID, pairingCode: pairingCode, origin: origin)
+        return await healthSync.connect(requestID: requestID, pairingCode: pairingCode, origin: origin, options: options)
     }
 
     private var liveActivityTarget: TurnActivityCoordinator.Target? {

@@ -6,7 +6,7 @@ import WebKit
 
 typealias LiveActivityAction = @MainActor (NativeBridgeRequest, WebOrigin) async throws -> [String: Any]
 
-typealias HealthConnectAction = @MainActor (String, String, WebOrigin) async -> String
+typealias HealthConnectAction = @MainActor (String, String, WebOrigin, HealthConnectionOptions) async -> String
 
 struct NativeBridgePolicy {
     let instanceOrigin: WebOrigin
@@ -29,7 +29,7 @@ struct NativeShellMetadata: Equatable {
         "c1.share_draft": 1,
         "device": 1,
         "haptics": 1,
-        "health": 1,
+        "health": 2,
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
@@ -439,7 +439,7 @@ enum NativeBridgeConfiguration {
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
-        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
+        healthConnect: @escaping HealthConnectAction = { _, _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
         appLock: AppLockBridging? = nil,
         voiceCapture: NativeHoldCapture? = nil,
@@ -1267,11 +1267,23 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 }
             }
         case .healthConnect:
-            guard request.params.count == 2,
+            guard Set(request.params.keys).isSubset(of: ["requestId", "pairingCode", "supportedMetrics", "requestedMetrics", "expansion"]),
                   let requestID = request.params["requestId"] as? String, !requestID.isEmpty, requestID.count <= 256,
                   let code = request.params["pairingCode"] as? String, !code.isEmpty, code.count <= 256 else {
                 reply(replyHandler, error: .invalidArgument("health.connect requires requestId and pairingCode."))
                 return
+            }
+            var options = HealthConnectionOptions()
+            if request.params["supportedMetrics"] != nil || request.params["requestedMetrics"] != nil || request.params["expansion"] != nil {
+                guard let supported = request.params["supportedMetrics"] as? [String],
+                      let requested = request.params["requestedMetrics"] as? [String],
+                      let expansion = request.params["expansion"] as? Bool,
+                      !supported.isEmpty, !requested.isEmpty,
+                      supported.count <= 32, requested.count <= 32 else {
+                    reply(replyHandler, error: .invalidArgument("Invalid Health metric capabilities."))
+                    return
+                }
+                options = .init(supportedMetrics: supported, requestedMetrics: requested, expansion: expansion)
             }
             let origin = policy.instanceOrigin
             Task { @MainActor [weak self, weak sourceWebView] in
@@ -1279,7 +1291,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
                     return
                 }
-                let state = await self.healthConnect(requestID, code, origin)
+                let state = await self.healthConnect(requestID, code, origin, options)
                 guard let replyURL = sourceWebView?.url, WebOrigin(url: replyURL, requiresHTTPS: false) == origin else {
                     self.reply(replyHandler, error: .forbidden)
                     return

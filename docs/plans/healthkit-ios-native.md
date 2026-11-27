@@ -328,3 +328,9 @@ HealthKit observer timing are reviewed in code only. After a two-factor pause,
 `cancelAll` does not wait for cancelled transfers; if the user reauthenticates
 quickly, a cancelled transfer's late completion can schedule one spurious retry
 and delay that payload by up to about 30 seconds, without a loop or data loss.
+
+
+Heart metrics, capability negotiation and confirmation of additional types follow
+[the daily heart-metric contract](health-heart-metrics.md). An App upgrade alone
+does not request permission or enable new types; the existing connection and
+its immutable outbox survive an explicit expansion.

@@ -78,7 +78,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
-        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
+        healthConnect: @escaping HealthConnectAction = { _, _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         directInstanceLoad: DirectInstanceLoadNote? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },

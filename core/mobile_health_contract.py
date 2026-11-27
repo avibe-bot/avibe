@@ -7,7 +7,8 @@ import math
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-METRICS = ("steps", "activity", "workouts", "sleep")
+LEGACY_METRICS = ("steps", "activity", "workouts", "sleep")
+METRICS = (*LEGACY_METRICS, "heart_rate", "resting_heart_rate", "hrv")
 PHONE_ERRORS = frozenset({
     "protected_data_unavailable", "capability_unavailable", "user_declined", "internal",
 })
@@ -111,6 +112,14 @@ def _metric_value(metric: str, value: Any) -> None:
             for key in ("duration_minutes", "active_energy_kcal", "distance_m"):
                 if key in workout:
                     _number(workout[key])
+    elif metric in {"heart_rate", "resting_heart_rate", "hrv"}:
+        fields = {"heart_rate": {"min_bpm", "average_bpm", "max_bpm"},
+                  "resting_heart_rate": {"bpm"}, "hrv": {"sdnn_ms"}}[metric]
+        object_fields(value, fields)
+        for item in value.values():
+            _number(item)
+        if metric == "heart_rate" and not value["min_bpm"] <= value["average_bpm"] <= value["max_bpm"]:
+            raise MobileError("invalid_payload")
     else:
         object_fields(value, {"asleep_minutes", "in_bed_minutes", "start_at", "end_at", "stages"})
         for component in ("asleep_minutes", "in_bed_minutes"):
