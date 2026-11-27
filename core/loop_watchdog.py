@@ -57,13 +57,15 @@ logger = logging.getLogger(__name__)
 STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
-# A heavily used controller tracked 0.9-1.05 M objects within five minutes of start,
-# and the count did not trend up over two hours. Until the freeze, every full
-# collection rescans them: minutes 10-120 after each restart held 212-321 collections
-# over 200 ms (76-195 s of pauses). Counts are not identity: which objects a ten-minute
-# freeze retains (recovery still running, later first-use imports left unfrozen) is
-# an unmeasured trade-off, bounded by the same unfreeze rollback.
-WARM_FREEZE_AFTER_SECONDS = 600
+# Observed under the ten-minute freeze, across eight starts of a heavily used
+# controller: 209 full collections over 200 ms (49 s) in minutes 0-9, spread evenly,
+# and 0.9-1.1 M tracked objects by the first logged slow collection (7-155 s after
+# start). Estimate, not measured: by count, about 87% of those fell after minute 2.
+# The freeze applies only after the first full collection past this point finishes,
+# so that collection is not avoided. Counts are not identity: which objects an early
+# freeze retains (startup recovery still running, later first-use imports left
+# unfrozen) and its memory effect are unmeasured, bounded by the same unfreeze rollback.
+WARM_FREEZE_AFTER_SECONDS = 120
 _MAX_GC_REPORTS = 64
 _MAX_OWN_CODES = 200_000
 # Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
