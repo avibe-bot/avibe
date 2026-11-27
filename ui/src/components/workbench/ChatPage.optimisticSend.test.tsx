@@ -390,10 +390,19 @@ describe('ChatPage optimistic send', () => {
     }));
     mocks.restoreUnsent.mockReturnValueOnce(false);
     mocks.readerPrincipal = 'local';
-    await openChat();
+    // The chat has older history; the send is not in it.
+    const olderReads: unknown[] = [];
+    mocks.api.listSessionMessages.mockImplementation(async (_id: string, params: unknown) => {
+      olderReads.push(params);
+      return { messages: [], next_after_id: null, next_before_id: null };
+    });
+    mount();
+    await act(async () => live.resolve({ ...bootstrap([message('m1', 'earlier answer')]), next_before_id: 'm1' }));
 
     await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    // Older history is read once; the retry only asks the composer again.
+    expect(olderReads).toEqual([expect.objectContaining({ beforeId: 'm1' })]);
     expect(mocks.restoreUnsent).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'never answered' }));
     expect(Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'))).toEqual([]);
   });

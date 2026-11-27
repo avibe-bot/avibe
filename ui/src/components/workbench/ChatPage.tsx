@@ -323,6 +323,7 @@ const OLDER_PAGE_SIZE = 50;
 const RESTORE_MAX_OLDER_PAGES = 10;
 const RESTORE_CLOCK_SKEW_MS = 15 * 60_000;
 const RESTORE_RETRY_MS = 1_000;
+const RESTORE_RETRY_MAX_MS = 60_000;
 // Wheel events have no gesture-end event; an idle gap ends a momentum burst.
 const PAGING_WHEEL_IDLE_MS = 200;
 
@@ -1855,6 +1856,12 @@ export const ChatPage: React.FC = () => {
     /** The composer refused one (busy sending, voice owns the draft), or the page
      *  moved on meanwhile: try again shortly, or on the next change. */
     retry: boolean;
+    /** Sends already looked for through older history and not found there: a
+     *  retry checks only the latest window and the queue for them. */
+    unheld: Set<string>;
+    /** The one scheduled retry, and how many reads in a row have failed (its backoff). */
+    timer: number | null;
+    failures: number;
   };
   const restorePassRef = useRef<RestorePass | null>(null);
   const [restoreRetry, setRestoreRetry] = useState(0);
@@ -1888,7 +1895,8 @@ export const ChatPage: React.FC = () => {
     const principal = readerPrincipal ?? null;
     if (!principal || readerProvisional) return;
     if (pass?.sessionId !== sessionId) {
-      pass = { sessionId, sends: new Map(), running: false, retry: false };
+      if (pass?.timer != null) window.clearTimeout(pass.timer);
+      pass = { sessionId, sends: new Map(), running: false, retry: false, unheld: new Set(), timer: null, failures: 0 };
       restorePassRef.current = pass;
     }
     const current = pass;
@@ -1901,10 +1909,16 @@ export const ChatPage: React.FC = () => {
         || heldClientIdsRef.current?.sessionId !== sessionId || sessionIdRef.current !== sessionId
         || reader.principal !== principal || reader.provisional;
     };
+    // One timer per pass; after failed reads it waits longer each time.
     const tryAgain = () => {
       if (restorePassRef.current !== current) return;
       current.retry = true;
-      window.setTimeout(() => setRestoreRetry((n) => n + 1), RESTORE_RETRY_MS);
+      if (current.timer !== null) return;
+      const delay = Math.min(RESTORE_RETRY_MS * 2 ** current.failures, RESTORE_RETRY_MAX_MS);
+      current.timer = window.setTimeout(() => {
+        current.timer = null;
+        setRestoreRetry((n) => n + 1);
+      }, delay);
     };
     void (async () => {
       try {
@@ -1920,11 +1934,13 @@ export const ChatPage: React.FC = () => {
         // of it by later rows is found by reading older pages back to a little
         // before the oldest send (the device's clock may differ from the instance's).
         const shown = new Set(heldClientIdsRef.current!.ids);
-        const since = Math.min(...unsent.map((send) => send.sentAt)) - RESTORE_CLOCK_SKEW_MS;
-        let cursor = heldClientIdsRef.current!.olderCursor;
+        const unread = unsent.filter((send) => !shown.has(send.clientId) && !current.unheld.has(send.clientId));
+        const since = Math.min(...unread.map((send) => send.sentAt)) - RESTORE_CLOCK_SKEW_MS;
+        let cursor = unread.length > 0 ? heldClientIdsRef.current!.olderCursor : null;
         for (let page = 0; cursor && page < RESTORE_MAX_OLDER_PAGES; page += 1) {
-          if (unsent.every((send) => shown.has(send.clientId))) break;
+          if (unread.every((send) => shown.has(send.clientId))) break;
           const older = await api.listSessionMessages(sessionId, { beforeId: cursor, limit: OLDER_PAGE_SIZE, cache: false });
+          if (stale()) return tryAgain();
           for (const row of older.messages) {
             const clientId = clientMessageIdOf(row);
             if (clientId) shown.add(clientId);
@@ -1933,6 +1949,8 @@ export const ChatPage: React.FC = () => {
           const oldest = older.messages[0];
           if (!oldest || Date.parse(oldest.created_at) < since) break;
         }
+        current.failures = 0;
+        for (const send of unread) if (!shown.has(send.clientId)) current.unheld.add(send.clientId);
         if (stale()) return tryAgain();
         const composer = composerRef.current!;
         for (const id of heldClientIdsRef.current!.ids) shown.add(id);
@@ -1951,6 +1969,7 @@ export const ChatPage: React.FC = () => {
         }
       } catch {
         // An older page could not be read: whether the instance holds it is not known yet.
+        current.failures += 1;
         tryAgain();
       } finally {
         current.running = false;
