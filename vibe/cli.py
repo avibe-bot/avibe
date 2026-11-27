@@ -4641,7 +4641,22 @@ def _task_add(args, invocation: _ServiceInvocation) -> dict:
         effective_on_failure = "auto" if automatic else requested_on_failure or "none"
         # A terminal-created recurring command need not invent an Agent or Session.
         # Its second matching failure takes the ordinary failure-notice route.
-        has_owner = bool(_default_session_id_from_caller(caller_context) or _explicit_flag_names(args, _TASK_SESSION_FLAG_ARGS))
+        has_owner = bool(_explicit_flag_names(args, _TASK_SESSION_FLAG_ARGS))
+        if automatic and not has_owner:
+            implicit_id = _default_session_id_from_caller(caller_context)
+            if implicit_id:
+                from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
+
+                # Provenance survives its Session. Only bind a usable maintainer;
+                # an explicit target, a denied admission, or a store fault must
+                # still follow the existing error path rather than reroute work.
+                try:
+                    resolve_session_id_target(implicit_id, read_only=True)
+                except UnresolvableSessionTarget as exc:
+                    if exc.reason not in {"missing", "archived"}:
+                        raise
+                else:
+                    has_owner = True
         is_pure_command = has_command and (effective_on_failure == "none" or (automatic and not has_owner))
         _validate_task_action_matrix(
             args,
