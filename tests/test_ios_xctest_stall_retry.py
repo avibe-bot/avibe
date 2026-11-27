@@ -43,7 +43,14 @@ WAIT = (
     'expectations: "/api/two-factor/verify in flight".'
 )
 EVENTUALLY = "failed - The condition did not become true within 140.0 seconds."
-FIXTURE = "failed - The signed-in fixture settled on another state: stage=bootstrap settled"
+FIXTURE = (
+    "failed - The signed-in fixture settled on another state: stage=bootstrap settled, "
+    "elapsed=120.48599054099999 seconds, route=onboarding"
+)
+QUICK_FIXTURE = (
+    "failed - The signed-in fixture settled on another state: stage=bootstrap settled, "
+    "elapsed=2.1 seconds, route=onboarding"
+)
 ASSERTION = "XCTAssertTrue failed"
 RESTARTED = "Restarting after unexpected exit, crash, or test timeout; summary will include totals"
 ENDED = ["Test Suite 'All tests' failed at 2026-11-26 11:52:03.198.", "** TEST FAILED **"]
@@ -112,6 +119,11 @@ STANDS = {
     # A stall does not excuse an assertion.
     "stall and a plain assertion": (
         [*failure("testA", SLOW_LAUNCH, UNRESPONSIVE, message=ASSERTION), *ENDED],
+        "the first failure is not a wait that ran out in DirectPathAppTests.testA",
+    ),
+    # The bootstrap settled quickly on the wrong state: a state failure.
+    "stall and a quick wrong bootstrap": (
+        [*failure("testA", SLOW_LAUNCH, message=QUICK_FIXTURE), *ENDED],
         "the first failure is not a wait that ran out in DirectPathAppTests.testA",
     ),
     "one of two failures without a stall": (

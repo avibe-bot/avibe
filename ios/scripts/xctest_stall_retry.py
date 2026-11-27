@@ -66,9 +66,13 @@ _BOOTSTRAP = re.compile(
 _ERROR = ": error: -["
 _ERROR_OF = re.compile(r": error: -\[\w+\.(?P<cls>\w+) (?P<method>\w+)\]")
 _WAIT_RAN_OUT = re.compile(
-    r"Asynchronous wait failed: Exceeded timeout"
-    r"|The condition did not become true within"
-    r"|The signed-in fixture (?:did not bootstrap|settled on another state)"
+    r"Asynchronous wait failed: Exceeded timeout|The condition did not become true within"
+)
+# The fixture's failure also reports a bootstrap that settled quickly on the
+# wrong state; only one that took the stall's time is a wait that ran out.
+_FIXTURE_WAIT = re.compile(
+    r"The signed-in fixture (?:did not bootstrap|settled on another state): "
+    r"stage=bootstrap settled, elapsed=(?P<seconds>\d+(?:\.\d+)?) seconds"
 )
 _RUN_ENDED = "Test Suite 'All tests' failed"
 ARTIFACT = "ios-simulator-stall"
@@ -105,6 +109,15 @@ def _stall(line: str) -> str | None:
     if bootstrap and float(bootstrap["seconds"]) >= BOOTSTRAP_STALL_SECONDS:
         return f"the App's bootstrap settled after {float(bootstrap['seconds']):.1f} s"
     return None
+
+
+def _wait_ran_out(error: str | None) -> bool:
+    if error is None:
+        return False
+    if _WAIT_RAN_OUT.search(error):
+        return True
+    fixture = _FIXTURE_WAIT.search(error)
+    return bool(fixture) and float(fixture["seconds"]) >= BOOTSTRAP_STALL_SECONDS
 
 
 def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str | None]:
@@ -155,10 +168,7 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
         return [], "a failure without its own failed line in " + ", ".join(unattributed)
     if len(failed) > max_tests:
         return [], f"{len(failed)} tests failed, more than one stall explains"
-    not_a_wait = [
-        case.name for case in failed
-        if case.first_error is None or not _WAIT_RAN_OUT.search(case.first_error)
-    ]
+    not_a_wait = [case.name for case in failed if not _wait_ran_out(case.first_error)]
     if not_a_wait:
         return [], "the first failure is not a wait that ran out in " + ", ".join(not_a_wait)
     unexplained = [case.name for case in failed if not case.stalls]
