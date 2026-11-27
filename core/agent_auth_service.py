@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import time
 import uuid
@@ -83,6 +84,7 @@ from modules.agents.antigravity.auth import (  # noqa: E402
     authenticate_antigravity_client as authenticate_antigravity_client,
     build_antigravity_auth_env as build_antigravity_auth_env,
     classify_antigravity_auth_error as classify_antigravity_auth_error,
+    create_antigravity_login_opener_shims,
     detect_antigravity_adc as detect_antigravity_adc,
     extract_acp_live_models as extract_acp_live_models,
     extract_antigravity_oauth_url as extract_antigravity_oauth_url,
@@ -418,6 +420,7 @@ class AgentAuthFlow:
     waiter_task: asyncio.Task[None] | None
     claude_client: ClaudeSDKClient | None = None
     pty_master_fd: int | None = None
+    antigravity_opener_shim_dir: str | None = None
     awaiting_code: bool = False
     login_prompt_sent: bool = False
     code_prompt_sent: bool = False
@@ -478,6 +481,7 @@ class WebAuthFlow:
     waiter_task: asyncio.Task[None] | None = None
     claude_client: ClaudeSDKClient | None = None
     pty_master_fd: int | None = None
+    antigravity_opener_shim_dir: str | None = None
     url: str | None = None
     device_code: str | None = None
     awaiting_code: bool = False
@@ -684,6 +688,9 @@ class AgentAuthService:
             flow.claude_client = None
         await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         self._close_flow_pty(flow)
+        if flow.antigravity_opener_shim_dir is not None:
+            await _native_auth_thread(shutil.rmtree, flow.antigravity_opener_shim_dir)
+            flow.antigravity_opener_shim_dir = None
         if flow.native_lease is not None:
             flow.native_lease.release()
             flow.native_lease = None
@@ -1638,6 +1645,7 @@ class AgentAuthService:
                         flow.terminal_command = "agy"
                         flow.instructions = self._t("command.setup.antigravityBusinessFallback", command="agy")
                     flow.process, flow.pty_master_fd = await self._start_antigravity_login_process(
+                        owner_flow=flow,
                         auth_method=resolved_method,
                         on_irreversible_start=on_irreversible_start,
                     )
@@ -1736,10 +1744,19 @@ class AgentAuthService:
         self,
         *,
         auth_method: str,
+        owner_flow: AgentAuthFlow | WebAuthFlow,
         on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
     ) -> tuple[asyncio.subprocess.Process, int | None]:
-        """Keep agy in paste-code mode: a TTY makes it open a browser."""
-        env = build_antigravity_auth_env(self._resolve_backend_config("antigravity"), auth_mode=auth_method)
+        """Show agy's login link while suppressing its PATH-resolved opener."""
+        def prepare_env() -> dict[str, str]:
+            owner_flow.antigravity_opener_shim_dir = create_antigravity_login_opener_shims()
+            return build_antigravity_auth_env(
+                self._resolve_backend_config("antigravity"),
+                auth_mode=auth_method,
+                opener_shim_dir=owner_flow.antigravity_opener_shim_dir,
+            )
+
+        env = await _native_auth_thread(prepare_env)
         binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
         cmd = antigravity_acp_command(binary, login=True)
         restore = on_irreversible_start() if on_irreversible_start is not None else None

@@ -798,3 +798,73 @@ def test_plain_text_oauth_url_is_published_only_after_the_full_line() -> None:
 def test_antigravity_pasted_callback_code(raw: str, expected: str | None) -> None:
     """Both submit surfaces must relay only a code; previous coverage used bare codes."""
     assert AgentAuthService._parse_antigravity_code(raw) == expected
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX login opener shims; Windows remains vendor-controlled")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["success", "failed", "cancel", "supersede", "launch_failed"])
+async def test_login_opener_shims_are_private_and_retired_with_flow(
+    fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch, ending: str,
+) -> None:
+    """agy opens even with pipes; previous launch tests could not observe opener isolation or lifetime."""
+    original_path = os.environ.get("PATH", os.defpath)
+    launches = []
+    real_launch = asyncio.create_subprocess_exec
+
+    async def capture(*args, **kwargs):
+        launches.append((args, kwargs.get("env", {})))
+        if "--login" in args and ending == "launch_failed":
+            raise OSError("fixture launch failure")
+        return await real_launch(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    service = _make_auth_service()
+    fake_agy.set_state(authenticated=False)
+    if ending == "launch_failed":
+        failed = await service.start_web_setup("antigravity", auth_method="oauth-personal")
+        assert failed.state == "failed" and failed.error == "fixture launch failure"
+        directory = Path(launches[0][1]["PATH"].split(os.pathsep)[0])
+        assert directory.name.startswith("avibe-agy-login-") and not directory.exists()
+        return
+
+    flow = await service.start_web_setup("antigravity", auth_method="oauth-personal")
+    replacement = None
+    try:
+        await _poll_flow(service, flow.flow_id, {"awaiting_code"}, require_url=True)
+        env = next(env for args, env in launches if "--login" in args)
+        directory = Path(env["PATH"].split(os.pathsep)[0])
+        assert directory.name.startswith("avibe-agy-login-")
+        assert env["PATH"] == str(directory) + os.pathsep + original_path
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        for name in ("open", "xdg-open"):
+            shim = directory / name
+            assert shim.is_file() and stat.S_IMODE(shim.stat().st_mode) == 0o755
+            # Invoke via PATH, exactly as the vendor does; both commands must no-op.
+            result = subprocess.run([name, "https://example.test/consent"], env=env, capture_output=True)
+            assert result.returncode == 0 and result.stdout == result.stderr == b""
+        assert os.environ.get("PATH", os.defpath) == original_path
+        assert build_antigravity_auth_env()["PATH"] == original_path
+
+        if ending in {"success", "failed"}:
+            code = "valid-agy-code" if ending == "success" else "wrong-code"
+            assert await service.submit_web_code(flow.flow_id, code) == {"ok": True}
+            await flow.waiter_task
+            assert flow.state == ending
+        elif ending == "cancel":
+            await service.cancel_web_flow(flow.flow_id)
+        else:
+            replacement = await service.start_web_setup("antigravity", auth_method="oauth-personal")
+            assert replacement.flow_id != flow.flow_id
+            assert replacement.antigravity_opener_shim_dir != str(directory)
+            assert Path(replacement.antigravity_opener_shim_dir).exists()
+        assert not directory.exists() and flow.antigravity_opener_shim_dir is None
+        # The real passive-status/logout call paths must receive the original PATH.
+        if replacement is None:
+            await service.remove_web_auth("antigravity")
+        assert all(env["PATH"] == original_path for args, env in launches if "--login" not in args)
+    finally:
+        await service.cancel_web_flow(flow.flow_id)
+        if replacement is not None:
+            replacement_dir = Path(replacement.antigravity_opener_shim_dir)
+            await service.cancel_web_flow(replacement.flow_id)
+            assert not replacement_dir.exists()
