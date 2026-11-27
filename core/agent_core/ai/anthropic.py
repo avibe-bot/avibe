@@ -1113,7 +1113,10 @@ class AnthropicAdapter(ProviderAdapter):
                 finally:
                     await driver.aclose()
                 if failed is not None:
-                    threads.remember(threads.failed_routes, route, time.monotonic() + threads.COOLDOWN_SECONDS)
+                    # Only a failed full-history create risks paying for a second full upload on every retry.
+                    # A refused delta consumes its single-use parent, not the route's other Sessions.
+                    if attempt.mode == "create":
+                        threads.remember(threads.failed_routes, route, time.monotonic() + threads.COOLDOWN_SECONDS)
                     attempt.record["failure"] = replay = failed
                     replacement = True
                     if (
