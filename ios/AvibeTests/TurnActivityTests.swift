@@ -964,7 +964,7 @@ final class TurnActivityTests: XCTestCase {
             }
         }
         let stale = TurnActivityShown(state: .init(phase: .working, startedAt: 1795000000, confirmedAt: 1795000600), isStale: true)
-        XCTAssertTrue(stale.detail(locale: Locale(identifier: "zh-Hans")).contains("最后确认"))
+        XCTAssertTrue(stale.detail(locale: Locale(identifier: "zh-Hans")).contains("后没有更新"))
     }
 
     func testCardRenderMatrix() throws {

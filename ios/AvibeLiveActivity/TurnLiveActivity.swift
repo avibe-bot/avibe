@@ -129,7 +129,9 @@ struct TurnActivityCard: View {
                     (Text(LocalizedStringKey(shown.statusKey), tableName: "TurnActivity")
                         .fontWeight(.semibold).foregroundColor(shown.tint)
                      + Text(" · " + shown.detail(locale: locale)).foregroundColor(.secondary))
-                        .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                        // One line in every state (Product, 11-27); a width
+                        // no one measured truncates rather than wraps.
+                        .font(.system(size: 13)).lineLimit(1)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
             if shown.runsTimer {

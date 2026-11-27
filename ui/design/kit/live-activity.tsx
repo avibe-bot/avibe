@@ -59,16 +59,16 @@ function useTurnCopy() {
     if (a.staleSince) {
       return {
         status: t('可能不是最新', 'May be out of date'),
-        detail: t(`${a.staleSince} 最后确认在处理，打开 Avibe 查看`, `Last confirmed working at ${a.staleSince}. Open Avibe to check.`),
+        detail: t(`${a.staleSince} 后没有更新`, `Since ${a.staleSince}`),
       };
     }
     switch (a.phase) {
       case 'working':
-        return { status: t('正在处理', 'Working'), detail: t('轻点打开对话', 'Tap to open the conversation') };
+        return { status: t('正在处理', 'Working'), detail: t('轻点打开对话', 'Tap to open') };
       case 'needsYou':
-        return { status: t('等你处理', 'Needs you'), detail: t('打开 Avibe 回应', 'Open Avibe to respond') };
+        return { status: t('等你处理', 'Needs you'), detail: t('去 Avibe 回应', 'Open Avibe') };
       case 'done':
-        return { status: t('已完成', 'Done'), detail: t(`用时 ${a.took}，轻点查看回复`, `Took ${a.took}. Tap to read the reply.`) };
+        return { status: t('已完成', 'Done'), detail: t(`用时 ${a.took}，轻点查看`, `Took ${a.took}. Tap to read`) };
       case 'failed':
         return { status: t('没有完成', "Didn't finish"), detail: t('打开 Avibe 查看原因', 'Open Avibe to see why') };
       case 'stopped':
