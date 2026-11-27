@@ -16,7 +16,7 @@ import { DeferredMentionEditor } from './components/workbench/deferredMentionEdi
 import { DeferredInboxPreview } from './components/workbench/InboxHoverPopover';
 import { DeferredMarkdown } from './components/ui/deferredMarkdown';
 import { LazyNewProjectDialog } from './components/workbench/LazyNewProjectDialog';
-import { loadSettingsCopy } from './i18n/settingsCopy';
+import { withCopy } from './i18n/surfaceCopy';
 
 // The chat composer's editor arrives with the page, so the composer never waits on it.
 export const ChatPage = lazyPage(() => Promise.all([
@@ -25,21 +25,19 @@ export const ChatPage = lazyPage(() => Promise.all([
 ]).then(([m]) => m.ChatPage));
 export const InboxPage = lazyPage(() => import('./components/workbench/InboxPage').then((m) => m.InboxPage));
 export const ProjectsPage = lazyPage(() => import('./components/workbench/ProjectsPage').then((m) => m.ProjectsPage));
-export const AgentsPage = lazyPage(() => import('./components/workbench/AgentsPage').then((m) => m.AgentsPage));
-export const SkillsPage = lazyPage(() => import('./components/workbench/SkillsPage').then((m) => m.SkillsPage));
-export const HarnessPage = lazyPage(() => import('./components/workbench/HarnessPage').then((m) => m.HarnessPage));
+// A page whose copy is its own surface's loads with it (src/i18n/surfaceCopy.ts),
+// and draws once both are here.
+export const AgentsPage = lazyPage(() => withCopy('agents', () => import('./components/workbench/AgentsPage')).then((m) => m.AgentsPage));
+export const SkillsPage = lazyPage(() => withCopy('skills', () => import('./components/workbench/SkillsPage')).then((m) => m.SkillsPage));
+export const HarnessPage = lazyPage(() => withCopy('harness', () => import('./components/workbench/HarnessPage')).then((m) => m.HarnessPage));
 export const VaultsPage = lazyPage(() => import('./components/workbench/VaultsPage').then((m) => m.VaultsPage));
-export const Wizard = lazyPage(() => import('./components/Wizard').then((m) => m.Wizard));
-export const SetupRemoteAccess = lazyPage(() => import('./components/onboarding/SetupRemoteAccess').then((m) => m.SetupRemoteAccess));
+export const Wizard = lazyPage(() => withCopy('setup', () => import('./components/Wizard')).then((m) => m.Wizard));
+export const SetupRemoteAccess = lazyPage(() => withCopy('setup', () => import('./components/onboarding/SetupRemoteAccess')).then((m) => m.SetupRemoteAccess));
 // The App routes' host: a native App window's body, or the page's own app route.
 export const StandaloneAppRoute = lazyPage(() => import('./components/apps/StandaloneAppRoute').then((m) => m.StandaloneAppRoute));
 
-// One chunk for all of Settings (settingsRoutePages.ts). It loads with the copy
-// only Settings draws (src/i18n/settingsCopy.ts), and draws once both are here.
-const settings = () => Promise.all([
-  import('./components/settings/settingsRoutePages'),
-  loadSettingsCopy(),
-]).then(([m]) => m);
+// One chunk for all of Settings (settingsRoutePages.ts), with its copy.
+const settings = () => withCopy('settings', () => import('./components/settings/settingsRoutePages'));
 
 export const SettingsLayout = lazyPage(() => settings().then((m) => m.SettingsLayout));
 export const SettingsGeneralPage = lazyPage(() => settings().then((m) => m.SettingsGeneralPage));

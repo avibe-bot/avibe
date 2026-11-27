@@ -2,13 +2,15 @@
 //! bytes stay buffered until a candidate is committed; there is no retry on
 //! any error after the 200. Drop/abort owns and cancels all accepted sockets.
 use super::{
-    connect::{parse_connect, Authority, Head},
+    connect::{parse_connect, Authority, Head, HEAD_LIMIT},
     credentials::Windows,
+    faults::PathWord,
     public,
     quiet::{PublicTicket, SessionPolicy},
     strict,
     transport::{Committed, Link, Stream},
-    PathStatus,
+    usage::Usage,
+    PathStatus, PreferredPath,
 };
 use std::{
     future::Future,
@@ -41,6 +43,8 @@ pub(super) struct Listener {
 pub(super) struct ListenerAccess {
     pub windows: Arc<Windows>,
     pub(super) policy: SessionPolicy,
+    /// Which leg carried the windows' connections, for the instance's log.
+    pub(super) usage: Arc<Usage>,
     retired: AtomicBool,
     health: watch::Receiver<()>,
     task: JoinHandle<()>,
@@ -127,9 +131,12 @@ impl Listener {
         let accept_policy = policy.clone();
         let timing = strict::Timing::default();
         let boot_clock = super::clock::Clock::default();
+        let usage = Arc::new(Usage::new(boot_clock.clone()));
+        let counted = usage.clone();
         let task = tokio::spawn(async move {
             let _live = live;
             let mut clients = JoinSet::new();
+            let mut refusals = JoinSet::new();
             while let Ok((socket, peer)) = accept_with_retry(|| async {
                 #[cfg(test)]
                 { tokio::select! { biased; _=fault.notified()=>Err(std::io::ErrorKind::InvalidInput.into()), incoming=socket.accept()=>incoming } }
@@ -137,7 +144,21 @@ impl Listener {
                 { socket.accept().await }
             }).await {
                 while clients.try_join_next().is_some() {}
-                if !peer.ip().is_loopback() || clients.len() >= 64 {
+                while refusals.try_join_next().is_some() {}
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                if clients.len() >= SERVED {
+                    // On macOS it is told so, where it was dropped
+                    // unanswered: a window whose route allows it then goes
+                    // to the host by itself. Past as many refusals at once,
+                    // dropped as before. Elsewhere it is still dropped: a
+                    // WebView2 goes on to the host after a connection that
+                    // ends without an answer, and not after a `502`
+                    // (`webview_windows::route_argument`).
+                    if cfg!(target_os = "macos") && refusals.len() < SERVED {
+                        refusals.spawn(refuse(socket));
+                    }
                     continue;
                 }
                 let h = host.clone();
@@ -148,12 +169,36 @@ impl Listener {
                 let status = status.clone();
                 let budget = timing.strict_open;
                 let clock = boot_clock.clone();
+                let usage = counted.clone();
+                let paths = status.clone();
                 clients.spawn(async move {
                     let mut failed = false;
-                    serve(socket, &h, &keys, || async {
+                    // For the minute's count: whether this CONNECT was
+                    // decided in direct-only, and whether a direct open was
+                    // started for it at all. Waiting in direct-only for a
+                    // link that does not come starts none. Set where the
+                    // open runs, read where the CONNECT is counted.
+                    let (only, tried) = (AtomicBool::new(false), AtomicBool::new(false));
+                    // Counted under the kind of direct path new connections
+                    // prefer when the CONNECT is decided.
+                    let decided = |what: Decided| {
+                        let path = PathWord::of(match paths.borrow().preferred {
+                            PreferredPath::Direct(path) => Some(path),
+                            PreferredPath::Tunnel => None,
+                        });
+                        let only = only.load(Ordering::Relaxed);
+                        match what {
+                            Decided::Direct => usage.direct(path, only),
+                            Decided::Public => usage.tunnel(path),
+                            Decided::Failed => usage.unanswered(path, only, tried.load(Ordering::Relaxed)),
+                        }
+                    };
+                    serve(socket, &h, &keys, decided, || async {
                         let Some(ticket) = policy.sample() else {
-                            let host = &h;
+                            only.store(true, Ordering::Relaxed);
+                            let (host, tried) = (&h, &tried);
                             let opened = strict::open(links.clone(), &clock, budget, |l| async move {
+                                tried.store(true, Ordering::Relaxed);
                                 let stream = l.open(host).await?;
                                 Some(Backend::Direct(stream, l.commit_stream()?))
                             }).await;
@@ -166,7 +211,10 @@ impl Listener {
                             Some(l) if l.usable() => {
                                 l.plan
                                     .choose(
-                                        async { l.open(&h).await.map(|s| Backend::Direct(s, l.clone())) },
+                                        async {
+                                            tried.store(true, Ordering::Relaxed);
+                                            l.open(&h).await.map(|s| Backend::Direct(s, l.clone()))
+                                        },
                                         fallback,
                                     )
                                     .await
@@ -181,6 +229,7 @@ impl Listener {
             }
             // No new accepts. Notify route owners before draining live streams.
             drop(_live);
+            drop(refusals);
             while clients.join_next().await.is_some() {}
         });
         Some(Self {
@@ -191,6 +240,7 @@ impl Listener {
                 task,
                 health,
                 policy,
+                usage,
                 retired: AtomicBool::new(false),
             }),
             port,
@@ -198,6 +248,38 @@ impl Listener {
         })
     }
 }
+/// How many connections one listener serves at a time: one session's
+/// instance view and the app windows opened from it.
+const SERVED: usize = 64;
+const BAD_GATEWAY: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n";
+
+/// Answers a connection the listener has no room for, without reading what
+/// it asked: `502`, as when no leg gives a backend, which a WKWebView whose
+/// route allows failover takes as leave to go to the host itself. The
+/// answer is sent and its end marked before the request is read out, so the
+/// close that follows does not reset the connection ahead of the answer.
+/// What is read out is bounded in time and in bytes (one request head and no
+/// more): a peer that goes on sending is cut off. Nothing is authenticated,
+/// counted or opened for it.
+async fn refuse(mut browser: TcpStream) {
+    let _ = timeout(Duration::from_secs(2), async {
+        browser.write_all(BAD_GATEWAY).await.ok()?;
+        browser.shutdown().await.ok()?;
+        let mut rest = [0; 1024];
+        let mut left = HEAD_LIMIT + 4;
+        while left > 0 {
+            let most = left.min(rest.len());
+            let read = browser.read(&mut rest[..most]).await.ok()?;
+            if read == 0 {
+                break;
+            }
+            left -= read;
+        }
+        Some(())
+    })
+    .await;
+}
+
 async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
     mut accept: impl FnMut() -> F,
 ) -> std::io::Result<T> {
@@ -233,10 +315,20 @@ impl Backend<Arc<Link>> {
         }
     }
 }
+/// What became of one authenticated CONNECT, for the minute's count. One
+/// whose tunnel leg was ready and then fenced is answered `502` as well and
+/// is not counted: no leg failed.
+enum Decided {
+    Direct,
+    Public,
+    /// Answered `502`: no leg gave a backend.
+    Failed,
+}
 async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
     host: &Authority,
     keys: &Windows,
+    decided: impl Fn(Decided),
     open: impl FnOnce() -> F,
 ) {
     let mut data = Vec::with_capacity(1024);
@@ -271,20 +363,23 @@ async fn serve<F: Future<Output = Option<Backend>>>(
     grant
         .until_revoked(async {
             let Some(backend) = open().await else {
-                let _ = browser
-                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                    .await;
+                decided(Decided::Failed);
+                let _ = browser.write_all(BAD_GATEWAY).await;
                 return;
             };
             let (mut stream, _direct) = match backend {
-                Backend::Direct(s, guard) => (s, guard),
+                Backend::Direct(s, guard) => {
+                    decided(Decided::Direct);
+                    (s, guard)
+                }
                 Backend::Public(s, ticket) => {
                     if let Some(copy) = ticket.commit(&grant.legs, &browser, &s) {
+                        decided(Decided::Public);
                         copy.serve(browser, s, &data[end..]).await;
                     } else {
-                        let _ = browser
-                            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                            .await;
+                        // Fenced by a cut-over after it was ready: in no
+                        // count, since no leg failed.
+                        let _ = browser.write_all(BAD_GATEWAY).await;
                     }
                     return;
                 }
@@ -336,6 +431,71 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+        // Not a failed direct leg in the instance's log: there was no usable
+        // link, so no direct open was started, and nothing carried it.
+        let usage = &l.access.usage;
+        for key in ["direct", "tunnel", "direct_failed", "strict"] {
+            assert_eq!(usage.total(None, key), 0, "{key}");
+        }
+    }
+    /// A listener with no room answers `502` and closes on macOS, where it
+    /// used to close without a word; elsewhere it still closes without one,
+    /// which is what a WebView2 goes on to the host after. Either way it has
+    /// room again once connections end.
+    #[tokio::test]
+    async fn a_connection_beyond_what_the_listener_serves_is_answered_502() {
+        let host = Authority::managed("desk-app.avibe.bot").unwrap();
+        let (_tx, rx) = watch::channel(None);
+        let l = Listener::bind_via(host.clone(), rx, watch::channel(PathStatus::default()).0, |_| {
+            ready(None)
+        })
+        .await
+        .unwrap();
+        // As many as it serves, each still to send its request.
+        let mut held = Vec::new();
+        for _ in 0..SERVED {
+            held.push(TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap());
+        }
+        // One more, with a request it has already sent in full.
+        let unauthenticated = format!("CONNECT {}:443 HTTP/1.1\r\n\r\n", host.host());
+        let mut beyond = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
+        // (Where it is dropped at once, the request may not go out at all.)
+        let sent = beyond.write_all(unauthenticated.as_bytes()).await;
+        let mut answer = Vec::new();
+        let ended = timeout(Duration::from_secs(2), beyond.read_to_end(&mut answer))
+            .await
+            .unwrap();
+        if cfg!(target_os = "macos") {
+            sent.unwrap();
+            ended.unwrap();
+            assert_eq!(answer, BAD_GATEWAY);
+        } else {
+            // Ended or reset, with nothing said.
+            assert_eq!(answer, b"");
+        }
+        // It was not read as a request: nothing is counted for it.
+        for key in ["direct", "tunnel", "direct_failed", "strict"] {
+            assert_eq!(l.access.usage.total(None, key), 0, "{key}");
+        }
+        // The held ones end: the listener serves again, and asks the next
+        // one for its credential as it asks any.
+        drop(held);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let mut next = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
+                let _ = next.write_all(unauthenticated.as_bytes()).await;
+                let mut answer = Vec::new();
+                let _ = next.read_to_end(&mut answer).await;
+                if answer.starts_with(b"HTTP/1.1 407 ") {
+                    break;
+                }
+                // Still full: refused as above.
+                assert!(answer == BAD_GATEWAY || answer.is_empty(), "{answer:?}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn observed_denial_fails_authenticated_connect_despite_pending_lan_success() {
@@ -348,21 +508,27 @@ mod tests {
         let keys = Windows::default();
         let authorization = basic(&keys.credential("test-window").unwrap());
         let worker = tokio::spawn(async move {
-            serve(accepted, &host, &keys, || async {
-                Selection::default()
-                    .choose(
-                        async {
-                            waiting.await.unwrap();
-                            panic!("a late LAN success must not be polled after refusal")
-                        },
-                        async {
-                            // A LAN success is available if selection polls it again.
-                            release.send(()).unwrap();
-                            Err(public::OpenError::Terminal)
-                        },
-                    )
-                    .await
-            })
+            serve(
+                accepted,
+                &host,
+                &keys,
+                |_| {},
+                || async {
+                    Selection::default()
+                        .choose(
+                            async {
+                                waiting.await.unwrap();
+                                panic!("a late LAN success must not be polled after refusal")
+                            },
+                            async {
+                                // A LAN success is available if selection polls it again.
+                                release.send(()).unwrap();
+                                Err(public::OpenError::Terminal)
+                            },
+                        )
+                        .await
+                },
+            )
             .await;
         });
         browser
@@ -379,6 +545,52 @@ mod tests {
             .unwrap();
         worker.await.unwrap();
         assert_eq!(reply, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+    }
+    /// A tunnel leg that was ready and then fenced by a cut-over is answered
+    /// `502` like a failure, and is none: it is in no count.
+    #[tokio::test]
+    async fn a_fenced_public_leg_is_answered_502_and_counted_as_nothing() {
+        use std::sync::atomic::AtomicUsize;
+        let host = Authority::managed("desk-app.avibe.bot").unwrap();
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut browser = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
+        let (accepted, _) = socket.accept().await.unwrap();
+        // The tunnel's leg, ready; then the cut-over, before it is committed.
+        let public = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
+        let policy = SessionPolicy::default();
+        let ticket = policy.sample().unwrap();
+        assert_eq!(policy.close_public(), 0);
+        let keys = Windows::default();
+        let authorization = basic(&keys.credential("test-window").unwrap());
+        let decisions = Arc::new(AtomicUsize::new(0));
+        let counted = decisions.clone();
+        let worker = tokio::spawn(async move {
+            serve(
+                accepted,
+                &host,
+                &keys,
+                |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                },
+                || async { Some(Backend::Public(public, ticket)) },
+            )
+            .await;
+        });
+        browser
+            .write_all(
+                format!("CONNECT desk-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: {authorization}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut reply = Vec::new();
+        timeout(Duration::from_secs(3), browser.read_to_end(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        worker.await.unwrap();
+        assert_eq!(reply, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+        assert_eq!(decisions.load(Ordering::SeqCst), 0);
     }
     #[tokio::test(start_paused = true)]
     async fn temporary_accept_errors_back_off_and_terminal_errors_are_returned() {

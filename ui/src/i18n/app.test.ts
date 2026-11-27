@@ -133,42 +133,50 @@ describe('the instance language an owner\'s browser adopts', () => {
   });
 });
 
-// Copy only Settings draws is its own chunk per language (scripts/localeSurfaces.ts),
-// loaded with the Settings pages (./settingsCopy.ts).
+// Copy only one surface's lazy pages draw is its own chunk per language
+// (scripts/localeSurfaces.ts), loaded with those pages (./surfaceCopy.ts).
 type Tree = { [key: string]: unknown };
 const leaves = (tree: Tree, prefix = ''): Map<string, unknown> => new Map(Object.entries(tree).flatMap(([key, value]) => {
   const path = prefix ? `${prefix}.${key}` : key;
   return value && typeof value === 'object' && !Array.isArray(value) ? [...leaves(value as Tree, path)] : [[path, value] as const];
 }));
 const lookup = (tree: Tree, path: string): unknown => path.split('.').reduce<unknown>((node, key) => (node as Tree | undefined)?.[key], tree);
-// A sentence the Settings copy holds.
-const settingsKey = [...leaves(zh)].find(([path, value]) => typeof value === 'string'
-  && surfaces.settings.some((listed) => path === listed || path.startsWith(`${listed}.`)))![0];
+const listed: Record<string, string[]> = surfaces;
+// A sentence a surface's copy holds.
+const keyOf = (surface: string) => [...leaves(zh)].find(([path, value]) => typeof value === 'string'
+  && listed[surface].some((root) => path === root || path.startsWith(`${root}.`)))![0];
+const settingsKey = keyOf('settings');
 
-describe('the Settings copy', () => {
-  it.each([['en', en], ['zh', zh]] as const)('keeps every %s string, in exactly one surface', async (language, catalog) => {
-    const first = leaves((await import(`virtual:avibe-copy/${language}/first`)).default as Tree);
-    const settings = leaves((await import(`virtual:avibe-copy/${language}/settings`)).default as Tree);
+describe('the surfaces\' copy', () => {
+  it.each([['en', en], ['zh', zh]] as const)('keeps every %s string, in exactly one part', async (language, catalog) => {
+    const { default: loaders, SURFACES } = await import('virtual:avibe-copy/loaders');
+    expect(SURFACES).toEqual(Object.keys(listed).filter((surface) => listed[surface].length));
 
-    expect(settings.size).toBeGreaterThan(0);
-    expect([...settings.keys()].filter((path) => first.has(path))).toEqual([]);
-    expect(new Map([...first, ...settings])).toEqual(leaves(catalog as Tree));
+    const seen = new Map<string, unknown>();
+    for (const load of Object.values(loaders[language])) {
+      const part = leaves((await load()).default as Tree);
+      expect(part.size).toBeGreaterThan(0);
+      expect([...part.keys()].filter((path) => seen.has(path))).toEqual([]);
+      part.forEach((value, path) => seen.set(path, value));
+    }
+    expect(seen).toEqual(leaves(catalog as Tree));
   });
 
-  it('is not part of the first screen\'s download, and is in place once Settings loads', async () => {
+  it.each(Object.keys(surfaces))('keeps the %s copy out of the first screen\'s download until its page loads', async (surface) => {
+    const key = keyOf(surface);
     const i18n = await open('zh');
-    expect(i18n.exists(settingsKey)).toBe(false);
+    expect(i18n.exists(key)).toBe(false);
 
-    const { loadSettingsCopy } = await import('./settingsCopy');
-    await loadSettingsCopy();
+    const { loadSurfaceCopy } = await import('./surfaceCopy');
+    await loadSurfaceCopy(surface);
 
-    expect(i18n.t(settingsKey as never)).toBe(lookup(zh, settingsKey));
+    expect(i18n.t(key as never)).toBe(lookup(zh, key));
   });
 
   it('arrives in the other language before a switch shows it', async () => {
     const i18n = await open('zh');
-    const { loadSettingsCopy } = await import('./settingsCopy');
-    await loadSettingsCopy();
+    const { loadSurfaceCopy } = await import('./surfaceCopy');
+    await loadSurfaceCopy('settings');
 
     await i18n.changeLanguage('en');
 
@@ -177,10 +185,10 @@ describe('the Settings copy', () => {
 
   it('arrives in the language a switch under way lands on', async () => {
     const i18n = await open('zh');
-    const { loadSettingsCopy } = await import('./settingsCopy');
+    const { loadSurfaceCopy } = await import('./surfaceCopy');
     const switching = i18n.changeLanguage('en');
     expect((i18n as typeof i18n & { isLanguageChangingTo?: string }).isLanguageChangingTo).toBe('en');
-    await loadSettingsCopy();
+    await loadSurfaceCopy('settings');
     await switching;
 
     expect(i18n.language).toBe('en');

@@ -125,8 +125,15 @@ def test_anything_but_exactly_one_consistent_record_is_refused(tmp_path, damage)
         qualification.load_candidate(target)
 
 
-def test_no_candidate_is_recorded_before_one_is_reviewed() -> None:
-    assert sorted(path.name for path in qualification.CANDIDATES_DIR.iterdir()) == ["README.md"]
+def test_rehearsal_record_uses_the_shipped_engine_bytes() -> None:
+    raw = (ROOT / 'vibe/model_hub_runtime/cliproxyapi_manifest.json').read_bytes()
+    record = qualification.CANDIDATES_DIR / 'model-hub-engine-v8.1.2-1'
+    candidate = qualification.load_candidate(record)
+    # Later Avibe versions can bundle another tag. While 8.1.2 is bundled,
+    # the rehearsal must use those exact published bytes, not a reconstruction.
+    if json.loads(raw)['asset_release_tag'] == candidate.asset_release_tag:
+        assert candidate.manifest_bytes == raw
+    assert candidate.min_avibe_version == '3.2.8'
 
 
 def _problems(candidate, evidence, **overrides) -> list[str]:
@@ -1156,14 +1163,22 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     text = (ROOT / ".github/workflows/model-hub-engine-channel.yml").read_text(encoding="utf-8")
     assert "rehearsal_run_id" in workflow[True]["workflow_dispatch"]["inputs"]
     assert workflow["jobs"]["prepare"]["name"] == "trusted prepare"
-    assert "verify-untrusted-rehearsal" in text
-    assert "trusted-released-context" in text
-    assert "--released-dir" in text
+    from scripts import model_hub_engine_rehearsal as rehearsal
+
+    prepare = workflow['jobs']['prepare']
+    checkout = next(s for s in prepare['steps'] if s.get('with', {}).get('path') == 'frozen-producer')
+    assert checkout['with']['ref'] == rehearsal.H
+    assert prepare['env']['REHEARSAL_ATTEMPT'] == '${{ inputs.rehearsal_attempt }}'
+    verify = next(s['run'] for s in prepare['steps'] if 'evidence-build' in s.get('run', ''))
+    assert 'scripts/model_hub_engine_rehearsal.py --repo frozen-producer' in verify
+    assert '--run "$REHEARSAL_RUN_ID" --attempt "$REHEARSAL_ATTEMPT" --tag "$ASSET_RELEASE_TAG"' in verify
+    assert '--avault "$avault" --artifact "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json"' in verify
+    assert 'cmp "frozen-producer/$candidate_dir/$file" "$candidate_dir/$file"' in verify
+    assert 'verify-untrusted-rehearsal' not in text
     assert "qualification-released-*" not in text
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "model-hub-engine-trusted-assets" in text
     assert "model-hub-engine-untrusted-assets" in text
-    assert "rehearsal-baselines" in text
     assert "Runtime pass/fail assertions above are rehearsal data" in text
     assert "REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}" in text
     assert "persist-credentials: false" in text

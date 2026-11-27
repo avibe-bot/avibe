@@ -938,12 +938,12 @@ describe('ShowPageShareControl native share and export', () => {
   const presentCalls = (call: ReturnType<typeof installShell>) =>
     call.mock.calls.filter(([method]) => method === 'share.present');
 
-  const openControl = async () => {
+  const openControl = async (onOpenChange?: (open: boolean) => void) => {
     api.getShowPage.mockResolvedValue(payload);
     api.getShowPageAccess.mockResolvedValue(showPageAccess());
     render(
       <I18nextProvider i18n={i18n}>
-        <ShowPageShareControl sessionId="ses-1" initialAccess={showPageAccess()} />
+        <ShowPageShareControl sessionId="ses-1" initialAccess={showPageAccess()} onOpenChange={onOpenChange} />
       </I18nextProvider>,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
@@ -1090,6 +1090,18 @@ describe('ShowPageShareControl native share and export', () => {
     expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
   });
 
+  it('retains the pre-open visibility sample when the host shields pointer events', async () => {
+    installShell();
+    const frame = mountShowFrame();
+    await openControl((open) => {
+      // Hosts apply this during their React render, after the open callback.
+      queueMicrotask(() => { frame.style.pointerEvents = open ? 'none' : 'auto'; });
+    });
+    await waitFor(() => expect(frame.style.pointerEvents).toBe('none'));
+    expect(screen.getByRole('button', { name: 'Share PDF' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Share image' })).toBeTruthy();
+  });
+
   it('explains the update in an App that can only share links, without exporting', async () => {
     const call = installShell({ shareDraft: false });
     mountShowFrame();
@@ -1132,6 +1144,25 @@ describe('ShowPageShareControl native share and export', () => {
       return invoke;
     };
     afterEach(() => DESKTOP.forEach((name) => Reflect.deleteProperty(window, name)));
+
+    it('offers export when the Show frame becomes visible after the popover opens', async () => {
+      const invoke = installDesktop('show-window');
+      await openControl();
+      expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+
+      const frame = mountShowFrame();
+      // The loading body mounts before it becomes eligible for capture.
+      frame.style.pointerEvents = 'none';
+      await act(async () => { fireEvent.load(frame); });
+      expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+      frame.style.pointerEvents = 'auto';
+
+      expect(await screen.findByRole('button', { name: 'Share PDF' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Share image' })).toBeTruthy();
+      expect(screen.getByText('Share this Show Page')).toBeTruthy();
+      expect(invoke).not.toHaveBeenCalled();
+      expectNoWrites();
+    });
 
     it('shares only the link from the Workbench', async () => {
       const invoke = installDesktop('workbench');

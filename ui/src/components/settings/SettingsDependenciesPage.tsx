@@ -67,7 +67,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
 
-  const { checks, refresh: refreshDependencies, checking, loginSessionState } = useDependencyChecks(api.listDependencies);
+  const { checks, refresh: refreshDependencies, retryFailed, checking, loginSessionState } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
   // The engine check or update this page started; which of its own operations ended as failed,
   // which a fresh read cannot tell apart; and the switch's change on its way.
@@ -75,6 +75,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   const [engineFailed, setEngineFailed] = useState<'check' | 'update' | null>(null);
   const [engineSettingBusy, setEngineSettingBusy] = useState(false);
   useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
+  useEffect(() => api.connectWorkbenchEvents({ onConnected: retryFailed }), [api, retryFailed]);
 
   // What the engine's owner does by itself (a routine update, a retry once Model Hub is idle, a
   // withdrawal) is read again until it settles, so an open page does not go on saying "Updating…"
