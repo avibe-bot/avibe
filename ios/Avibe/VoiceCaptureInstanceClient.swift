@@ -633,6 +633,11 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
                 switch checked {
                 case .gate:
                     if retries > 0 { notePortCheck("asked_again") }
+                case .foreign where isActive():
+                    // Back in front while asked: the answer is the front's gate
+                    // (its own fault), not a finding on the port. Not counted.
+                    gaveUp(label, "direct_fault")
+                    throw Failure.directFault
                 case .foreign:
                     notePortCheck("foreign")
                     gaveUp(label, "direct_fault port foreign")

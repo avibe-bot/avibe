@@ -2218,6 +2218,26 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(counted, ["own_socket_open"])
     }
 
+    /// Back in front while the port was asked: the answer is the front's own
+    /// gate, so a fault there refuses but is not counted as a finding.
+    func testAForeignAnswerAfterComingToTheFrontIsNotCountedAsTheBackgrounds() async throws {
+        var active = false
+        var counted: [String] = []
+        let client = VoiceCaptureInstanceClient(
+            target: try backgroundTarget(), gate: { .held },
+            backgroundCheck: { active = true; return .foreign },
+            isActive: { active }, sleep: { _ in }, notePortCheck: { counted.append($0) }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("a fault loads nothing")
+        } catch {
+            XCTAssertEqual(error as? Failure, .directFault)
+        }
+        XCTAssertTrue(counted.isEmpty)
+        XCTAssertTrue(client.failures[0].hasPrefix("GET /api/asr/status direct_fault +"), client.failures[0])
+    }
+
     /// In front the listener serves or is being bound again: the port is not
     /// asked, and the gate is waited for as before.
     func testInFrontThePortIsNotAsked() async throws {
