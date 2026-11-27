@@ -70,6 +70,8 @@ jobs:
     needs: changes
     if: fromJSON(needs.changes.outputs.dispatch_jobs)['ios-shell'] == 'run'
     uses: ./.github/workflows/ios-shell.yml
+    with:
+      fast-native: ${{ github.event_name == 'pull_request' && needs.changes.outputs.portfolio == 'true' }}
 
   desktop-shell:
     needs: changes

@@ -61,11 +61,13 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
     if '.github/request-sensitive-checks.md' in paths:
         return set(PROOFS), set(LINUX | EXTRA)
     named = set().union(*(matched_proofs(p) for p in paths))
+    desktop = any(p.startswith('desktop/') for p in paths)
     if not named:
-        return set(), set(LINUX)
+        return ({'desktop'}, set(LINUX | PROOFS['desktop'])) if desktop else (set(), set(LINUX))
     if named == {'ios-app'}:
         # App build inputs require the simulator, not unrelated historical heuristics.
-        return {'ios'}, set(LINUX | PROOFS['ios'])
+        groups = {'ios', 'desktop'} if desktop else {'ios'}
+        return groups, set(LINUX).union(*(PROOFS[g] for g in groups))
     groups = set().union(*(path_groups(p) for p in paths))
     if 'ios-app' in named:
         groups.add('ios')

@@ -2,6 +2,11 @@ name: ios-shell
 
 on:
   workflow_call:
+    inputs:
+      fast-native:
+        description: Build the app and exercise the named native PR contracts instead of the full simulator suite
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,6 +63,7 @@ jobs:
         run: ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp
 
       - name: Build for the iOS Simulator SDK
+        if: ${{ !inputs.fast-native }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -71,6 +77,7 @@ jobs:
             build
 
       - name: Verify linked iroh binary in the simulator product
+        if: ${{ !inputs.fast-native }}
         run: |
           set -euo pipefail
           ios/scripts/verify_iroh_app_product.sh \
@@ -109,7 +116,33 @@ jobs:
       - name: Boot the pinned simulator
         run: xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
+      - name: Compile the app and run the native PR contracts
+        if: inputs.fast-native
+        run: |
+          set -euo pipefail
+          xcodebuild -project ios/Avibe.xcodeproj -scheme Avibe -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
+            -parallel-testing-enabled NO \
+            -only-testing:AvibeTests/NativeBadgeTests/testBadgeSetTakesExactlyOneCountNumber \
+            -only-testing:AvibeTests/NavigationPolicyTests/testConfiguredOriginRequiresHTTPSAndCanonicalizesToOrigin \
+            -only-testing:AvibeTests/SystemScheduleTests/testSharedContractVectorsCoverSwiftParsersAndEveryTerminalReceipt \
+            CODE_SIGNING_ALLOWED=NO test
+          xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/AvibeTests.xcresult" > "$RUNNER_TEMP/fast-native-summary.json"
+          python3 - "$RUNNER_TEMP/fast-native-summary.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as source:
+              summary = json.load(source)
+          if summary.get('passedTests') != 3 or summary.get('totalTestCount') != 3:
+              raise SystemExit('Expected three passing native PR contracts: ' + str(summary))
+          PY
+          ios/scripts/verify_iroh_app_product.sh ios/Avibe/IrohLib \
+            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe" \
+            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" YES
+
       - name: Build the sheet gesture XCUITest fixture
+        if: ${{ !inputs.fast-native }}
         id: sheet-fixture-build
         run: |
           set -euo pipefail
@@ -124,6 +157,7 @@ jobs:
             build-for-testing
 
       - name: Run XCTest on iPhone Simulator
+        if: ${{ !inputs.fast-native }}
         # The build takes about 11 minutes and the tests 34-58 on this runner;
         # one run that passed every test still met the old 70-minute bound.
         # A test rerun after a simulator stall adds a few minutes.
