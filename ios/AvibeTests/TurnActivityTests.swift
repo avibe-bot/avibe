@@ -621,6 +621,7 @@ final class TurnActivityTests: XCTestCase {
         await owner.willDeactivate(registrationID: "registration-1")?.value
         XCTAssertEqual(cards.count, 1)
         XCTAssertEqual(cards.first?.state, .active)
+        XCTAssertTrue(calls.contains { $0.0 == "PUT" }, "The card is registered with the instance")
     }
 
     /// Switched off (`available: false`): a setting an earlier build stored on
@@ -671,7 +672,8 @@ final class TurnActivityTests: XCTestCase {
             return card
         }, request: { _, method, path, body in
             self.calls.append((method, path, body))
-            return .init(status: 200, json: ["turn": self.initial], redirected: false)
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
         }, mayRequest: { _ in true }, available: available ?? TurnActivityCoordinator.shipsLockScreenProgress,
            isActive: { true }, beginBackgroundTask: { _ in {} })
         owner.selectTarget(target)

@@ -1889,10 +1889,10 @@ production instance is used.
 ## Turn Live Activities
 
 `TurnActivityCoordinator.shipsLockScreenProgress` is the switch (on since
-11-27, after the black-card fix; it was off from 11-26). Off, the shell drops
-`lockScreenProgress` from its capabilities, the stored setting is forced off,
-nothing starts a card, and a card an earlier build left ends at launch and when
-the App comes to the front.
+11-27, after the black-card fix; it was off from 11-26). Off, the stored
+setting is forced off, nothing starts a card, and a card an earlier build left
+ends at launch and when the App comes to the front. Switching off also means removing
+`lockScreenProgress` from `NativeShellMetadata.capabilities` by hand.
 
 The shell announces `lockScreenProgress: 1`: `liveActivity.setting`,
 `setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
