@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -1581,6 +1582,7 @@ class ScheduledTaskStore:
         expect: DefinitionWriteExpectation,
         *,
         queued_run: Optional[dict[str, Any]] = None,
+        repeat_failure_key: Optional[str] = None,
         expected_uncanceled_run_id: Optional[str] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
@@ -1619,7 +1621,7 @@ class ScheduledTaskStore:
                 self._publish(task)
                 _publish_task_definitions_updated()
                 return True
-            if queued_run is None:
+            if queued_run is None and repeat_failure_key is None:
                 landed = self._sqlite.upsert_scheduled_task(
                     task.to_dict(),
                     expect=expect,
@@ -1636,6 +1638,7 @@ class ScheduledTaskStore:
                     task.to_dict(),
                     expect=expect,
                     run_payload=queued_run,
+                    **({"repeat_failure_key": repeat_failure_key} if repeat_failure_key is not None else {}),
                     expected_uncanceled_run_id=expected_uncanceled_run_id,
                     expected_schedule_generation=expected_schedule_generation,
                     expected_terminal_run_id=expected_terminal_run_id,
@@ -2082,6 +2085,7 @@ class ScheduledTaskStore:
         exit_code: Optional[int] = None,
         records_command_outcome: bool = False,
         timed_out: bool = False,
+        repeat_failure_key: Optional[str] = None,
         result_status: Optional[str] = None,
         queued_run: Optional[dict[str, Any]] = None,
         expected_uncanceled_run_id: Optional[str] = None,
@@ -2241,6 +2245,7 @@ class ScheduledTaskStore:
             task,
             expect,
             queued_run=queued_run,
+            repeat_failure_key=repeat_failure_key,
             expected_uncanceled_run_id=expected_uncanceled_run_id,
             expected_schedule_generation=expected_schedule_generation,
             expected_terminal_run_id=expected_terminal_run_id,
@@ -9358,7 +9363,7 @@ class ScheduledTaskService:
             else:
                 outcome = dict(intent.outcome)
             queued_run = intent.definition_stamp.get("queued_run")
-            if stamped and queued_run:
+            if stamped and queued_run and intent.definition_stamp.get("repeat_failure_key") is None:
                 outcome["escalation_run_id"] = queued_run["id"]
             elif stamped is False and not outcome.get("error"):
                 outcome.update(ok=False, error=self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY))
@@ -9697,7 +9702,10 @@ class ScheduledTaskService:
         # RAISES on a disabled one, and a failed ``at`` task is disabled by the very
         # stamp that authorises this turn.
         escalation_request = None
-        if error and task.on_failure == "agent":
+        # A one-shot cannot wait for a second scheduled fire. If an older client
+        # edits a recurring task into a one-shot, report its first failure.
+        repeat = task.on_failure == "agent-on-repeat" and task.schedule_type == "cron"
+        if error and task.on_failure in ("agent", "agent-on-repeat"):
             escalation_request = self.request_store.build_hook_send(
                 session_key=task.session_key or "",
                 session_id=task.session_id,
@@ -9762,6 +9770,17 @@ class ScheduledTaskService:
             ),
             expected_non_owner_retired_one_shot=non_owner_retired_expectation,
         )
+        if repeat:
+            # Classify by stable machine outcome and the last captured diagnostic,
+            # never a Run id, translated prefix or stdout. No diagnostic text in the cursor.
+            detail = next((line.strip() for line in reversed((stderr_value or "").splitlines()) if line.strip()), "")
+            identity = [task.shell_command, task.command, timed_out, exit_code,
+                        "" if timed_out else detail or (error if exit_code is None else "")]
+            stamp_kwargs.update(
+                repeat_failure_key=hashlib.sha256(json.dumps(identity).encode()).hexdigest() if error else "",
+                expected_binding=(task.session_id, task.session_key, task.schedule_type),
+                expected_uncanceled_run_id=execution_id,
+            )
         stamped, projection_error, retry_stamp = await self._store_step(
             self._mark_command_result, task.id, **stamp_kwargs
         )
@@ -9770,7 +9789,7 @@ class ScheduledTaskService:
         # so claiming an escalation id here would suppress the failure notice in favour
         # of a turn that does not exist -- and the failure would be silent.
         escalation_run_id = (
-            escalation_request.id if escalation_request is not None and stamped else None
+            escalation_request.id if escalation_request is not None and stamped and not repeat else None
         )
         if stamped is False:
             # Same refusal as the message path (HFR-261/HFR-264): the definition was
@@ -9828,6 +9847,8 @@ class ScheduledTaskService:
         """
 
         lines: list[str] = []
+        if task.on_failure == "agent-on-repeat":
+            lines.append("Triage this recurring command failure. Contact the user only if a decision or permission is needed.")
         stored_message = (task.prompt or "").strip()
         if stored_message:
             lines.append(stored_message)

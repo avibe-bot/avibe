@@ -411,6 +411,17 @@ run_definitions = Table(
     Index("ix_run_definitions_updated", "updated_at"),
 )
 
+# Runtime-owned: a full-row definition edit must not overwrite an active incident.
+command_failure_incidents = Table(
+    "command_failure_incidents", metadata,
+    Column("definition_id", String, primary_key=True),
+    Column("fingerprint", String, nullable=False),
+    Column("fire_id", String, nullable=False),
+    Column("reported", Integer, nullable=False),
+    Column("prior_fingerprint", String, nullable=True),
+    Column("prior_reported", Integer, nullable=False),
+)
+
 agent_runs = Table(
     "agent_runs",
     metadata,

@@ -685,7 +685,7 @@ vibe task remove <task-id>
 - 用 `--cron` / `--at` 控制定时方式
 - 以及 `--name`、`--timezone`、`--message-file` 等参数
 - 用 `--shell` 或写在 `--` 之后的 argv 创建不触发 Agent turn 的定时命令任务，
-  可搭配 `--on-failure {none,agent}`、按次执行的 `--timeout`
+  可搭配 `--on-failure {none,agent,agent-on-repeat}`、按次执行的 `--timeout`
   （默认 21600 秒，`0` 表示不限制），以及指定命令执行目录的 `--cwd`
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
@@ -699,7 +699,11 @@ IM 频道或话题，请用 `--create-session`（或 `--create-session-per-run`�
 也不接受 session、scope 或 agent 相关参数。执行成功时完全静默；执行失败会记录一条
 持久化的失败通知，并在通知中写明命令与退出码。若使用
 `--on-failure agent --message '<处理说明>'`，失败会改为触发一次携带失败报告的 Agent
-turn，并由该 turn 取代这次执行的失败通知。`vibe task update` 可以修改命令任务的
+turn，并由该 turn 取代这次执行的失败通知。
+
+周期命令可以选 `--on-failure agent-on-repeat`：第一次失败只记录在运行历史里；同一错误连续出现第二次时，通知维护 Agent 一次，之后不重复提醒。成功后重新计数，不同错误另算。匹配依据是命令、退出码和最后一行非空标准错误；调度器超时单独归类。可用 `--session-id` 指定维护会话。
+
+`vibe task update` 可以修改命令任务的
 `--shell`、argv、`--timeout` 或 `--cwd`，但在 message 形态与 command 形态之间切换、
 或修改 `--on-failure`，都会被拒绝——请删除任务后重新创建。
 

@@ -763,13 +763,14 @@ vibe task add (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <ar
 - `--message`
 - `--message-file`
 - `--shell`
-- `--on-failure {none,agent}`
+- `--on-failure {none,agent,agent-on-repeat}`
 - `--timeout <秒>`
 - `--cwd <目录>`
 - `--timezone`
 
 命令任务（`--shell` 或写在 `--` 之后的 argv）执行时不会触发任何 Agent turn，
-除非设置了 `--on-failure agent`，否则不接受 session、scope 或 agent 相关参数。
+只有选择由 Agent 处理失败时，才接受 session、scope 或 agent 相关参数。
+周期命令可以选 `--on-failure agent-on-repeat`：第一次失败只记录在运行历史里；同一错误连续出现第二次时，通知维护 Agent 一次，之后不重复提醒。成功后重新计数，不同错误另算。匹配依据是命令、退出码和最后一行非空标准错误；调度器超时单独归类。可用 `--session-id` 指定维护会话。
 `--timeout` 限制每次命令执行的时长（默认 21600 秒，`0` 表示不限制）。
 `--cwd` 指定命令的执行目录；当 `--on-failure agent` 绑定到已存在的 Session 时，
 它只作用于命令，升级 Session 保留自己的工作目录；配合 `--create-session` /

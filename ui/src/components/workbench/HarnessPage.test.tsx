@@ -646,9 +646,12 @@ describe('TaskDetail command task', () => {
     // Not gated on the KIND: an escalation turn is routed by exactly these
     // fields, and a command bound to a conversation delivers its failure notice
     // there, so hiding them for every command would drop real answers.
-    const escalates = detail(task({ shell_command: 'make test', metadata: { on_failure: 'agent' } }));
-    expect(escalates).toContain(`>${i18n.t('harness.detail.agent')}<`);
-    expect(escalates).toContain(`>${i18n.t('harness.detail.delivery')}<`);
+    for (const policy of ['agent', 'agent-on-repeat'] as const) {
+      const escalates = detail(task({ shell_command: 'make test', metadata: { on_failure: policy } }));
+      expect(escalates).toContain(`>${i18n.t(`harness.onFailure.${policy}`)}<`);
+      expect(escalates).toContain(`>${i18n.t('harness.detail.agent')}<`);
+      expect(escalates).toContain(`>${i18n.t('harness.detail.delivery')}<`);
+    }
 
     const bound = detail(task({ shell_command: 'make test', session_key: 'slack::channel::C123', post_to: 'thread' }));
     expect(bound).toContain(`>${i18n.t('harness.detail.delivery')}<`);

@@ -879,7 +879,7 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
 - `--shell` / trailing `-- <argv>` for a scheduled command with no Agent turn,
-  with `--on-failure {none,agent}`, a per-run `--timeout` (default 21600
+  with `--on-failure {none,agent,agent-on-repeat}`, a per-run `--timeout` (default 21600
   seconds, 0 = none), and `--cwd` for the directory the command runs in
 
 One-shot `--at` Tasks tolerate up to five minutes of scheduler lateness, including
@@ -901,7 +901,11 @@ default and takes no session, scope, or agent flags. Successful runs are silent;
 a failed run records a durable failure notice naming the command and its exit
 code. With `--on-failure agent --message '<instructions>'` the failure instead
 starts one Agent turn carrying the failure report, and that turn replaces the
-notice for the run. `vibe task update` can change a command task's `--shell`,
+notice for the run.
+
+`--on-failure agent-on-repeat` is for recurring commands: the first failure stays in Run history; the second consecutive matching failure starts one Agent turn. Further matches are silent. A success clears the incident and a different failure starts a new one. Matching uses the command, exit status, and last nonempty stderr line; scheduler timeouts are a separate class. Choose a maintenance Session with `--session-id`.
+
+`vibe task update` can change a command task's `--shell`,
 argv, `--timeout`, or `--cwd`, but switching a task between message and command
 form, or changing `--on-failure`, is rejected — remove the task and recreate it.
 

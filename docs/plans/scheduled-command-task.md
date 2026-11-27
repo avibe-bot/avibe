@@ -236,6 +236,27 @@ long-lived supervisor heartbeat (`watch_runtime`,
 execution counts. A command run *is* the execution, so it keeps the execution
 run_type. The escalation turn is a second row — see D4.
 
+#### Recurring commands: one handoff per incident
+
+`--on-failure agent-on-repeat` is opt-in at creation. The first failure is visible
+as a failed Run, not a notification. A second matching failure queues one Agent
+turn on the task's normal binding. A successful command clears the incident;
+changing the error starts a new pair. Every execution still has its own Run.
+The default notice policy and `agent` on every failure are unchanged.
+
+The fingerprint includes the command, timeout outcome, exit status and last
+nonempty line of captured stderr. For a supervisor error without a line or
+status it uses the recorded reason. A timeout ignores partial stderr. There is
+no fuzzy matching of timestamps or other changing values in diagnostics.
+
+The result stamp, per-definition incident row, parent Run’s notification
+decision and optional outbox entry commit together. Refusal or failed delivery
+uses normal failure reporting. Stopping a fire after that stamp withdraws its
+queued turn; the next fire does not count the stopped one. The cursor contains
+only hashes, flags and the fire ID, not a copy of stderr. SCT-063 exercises
+matching and rearming across service instances. Upgrade and downgrade leave
+existing definitions unchanged. No running task is converted automatically.
+
 ### D2: Extract the watch subprocess runner and share it
 
 The watch service already owns a hardened runner (`_run_cycle`,

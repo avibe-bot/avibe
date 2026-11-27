@@ -882,13 +882,14 @@ Important options:
 - `--message`
 - `--message-file`
 - `--shell`
-- `--on-failure {none,agent}`
+- `--on-failure {none,agent,agent-on-repeat}`
 - `--timeout <seconds>`
 - `--cwd <dir>`
 - `--timezone`
 
 A command task (`--shell` or a trailing `-- <argv>`) runs with no Agent turn and
-takes no session, scope, or agent flags unless `--on-failure agent` is set.
+takes no session, scope, or agent flags unless an Agent failure policy is set.
+`--on-failure agent-on-repeat` is for recurring commands: the first failure stays in Run history; the second consecutive matching failure starts one Agent turn. Further matches are silent. A success clears the incident and a different failure starts a new one. Matching uses the command, exit status, and last nonempty stderr line; scheduler timeouts are a separate class. Choose a maintenance Session with `--session-id`.
 `--timeout` bounds each command run (default 21600 seconds, `0` = no timeout).
 `--cwd` is where the command runs; with `--on-failure agent` bound to an existing
 Session it means only that, and the escalation Session keeps its own working

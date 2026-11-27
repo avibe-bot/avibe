@@ -1343,10 +1343,10 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
   const { t } = useTranslation();
   const isCommand = taskIsCommand(task);
   const commandPreview = isCommand ? taskCommandPreview(task) : '';
-  const escalates = isCommand && taskOnFailure(task) === 'agent';
+  const escalates = isCommand && taskOnFailure(task) !== 'none';
   const routesSomewhere =
     !isCommand ||
-    taskOnFailure(task) === 'agent' ||
+    escalates ||
     Boolean(task.agent_name) ||
     Boolean(task.session_id) ||
     Boolean(task.session_key) ||
