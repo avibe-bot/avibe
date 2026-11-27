@@ -18,6 +18,21 @@ pub const DEADLINE_MILLISECONDS: u32 = 4_000;
 /// The name of the world the script runs in. Only these adapters use it.
 pub const WORLD: &str = "bot.avibe.direct.rendezvous";
 
+/// What `Client::refresh_reply` asks one rendezvous request to carry: this
+/// client's endpoint key, and the diagnostic report the instance logs
+/// (`leg_faults`, `path_use`: fixed words, counts and durations only).
+pub(super) struct Asked {
+    pub(super) endpoint: String,
+    pub(super) report: Report,
+}
+
+/// The diagnostic part of a request. Empty lists are not sent.
+#[derive(Default)]
+pub(super) struct Report {
+    pub(super) leg_faults: Vec<serde_json::Value>,
+    pub(super) path_use: Vec<serde_json::Value>,
+}
+
 /// One rendezvous request of one top document: its exact origin, the
 /// absolute URL (a page can add a `<base>` element, which would move a
 /// relative one), and the body.
@@ -33,6 +48,18 @@ impl Request {
     /// is what `Client::refresh` passes. `None` for anything else, so nothing
     /// a caller did not mean is ever written into a script or a request.
     pub fn new(origin: &str, client_endpoint_id: &str) -> Option<Self> {
+        Self::reporting(origin, client_endpoint_id, &Report::default())
+    }
+
+    /// The request the core asked for, with its report. The report is the
+    /// core's own (`Client::refresh_reply`): each entry has exactly the keys
+    /// the instance requires, and one it does not accept makes it ignore
+    /// that list whole. An instance that does not know a list ignores it.
+    pub(super) fn asked(origin: &str, asked: &Asked) -> Option<Self> {
+        Self::reporting(origin, &asked.endpoint, &asked.report)
+    }
+
+    fn reporting(origin: &str, client_endpoint_id: &str, report: &Report) -> Option<Self> {
         if origin_of(origin).as_deref() != Some(origin) {
             return None;
         }
@@ -44,10 +71,16 @@ impl Request {
         if !id_ok {
             return None;
         }
+        let mut body = serde_json::json!({ "version": 1, "client_endpoint_id": client_endpoint_id });
+        for (name, entries) in [("leg_faults", &report.leg_faults), ("path_use", &report.path_use)] {
+            if !entries.is_empty() {
+                body[name] = serde_json::Value::Array(entries.clone());
+            }
+        }
         Some(Self {
             origin: origin.to_owned(),
             url: format!("{origin}{PATH}"),
-            body: serde_json::json!({ "version": 1, "client_endpoint_id": client_endpoint_id }).to_string(),
+            body: body.to_string(),
         })
     }
 

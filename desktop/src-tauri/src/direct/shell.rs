@@ -10,7 +10,7 @@
 use super::{
     choices::{Choices, Mode, Reason, Reverted},
     dead_end::DeadEnd,
-    rendezvous::{origin_of, Reply, Request},
+    rendezvous::{origin_of, Asked, Reply, Request},
     wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
     Client, RefreshOutcome,
 };
@@ -801,15 +801,8 @@ async fn run(
 /// "the selection changed", whatever the instance said. A view that is only
 /// between two documents is still the selection; the adapter then finds no
 /// document of the instance and says "not ready".
-async fn ask(
-    app: AppHandle,
-    state: Arc<Direct>,
-    session: u64,
-    window: String,
-    origin: String,
-    endpoint: String,
-) -> Reply {
-    let Some(request) = Request::new(&origin, &endpoint) else {
+async fn ask(app: AppHandle, state: Arc<Direct>, session: u64, window: String, origin: String, asked: Asked) -> Reply {
+    let Some(request) = Request::asked(&origin, &asked) else {
         return Reply::Failed;
     };
     let (answer, answered) = oneshot::channel();
