@@ -1,10 +1,21 @@
 """Verify routing against a compiled catalog and receipts from the result tree."""
 
+import json
+from pathlib import Path
 import subprocess
 
 import pytest
 
-from scripts.ci_native_pr_tests import CONTRACTS, changed_sources, enumeration, selection, verify, verify_membership
+from scripts.ci_native_pr_tests import (
+    CONTRACTS,
+    changed_sources,
+    declared_classes,
+    enumeration,
+    fixture_env,
+    selection,
+    verify,
+    verify_membership,
+)
 
 TARGET = "AvibeTests"
 COMMON = "AvibeTests/CommonTests/testAlways"
@@ -51,7 +62,15 @@ def tree(statuses, bundle=TARGET):
     }
 
 
-def test_conditional_second_class_selected_and_verified(tmp_path):
+@pytest.fixture
+def swift_parser():
+    # The hosted native job installs and checks both imports before running this
+    # suite. Linux unit shards do not install native CI-only parser bindings.
+    pytest.importorskip("tree_sitter")
+    pytest.importorskip("tree_sitter_swift")
+
+
+def test_conditional_second_class_selected_and_verified(tmp_path, swift_parser):
     path = "ios/AvibeTests/UnrelatedFilename.swift"
     repo(tmp_path, {path: "class CommonTests: XCTestCase {}"})
     (tmp_path / path).write_text(
@@ -66,7 +85,7 @@ def test_conditional_second_class_selected_and_verified(tmp_path):
             verify(tree(dict.fromkeys(required - {absent}, "Passed")), TARGET, required)
 
 
-def test_deletion_and_rename_read_old_extension_but_not_vanished_class(tmp_path):
+def test_deletion_and_rename_read_old_extension_but_not_vanished_class(tmp_path, swift_parser):
     old, new = "ios/AvibeTests/Before.swift", "ios/AvibeTests/After.swift"
     repo(tmp_path, {old: "extension CommonTests {}\nclass RemovedTests: XCTestCase {}"})
     (tmp_path / old).unlink()
@@ -95,6 +114,78 @@ def test_app_only_and_helpers_and_other_scheme(tmp_path):
     assert selection(
         "AvibeSheetFixtureTests", [({"HoldTouchUITests"}, True, tmp_path / "Sheet.swift")], {fix}, set()
     ) == (["AvibeSheetFixtureTests/HoldTouchUITests"], {fix})
+
+
+def test_real_shared_helper_and_protocol_reference(swift_parser):
+    root = Path(__file__).resolve().parents[1] / "ios/AvibeTests"
+    available = ALL | {f"{TARGET}/DirectPathAppTests/testPath", f"{TARGET}/DirectIrohInteropProtocolTests/testProtocol"}
+    helper = root / "WebKitReadiness.swift"
+    protocol = root / "DirectIrohInteropProtocolTests.swift"
+    owners = declared_classes(helper.read_bytes())
+    assert "DirectPathAppTests" not in owners
+    assert selection(TARGET, [(owners, True, helper)], available, set()) == ([TARGET], CONTRACTS)
+    owners = declared_classes(protocol.read_bytes())
+    assert "DirectIrohInteropTests" not in owners
+    assert selection(TARGET, [(owners, True, protocol)], available, set())[1] == CONTRACTS | {
+        f"{TARGET}/DirectIrohInteropProtocolTests/testProtocol"
+    }
+    assert declared_classes(b'// class Bogus {}\nlet text = #"extension Bogus {}"#\nextension Mod.PhoneTests {}') == {
+        "PhoneTests"
+    }
+
+
+def test_ambiguous_parse_requires_full_receipts_even_on_deletion(tmp_path, swift_parser):
+    name = "ios/AvibeTests/Old.swift"
+    repo(tmp_path, {name: "class {"})
+    (tmp_path / name).unlink()
+    src = changed_sources([name], tmp_path, "HEAD")
+    assert selection(TARGET, src[TARGET], ALL, set()) == ([TARGET], ALL - {OPTIONAL})
+
+
+@pytest.mark.parametrize("owners", [{"DirectIrohInteropTests"}, {"DirectIrohInteropTests", "PhoneTests"}])
+def test_named_master_only_exception_does_not_waive_other_receipts(owners):
+    selected, required = selection(TARGET, [(owners, True, Path("Mixed.swift"))], ALL, set())
+    assert not any("DirectIrohInteropTests" in s for s in [*selected, *required])
+    assert required == (CONTRACTS | {PHONE} if "PhoneTests" in owners else CONTRACTS)
+
+
+def test_native_capture_env_is_scoped(tmp_path):
+    env = {"KEEP": "yes"}
+    with fixture_env(set(), env, tmp_path) as got:
+        assert got == env
+    with fixture_env({f"{TARGET}/NativeScreenCaptureTests/testCaptureNativeScreens"}, env, tmp_path) as got:
+        assert got == {**env, "TEST_RUNNER_AVIBE_NATIVE_CAPTURES": "1"}
+    assert env == {"KEEP": "yes"}
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_show_fixture_requires_own_readiness_and_cleans_up(tmp_path, monkeypatch, valid):
+    class Child:
+        pid = 1234
+        closed = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.closed = True
+
+        def wait(self, timeout):
+            assert self.closed
+
+    child = Child()
+
+    def spawn(args):
+        assert args[:3] == ["node", "ios/scripts/show_share_foreground.mjs", "--report-file"]
+        Path(args[-1]).write_text(json.dumps({"pid": child.pid if valid else -1, "url": "http://127.0.0.1:8765"}))
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    with pytest.raises(ValueError, match="after readiness" if valid else "Invalid Show"):
+        with fixture_env({f"{TARGET}/ShowShareForegroundTests/testShow"}, {}, tmp_path) as env:
+            assert env["TEST_RUNNER_AVIBE_I1_FOREGROUND_ORIGIN"] == "http://127.0.0.1:8765"
+            raise ValueError("after readiness")
+    assert child.closed and not list(tmp_path.iterdir())
 
 
 def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
