@@ -9,7 +9,7 @@ final class DirectRendezvousTests: XCTestCase {
 
     private var expectation: DirectRendezvousExpectation {
         DirectRendezvousExpectation(
-            instanceID: "inst_1",
+            attemptID: 1,
             hostname: "alice-app.avibe.bot",
             clientEndpointID: client
         )
@@ -739,11 +739,11 @@ final class ColdStartTimingsTests: XCTestCase {
         timings.firstBindConfirmed(took: .milliseconds(240), late: false)
         // A frame with no restored open (a launch from a tap, or the list)
         // is not measured.
-        timings.firstVisible(.live, instanceID: "inst_1")
+        timings.firstVisible(.live, attemptID: 1)
         XCTAssertTrue(timings.pending.isEmpty)
-        timings.openingRestoredInstance("inst_1")
+        timings.openedRestoredInstance(attemptID: 1)
         XCTAssertTrue(timings.pending.isEmpty)
-        timings.firstVisible(.cached, instanceID: "inst_1")
+        timings.firstVisible(.cached, attemptID: 1)
         let entry = try XCTUnwrap(timings.pending.first)
         XCTAssertEqual(timings.pending.count, 1)
         XCTAssertEqual(entry.bindMs, 240)
@@ -752,8 +752,8 @@ final class ColdStartTimingsTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(entry.visibleMs, 0)
         // Later binds, frames or opens in the same process add nothing.
         timings.firstBindConfirmed(took: .seconds(3), late: true)
-        timings.firstVisible(.live, instanceID: "inst_1")
-        timings.openingRestoredInstance("inst_1")
+        timings.firstVisible(.live, attemptID: 1)
+        timings.openedRestoredInstance(attemptID: 1)
         XCTAssertEqual(timings.pending, [entry])
 
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.json.utf8)) as? [String: Any])
@@ -766,39 +766,51 @@ final class ColdStartTimingsTests: XCTestCase {
     func testNoEntryWithoutABindOrAVisibleFrame() {
         let noBind = ColdStartTimings()
         noBind.launched()
-        noBind.openingRestoredInstance("inst_1")
-        noBind.firstVisible(.live, instanceID: "inst_1")
+        noBind.openedRestoredInstance(attemptID: 1)
+        noBind.firstVisible(.live, attemptID: 1)
         XCTAssertTrue(noBind.pending.isEmpty)
 
         let nothingShown = ColdStartTimings()
         nothingShown.launched()
-        nothingShown.openingRestoredInstance("inst_1")
+        nothingShown.openedRestoredInstance(attemptID: 1)
         nothingShown.firstBindConfirmed(took: .milliseconds(1_800), late: true)
         XCTAssertTrue(nothingShown.pending.isEmpty)
 
-        // Another instance's frame (the restored open was left) is not
-        // this launch's.
+        // Another attempt's frame is not this launch's, and once the
+        // restored attempt has ended without a frame nothing is recorded.
         let other = ColdStartTimings()
         other.launched()
-        other.openingRestoredInstance("inst_1")
+        other.openedRestoredInstance(attemptID: 1)
         other.firstBindConfirmed(took: .milliseconds(300), late: false)
-        other.firstVisible(.live, instanceID: "inst_2")
+        other.firstVisible(.live, attemptID: 2)
         XCTAssertTrue(other.pending.isEmpty)
+        other.openEnded(attemptID: 1)
+        other.firstVisible(.live, attemptID: 1)
+        XCTAssertTrue(other.pending.isEmpty)
+
+        // An attempt that ends after its frame keeps its entry.
+        let ended = ColdStartTimings()
+        ended.launched()
+        ended.openedRestoredInstance(attemptID: 1)
+        ended.firstVisible(.cached, attemptID: 1)
+        ended.openEnded(attemptID: 1)
+        ended.firstBindConfirmed(took: .milliseconds(90), late: false)
+        XCTAssertEqual(ended.pending.count, 1)
 
         // A frame before `launched` is not measured.
         let unlaunched = ColdStartTimings()
-        unlaunched.openingRestoredInstance("inst_1")
+        unlaunched.openedRestoredInstance(attemptID: 1)
         unlaunched.firstBindConfirmed(took: .milliseconds(10), late: false)
-        unlaunched.firstVisible(.live, instanceID: "inst_1")
+        unlaunched.firstVisible(.live, attemptID: 1)
         XCTAssertTrue(unlaunched.pending.isEmpty)
     }
 
     func testTheRequestCarriesTheEntriesUntilAnswered() throws {
         let timings = ColdStartTimings()
         timings.launched()
-        timings.openingRestoredInstance("inst_1")
+        timings.openedRestoredInstance(attemptID: 1)
         timings.firstBindConfirmed(took: .milliseconds(2_400), late: true)
-        timings.firstVisible(.live, instanceID: "inst_1")
+        timings.firstVisible(.live, attemptID: 1)
         let sent = timings.pending
         let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
         XCTAssertEqual(

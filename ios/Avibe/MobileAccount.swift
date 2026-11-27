@@ -2581,10 +2581,10 @@ final class SlowStoreRemovals {
 /// - `visible`: which of the two it was.
 ///
 /// One entry per launch whose bootstrap opened a restored instance, made
-/// only when both times were measured, for that instance and the process's
-/// first listener: no bind (Cloudflare tunnel only, no transport, a first
-/// bind that failed or was retired) or nothing of that instance uncovered
-/// (its open failed or was left) records nothing. A launch from a
+/// only when both times were measured, for that open attempt and the
+/// process's first listener: no bind (Cloudflare tunnel only, no transport,
+/// a first bind that failed or was retired) or an attempt that ended or was
+/// replaced before it uncovered anything records nothing. A launch from a
 /// notification tap or a shortcut is no restored open.
 @MainActor
 final class ColdStartTimings {
@@ -2613,8 +2613,8 @@ final class ColdStartTimings {
     private var nextID = 0
     private let clock = ContinuousClock()
     private var launchedAt: ContinuousClock.Instant?
-    /// The instance the bootstrap opened from the last session in this launch.
-    private var restoredInstanceID: String?
+    /// The open attempt the bootstrap started for the restored instance.
+    private var restoredAttemptID: Int?
     private var bind: (ms: Int, late: Bool)?
     private var shown: (ms: Int, visible: Visible)?
     /// This launch's entry was made, or can no longer be.
@@ -2626,11 +2626,19 @@ final class ColdStartTimings {
         launchedAt = clock.now
     }
 
-    /// The bootstrap is opening the instance restored from the last session.
-    func openingRestoredInstance(_ instanceID: String) {
-        guard !settled, launchedAt != nil, restoredInstanceID == nil else { return }
-        restoredInstanceID = instanceID
+    /// The bootstrap opened the instance restored from the last session, as
+    /// this attempt.
+    func openedRestoredInstance(attemptID: Int) {
+        guard !settled, launchedAt != nil, restoredAttemptID == nil else { return }
+        restoredAttemptID = attemptID
         complete()
+    }
+
+    /// The restored open attempt ended or was replaced: if it uncovered
+    /// nothing, this launch records nothing.
+    func openEnded(attemptID: Int) {
+        guard !settled, attemptID == restoredAttemptID, shown == nil else { return }
+        settled = true
     }
 
     /// The listener's first bind in this process was confirmed.
@@ -2640,11 +2648,10 @@ final class ColdStartTimings {
         complete()
     }
 
-    /// The first frame that uncovers the restored instance in this process.
-    /// Another instance's frame (one opened after the restored open failed
-    /// or was left) is not this launch's.
-    func firstVisible(_ visible: Visible, instanceID: String) {
-        guard !settled, shown == nil, let launchedAt, instanceID == restoredInstanceID else { return }
+    /// The first frame that uncovers the restored open attempt. Another
+    /// attempt's frame is not this launch's.
+    func firstVisible(_ visible: Visible, attemptID: Int) {
+        guard !settled, shown == nil, let launchedAt, attemptID == restoredAttemptID else { return }
         shown = (Self.milliseconds(launchedAt.duration(to: clock.now)), visible)
         complete()
     }
@@ -2656,7 +2663,7 @@ final class ColdStartTimings {
     }
 
     private func complete() {
-        guard restoredInstanceID != nil, let bind, let shown else { return }
+        guard restoredAttemptID != nil, let bind, let shown else { return }
         settled = true
         pending.append(Entry(id: nextID, bindMs: bind.ms, visibleMs: shown.ms, late: bind.late, visible: shown.visible))
         nextID &+= 1
