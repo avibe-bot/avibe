@@ -6,6 +6,11 @@ name: desktop-direct-live-probe
 # macOS guest against a regression instance. Nothing here runs the probe,
 # reaches an instance, or holds a credential. The job exists for pull request
 # 4330 alone; delete this file with the diagnosis.
+#
+# It builds two executables: one from the pull request's head, and one from
+# that head merged with a pinned commit of another open pull request (see the
+# matrix below). The second is for that pull request's gate; its artifact
+# name carries both hashes.
 
 on:
   pull_request:
@@ -29,7 +34,17 @@ env:
 
 jobs:
   build:
-    name: macos-arm64 executable
+    name: macos-arm64 executable${{ matrix.fix && ' on a fix' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pull request's head alone, and the same head merged with one
+        # other commit of this repository: the head of pull request 4363 (the
+        # shared-address-space fix), so that fix's gate can run the
+        # diagnostic on the fixed core before either pull request merges.
+        # Pinned by its full hash. Nothing of it is added to this pull
+        # request: the merge exists only in this job's checkout.
+        fix: ["", "b8bad7e58b334d4512dd4b6feba96cbe6eb83873"]
     # Pull request 4330 of this repository, from its own branch: never a
     # fork, never another pull request that happens to touch these paths.
     if: >-
@@ -50,14 +65,56 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+          # A merge needs the history the two commits share.
+          fetch-depth: ${{ matrix.fix && '0' || '1' }}
+
+      # The other commit, in a checkout of its own beside the first: fetched
+      # from there by path, so the first keeps no credential.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: matrix.fix != ''
+        with:
+          ref: ${{ matrix.fix }}
+          path: merged-with
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Merge the fix into the checkout
+        if: matrix.fix != ''
+        working-directory: .
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ON_SHA: ${{ matrix.fix }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ]
+          [ "$(git -C merged-with rev-parse HEAD)" = "$ON_SHA" ]
+          git fetch --no-tags "$PWD/merged-with" "$ON_SHA"
+          [ "$(git rev-parse FETCH_HEAD)" = "$ON_SHA" ]
+          rm -rf merged-with
+          # A conflict fails the job: nothing is resolved here.
+          git -c user.name=probe-build -c user.email=probe-build@users.noreply.github.com \
+            merge --no-edit --no-ff "$ON_SHA"
+          echo "merged: $HEAD_SHA with $ON_SHA"
+          echo "tree: $(git rev-parse 'HEAD^{tree}')"
 
       - name: Report the source and the toolchain
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ON_SHA: ${{ matrix.fix }}
         run: |
           set -euo pipefail
-          built="$(git rev-parse HEAD)"
-          echo "source: $built"
+          if [ -n "$ON_SHA" ]; then
+            # The merge's two parents, in order, are exactly the two commits.
+            built="$(git rev-parse 'HEAD^1')"
+            [ "$(git rev-parse 'HEAD^2')" = "$ON_SHA" ] || {
+              echo "the merge's second parent is not $ON_SHA" >&2
+              exit 1
+            }
+            echo "source: $built merged with $ON_SHA"
+          else
+            built="$(git rev-parse HEAD)"
+            echo "source: $built"
+          fi
           [ "$built" = "$HEAD_SHA" ] || {
             echo "checked out $built, expected the pull request's head $HEAD_SHA" >&2
             exit 1
@@ -129,7 +186,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: direct-live-probe-macos-arm64-${{ github.event.pull_request.head.sha }}
+          name: direct-live-probe-macos-arm64-${{ github.event.pull_request.head.sha }}${{ matrix.fix && format('-on-{0}', matrix.fix) || '' }}
           path: desktop/target/debug/examples/direct_live_probe
           if-no-files-found: error
           retention-days: 2
