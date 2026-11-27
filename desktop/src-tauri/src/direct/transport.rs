@@ -3,7 +3,7 @@
 use super::{
     clock::Clock,
     connect::Authority,
-    offer::{Offer, ALPN},
+    offer::{Offer, Verdict, ALPN},
     path::{SelectedPath, TrialRelay},
     selection::Selection,
 };
@@ -237,10 +237,11 @@ impl Link {
         self.selected_path().is_some()
     }
     pub(super) fn selected_in(&self, paths: iroh::endpoint::PathList<'_>) -> Option<SelectedPath> {
-        paths
-            .iter()
-            .find(|p| p.is_selected())
-            .and_then(|p| self.offer.selected(self.conn.remote_id(), p.remote_addr()))
+        let paths = paths.iter().map(|p| (p.is_selected(), p.remote_addr().clone()));
+        match self.offer.judge(self.conn.remote_id(), paths) {
+            Verdict::Accepted(path) => Some(path),
+            Verdict::Unselected | Verdict::Refused => None,
+        }
     }
     pub(super) fn selected_path(&self) -> Option<SelectedPath> {
         if self.remaining().is_zero() || self.conn.close_reason().is_some() {

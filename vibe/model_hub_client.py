@@ -402,6 +402,12 @@ class ModelHubRemoteService:
     async def hosted_tools_status(self) -> dict:
         return await _rpc("hosted_tools_status", {})
 
+    async def source_filter_status(self) -> dict:
+        return await _rpc("source_filter_status", {})
+
+    async def set_source_filter(self, enabled: object) -> dict:
+        return await _rpc("set_source_filter", {"enabled": enabled})
+
     async def set_hosted_tool(self, tool: str, setting: object) -> dict:
         return await _rpc("set_hosted_tool", {"tool": tool, "setting": setting})
 

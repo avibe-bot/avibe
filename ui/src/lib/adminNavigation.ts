@@ -28,6 +28,8 @@ export const OWNER_ONLY_ROUTES = [
   '/settings/models',
   '/settings/dependencies',
   '/settings/diagnostics',
+  // Experiments run the Owner's local scripts (Source filter).
+  '/settings/experimental',
   '/admin/dashboard',
   '/admin/remote-access',
   '/admin/groups',

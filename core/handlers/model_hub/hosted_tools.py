@@ -490,9 +490,12 @@ def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_
         for tool in tools
         if tool != IMAGE_TOOL
     }
+    search = hosted_tool_setting(config, "web_search")
     return TurnHostedTools(
         tools, executors, images,
-        prefer_native=hosted_tool_setting(config, "web_search").prefer_native if SEARCH_SERVICES_ACTIVE else None,
+        # The source filter needs every web_search call to reach the gateway, so the main model never searches natively.
+        prefer_native=False if search.source_filter else search.prefer_native if SEARCH_SERVICES_ACTIVE else None,
+        source_filter=search.source_filter,
     )
 
 

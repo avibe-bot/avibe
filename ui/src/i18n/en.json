@@ -750,7 +750,8 @@
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
-      "access": "Access"
+      "access": "Access",
+      "experimental": "Experimental"
     },
     "navigationLabel": "Settings sections",
     "backToWorkbench": "Back to Workbench",
@@ -3314,6 +3315,26 @@
       "desktopDenied": "macOS hasn't allowed Avibe to send notifications, so this computer gets no alerts and you can't reply from them.",
       "openSystemSettings": "Open System Settings",
       "desktopSaveFailed": "Couldn't save the notification switch. Try again."
+    },
+    "experimental": {
+      "title": "Experimental",
+      "subtitle": "These features are on trial and may change between versions.",
+      "on": "On",
+      "off": "Off",
+      "loadFailed": "Could not load the source filter. Try again.",
+      "sourceFilter": {
+        "title": "Source filter",
+        "summary": "Run your own scripts on Vibey's web search and web fetch.",
+        "use": "Use source filter",
+        "guide": "How to write scripts",
+        "scripts": "Scripts",
+        "scriptsHint": "Put them in this folder; any that are missing are skipped.",
+        "copyFolder": "Copy the folder path",
+        "found": "Found",
+        "notFound": "Not found",
+        "lastFailed": "Last run failed",
+        "failure": "{{time}} · that call was blocked"
+      }
     }
   },
   "remoteAccess": {
@@ -6164,7 +6185,9 @@
           "fetch_unsupported_content": "The document type is not supported.",
           "fetch_refused": "The page request was refused.",
           "fetch_unavailable": "The page is unavailable.",
-          "fetch_sources_blocked": "All page-reading sources are blocked or disabled."
+          "fetch_sources_blocked": "All page-reading sources are blocked or disabled.",
+          "source_filter_blocked": "The source filter blocked this call.",
+          "source_filter_failed": "A source filter script failed, so this call was blocked."
         },
         "mode": {
           "native": "Native · {{provider}}",

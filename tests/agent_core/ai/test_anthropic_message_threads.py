@@ -150,6 +150,56 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
     assert attempt.record["delta_rejection"] == "dense_delta_risk"
 
 
+@pytest.mark.parametrize("coded", [False, True], ids=["bare-not-found", "thread-not-found"])
+async def test_missing_parent_only_costs_one_replay(coded, tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sent = []
+    first = UserMessage((TextBlock("old context " * 6000),))
+    follow = UserMessage((TextBlock("next"),))
+    req = _request(messages=(first,), tools=(), source_id="missing-parent-route")
+
+    def handle(wire):
+        body = json.loads(wire.content)
+        thread = body.get("thread", {})
+        sent.append((thread, len(body["messages"]), BETA in wire.headers.get("anthropic-beta", "")))
+        if thread.get("previous_message_id") == "msg_1":
+            error = {"type": "not_found_error"}
+            if coded:
+                error["details"] = {"error_code": "thread_not_found"}
+            return httpx.Response(400, json={"error": error})
+        text = SUCCESS.replace('"usage":{"input_tokens":1}', f'"id":"msg_{len(sent)}","usage":{{"input_tokens":22000}}')
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=text)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+
+        async def send(session, messages):
+            obs = ThreadObservation(session)
+            request = replace(req, messages=messages, thread_observation=obs)
+            events = [event async for event in adapter.stream(request, CancelToken())]
+            assert isinstance(events[-1], Done)
+            return events[-1].message, obs.attempts
+
+        a, _ = await send("a", (first,))
+        b, _ = await send("b", (first,))
+        history = (first, a, follow)
+        recovered, attempts = await send("a", history)
+        assert len(attempts) == 2
+        assert attempts[0]["failure"] == "http_400" and attempts[0]["error_type"] == "not_found_error"
+        assert attempts[0].get("error_code") == ("thread_not_found" if coded else None)
+        assert attempts[1]["ordinary_baseline_bytes"] == 0
+        await send("b", (first, b, follow))
+        await send("a", (*history, recovered, follow))
+    assert sent == [
+        ({"type": "create"}, 1, True),
+        ({"type": "create"}, 1, True),
+        ({"type": "continue", "previous_message_id": "msg_1"}, 1, True),
+        ({}, 3, False),
+        ({"type": "continue", "previous_message_id": "msg_2"}, 1, True),
+        ({"type": "create"}, 5, True),
+    ]
+
+
 async def test_create_rejection_replays_once_and_remembers_route():
     sent = []
 

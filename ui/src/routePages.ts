@@ -58,6 +58,8 @@ export const SettingsDependenciesPage = lazyPage(() => settings().then((m) => m.
 export const SettingsMessagingPage = lazyPage(() => settings().then((m) => m.SettingsMessagingPage));
 export const SettingsDiagnosticsPage = lazyPage(() => settings().then((m) => m.SettingsDiagnosticsPage));
 export const SettingsLogsPage = lazyPage(() => settings().then((m) => m.SettingsLogsPage));
+export const SettingsExperimentalPage = lazyPage(() => settings().then((m) => m.SettingsExperimentalPage));
+export const SettingsSourceFilterPage = lazyPage(() => settings().then((m) => m.SettingsSourceFilterPage));
 export const PermissionsPage = lazyPage(() => settings().then((m) => m.PermissionsPage));
 
 const EXACT_PAGES: Record<string, { preload: () => Promise<unknown> }> = {

@@ -750,7 +750,8 @@
       "service": "服务",
       "dependencies": "依赖",
       "diagnostics": "诊断与日志",
-      "access": "访问"
+      "access": "访问",
+      "experimental": "实验性"
     },
     "navigationLabel": "设置分区",
     "backToWorkbench": "返回工作台",
@@ -3314,6 +3315,26 @@
       "desktopDenied": "macOS 没有允许 Avibe 发通知，所以这台电脑收不到通知，也不能在通知里回复。",
       "openSystemSettings": "打开系统设置",
       "desktopSaveFailed": "无法保存通知开关，请稍后重试。"
+    },
+    "experimental": {
+      "title": "实验性",
+      "subtitle": "这些功能还在试用，可能随版本调整。",
+      "on": "已开启",
+      "off": "关闭",
+      "loadFailed": "读取信源过滤失败，请重试。",
+      "sourceFilter": {
+        "title": "信源过滤",
+        "summary": "用你自己的脚本处理 Vibey 的网页搜索和网页读取。",
+        "use": "启用信源过滤",
+        "guide": "脚本怎么写",
+        "scripts": "脚本",
+        "scriptsHint": "放在下面的目录里，没放的会跳过。",
+        "copyFolder": "复制目录路径",
+        "found": "已找到",
+        "notFound": "未找到",
+        "lastFailed": "上次运行失败",
+        "failure": "{{time}} · 那次调用已拦下"
+      }
     }
   },
   "remoteAccess": {
@@ -6164,7 +6185,9 @@
           "fetch_unsupported_content": "不支持此文档类型。",
           "fetch_refused": "网页请求被拒绝。",
           "fetch_unavailable": "网页不可用。",
-          "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了。"
+          "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了。",
+          "source_filter_blocked": "信源过滤拦下了这次调用。",
+          "source_filter_failed": "信源过滤脚本运行失败，这次调用已拦下。"
         },
         "mode": {
           "native": "原生 · {{provider}}",

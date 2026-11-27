@@ -660,7 +660,10 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     )
     assert artifact["with"] == {
         "name": "ios-shell-xcresult",
-        "path": "${{ runner.temp }}/AvibeTests.xcresult",
+        "path": (
+            "${{ runner.temp }}/AvibeTests.xcresult\n"
+            "${{ runner.temp }}/AvibeTestsRerun.xcresult\n"
+        ),
         "if-no-files-found": "ignore",
         "retention-days": 7,
     }
