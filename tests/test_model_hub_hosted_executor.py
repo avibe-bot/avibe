@@ -24,6 +24,8 @@ from config.v2_config import (
     ModelHubBackendModelConfig,
     ModelHubHostedToolConfig,
     ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
 )
 from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import search_chain as search_chain_module
@@ -674,6 +676,11 @@ def _stale_listing_service(tmp_path, handles=()):
         0, ModelHubModelConfig(id="gpt-6-chat", provenance="discovered"),
     )
     service = _vibey_service(tmp_path, sources, handles=handles)
+    # Keep the executor row off Codex's automatic same-ID route regardless of
+    # which model leads the bundled menu. Route turn traffic to chat instead.
+    service.store.config.agents["codex"].routes["gpt-6-astra"] = ModelHubRouteConfig(
+        (ModelHubRouteHopConfig(OPENAI, "gpt-6-chat"),)
+    )
     _chain(service, "web_search", (OPENAI, "gpt-6-astra"), (XAI, "grok-4.6"))
     service.adapter.stop = lambda: asyncio.sleep(0)
     return service
