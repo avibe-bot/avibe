@@ -174,4 +174,16 @@ describe('the Settings copy', () => {
 
     expect(i18n.t(settingsKey as never)).toBe(lookup(en, settingsKey));
   });
+
+  it('arrives in the language a switch under way lands on', async () => {
+    const i18n = await open('zh');
+    const { loadSettingsCopy } = await import('./settingsCopy');
+    const switching = i18n.changeLanguage('en');
+    expect((i18n as typeof i18n & { isLanguageChangingTo?: string }).isLanguageChangingTo).toBe('en');
+    await loadSettingsCopy();
+    await switching;
+
+    expect(i18n.language).toBe('en');
+    expect(i18n.t(settingsKey as never)).toBe(lookup(en, settingsKey));
+  });
 });

@@ -20,12 +20,27 @@ let pending: Promise<void> | null = null;
  * key in `translation` and loads nothing here.
  */
 export function loadSettingsCopy(): Promise<void> {
-  pending ??= new Promise<void>((resolve, reject) => {
-    void i18n.loadNamespaces(SETTINGS_COPY_NAMESPACE, (errors: unknown) => {
+  pending ??= (async () => {
+    // A language switch already under way loads only the namespaces in use when
+    // it began, so the language it lands on gets this copy here too.
+    // (i18next keeps the target in `isLanguageChangingTo`, untyped, and hands
+    // either callback the load's errors; src/i18n/app.test.ts covers the switch.)
+    const switching = (i18n as typeof i18n & { isLanguageChangingTo?: string }).isLanguageChangingTo;
+    await Promise.all([
+      settle((done) => i18n.loadNamespaces(SETTINGS_COPY_NAMESPACE, done)),
+      switching ? settle((done) => i18n.reloadResources(switching, SETTINGS_COPY_NAMESPACE, done as () => void)) : undefined,
+    ]);
+  })();
+  return pending;
+}
+
+/** i18next reports a failed load as a list of errors: reject with the first, the fetch's own. */
+function settle(load: (done: (errors: unknown) => void) => unknown): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    void load((errors) => {
       const error = Array.isArray(errors) ? errors[0] : errors;
       if (error) reject(error instanceof Error ? error : new Error(String(error)));
       else resolve();
     });
   });
-  return pending;
 }
