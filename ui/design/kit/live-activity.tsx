@@ -100,7 +100,7 @@ function Heading({ activity, onBlack = false }: { activity: TurnActivity; onBlac
       {activity.title && <div className={clsx('truncate text-sm leading-5', muted)}>{activity.agent}</div>}
       <div className="mt-1 flex items-start gap-1.5 text-sm leading-5">
         <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('mt-0.5 size-3.5 shrink-0', onBlack && activity.staleSince && 'text-island-foreground/60')} />
-        <span>
+        <span className="min-w-0 truncate">
           <span className={clsx('font-semibold', tone)}>{copy.status}</span>
           <span className={muted}>{' · '}{copy.detail}</span>
         </span>
