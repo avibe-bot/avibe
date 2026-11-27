@@ -212,6 +212,7 @@ jobs:
           path: |
             ${{ runner.temp }}/AvibeTests.xcresult
             ${{ runner.temp }}/AvibeTestsRerun.xcresult
+            ${{ runner.temp }}/*TestsRerun[1-3].xcresult
             ${{ runner.temp }}/native-enumeration-retry.txt
           if-no-files-found: ignore
           retention-days: 7

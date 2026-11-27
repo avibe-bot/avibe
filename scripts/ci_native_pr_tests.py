@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 
+from ios.scripts.xctest_stall_retry import record_rerun, stalled_failures
 from scripts.ci_docs_only import git
 from scripts.ci_fast_pr import native_path_receipt
 
@@ -263,7 +264,7 @@ def selection(target, sources, enabled, disabled):
     return sorted(s for s in selectors if not any(s.startswith(parent + "/") for parent in selectors)), required
 
 
-def verify(report, target, required):
+def verify(report, target, required, *, stalled=frozenset(), isolated=False):
     """Target, test identity and outcome must all come from the same result bundle."""
     cases = defaultdict(list)
 
@@ -271,6 +272,8 @@ def verify(report, target, required):
         kind = node["nodeType"]
         if kind in ("Unit test bundle", "UI test bundle"):
             bundle = node["name"]
+        if kind == "Test Case" and (isolated or stalled) and bundle != target:
+            raise ValueError(f"Unexpected XCTest bundle in stall recovery: {bundle}")
         if kind == "Test Case" and bundle == target:
             identifier = node["nodeIdentifier"].removesuffix("()")
             cases[f"{target}/{identifier}"].append(node.get("result"))
@@ -279,9 +282,17 @@ def verify(report, target, required):
 
     for node in report["testNodes"]:
         visit(node)
-    if not any("Passed" in results for results in cases.values()):
+    if isolated and set(cases) != required:
+        raise ValueError(f"Isolated rerun ran unexpected cases: {sorted(cases)}")
+    if stalled:
+        # A log can nominate a retry, never excuse an absent receipt or a
+        # second failure. Broad selections can include unrelated opt-in skips.
+        other = {s for s, outcomes in cases.items() if outcomes not in (["Passed"], ["Skipped"])}
+        if other != stalled or any(cases[s] != ["Failed"] for s in stalled):
+            raise ValueError(f"xcresult failures do not match the simulator stall: {sorted(other)}")
+    elif not any("Passed" in results for results in cases.values()):
         raise ValueError(f"No passing {target} cases in xcresult")
-    missing = sorted(s for s in required if cases.get(s) != ["Passed"])
+    missing = sorted(s for s in required - stalled if cases.get(s) != ["Passed"])
     if missing:
         raise ValueError(f"Missing, skipped, duplicate or failed required XCTest: {missing}")
 
@@ -317,16 +328,58 @@ def verified_merge_paths(root, expected):
     return base, paths
 
 
+def execute_tests(common, target, selectors, required, skip, env, temp, remaining):
+    def command(result, only):
+        return [*common, "-resultBundlePath", str(result), *["-only-testing:" + s for s in only],
+                *skip, "test-without-building"]
+
+    def report(result):
+        return json.loads(subprocess.check_output(
+            ["xcrun", "xcresulttool", "get", "test-results", "tests", "--path", str(result)]
+        ))
+
+    result = temp / f"{target}.xcresult"
+    log = temp / f"{target}.log"
+    # Keep live Actions output and a log of this execution only (not discovery).
+    with subprocess.Popen(["tee", str(log)], stdin=subprocess.PIPE) as tee:
+        first = subprocess.run(command(result, selectors), env=env, stdout=tee.stdin, stderr=subprocess.STDOUT)
+        tee.stdin.close()
+        if tee.wait():
+            raise RuntimeError(f"Could not save {target} execution log")
+    if first.returncode == 0:
+        verify(report(result), target, required)
+        return 0
+    if first.returncode != 65:
+        first.check_returncode()
+    failed, reason = stalled_failures(log.read_text(errors="replace").splitlines(), remaining, selected=True)
+    if reason:
+        raise ValueError(f"Not rerun: {reason}")
+    methods = {f"{case.target}/{case.cls}/{case.method}" for case in failed}
+    if len(methods) != len(failed) or any(
+        s.startswith(MASTER_INTEROP + "/") or not any(s == sel or s.startswith(sel + "/") for sel in selectors)
+        for s in methods
+    ):
+        raise ValueError("Duplicate or unselected stall candidate")
+    verify(report(result), target, required, stalled=methods)
+    for index, case in enumerate(failed, 1):
+        method = f"{case.target}/{case.cls}/{case.method}"
+        rerun = temp / f"{target}Rerun{index}.xcresult"
+        record_rerun([case], temp / "ios-simulator-stall.txt")
+        subprocess.run(command(rerun, [method]), check=True, env=env)
+        verify(report(rerun), target, {method}, isolated=True)
+    return len(methods)
+
+
 def main():
     env = os.environ
     base, paths = verified_merge_paths(Path.cwd(), env['NATIVE_PATH_RECEIPT'])
     changes = changed_sources(paths, Path.cwd(), base)
+    remaining = 3  # Per PR simulator job, not per scheme.
     for target, scheme in SCHEMES.items():
         sources = changes.get(target, [])
         if not sources and target != "AvibeTests":
             continue
         temp = Path(env["RUNNER_TEMP"])
-        result = temp / f"{target}.xcresult"
         common = [
             "xcodebuild",
             "-project",
@@ -371,20 +424,7 @@ def main():
                 print(note, file=summary)
             skip = ["-skip-testing:" + MASTER_INTEROP]
         with fixture_env(required, env, temp) as test_env:
-            subprocess.run(
-                [
-                    *common,
-                    "-resultBundlePath",
-                    str(result),
-                    *["-only-testing:" + s for s in selectors],
-                    *skip,
-                    "test-without-building",
-                ],
-                check=True,
-                env=test_env,
-            )
-        tree = subprocess.check_output(["xcrun", "xcresulttool", "get", "test-results", "tests", "--path", str(result)])
-        verify(json.loads(tree), target, required)
+            remaining -= execute_tests(common, target, selectors, required, skip, test_env, temp, remaining)
 
 
 if __name__ == "__main__":

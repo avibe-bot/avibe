@@ -120,7 +120,7 @@ def _wait_ran_out(error: str | None) -> bool:
     return bool(fixture) and float(fixture["seconds"]) >= BOOTSTRAP_STALL_SECONDS
 
 
-def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str | None]:
+def stalled_failures(lines: list[str], max_tests: int, *, selected: bool = False) -> tuple[list[_Case], str | None]:
     """Return the failed tests and ``None``, or ``[]`` and why they stand."""
     current: _Case | None = None
     failed: list[_Case] = []
@@ -132,7 +132,7 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
             erred.add(f"{error_of['cls']}.{error_of['method']}")
         if _RESTARTED in line:
             return [], "a test process crashed or timed out and was restarted"
-        if _RUN_ENDED in line:
+        if ("Test Suite 'Selected tests' failed" if selected else _RUN_ENDED) in line:
             ended = True
         case = _CASE.search(line)
         if case:
@@ -183,6 +183,12 @@ def _rerun(args: argparse.Namespace) -> int:
     if reason:
         print(f"Not rerun: {reason}.", file=sys.stderr)
         return 1
+    record_rerun(failed, args.evidence)
+    args.out.write_text("".join(f"{case.only_testing}\n" for case in failed), encoding="utf-8")
+    return 0
+
+
+def record_rerun(failed: list[_Case], evidence: Path) -> None:
     record = [f"run attempt: {os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')}"]
     for case in failed:
         print(
@@ -194,16 +200,15 @@ def _rerun(args: argparse.Namespace) -> int:
         for line in case.evidence:
             print(f"  {line}")
             record.append(f"  {line}")
-    args.out.write_text("".join(f"{case.only_testing}\n" for case in failed), encoding="utf-8")
-    # Uploaded as the `ios-simulator-stall` artifact, which `count` counts.
-    args.evidence.write_text("\n".join(record) + "\n", encoding="utf-8")
+    # Both PR schemes share this run's single weekly artifact.
+    with evidence.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(record) + "\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write("### Simulator stall: rerun once\n\n")
             handle.writelines(f"- `{case.name}`: {'; '.join(case.stalls)}\n" for case in failed)
             handle.write(f"\nWeekly count: `python3 ios/scripts/{Path(__file__).name} count`\n")
-    return 0
 
 
 def weekly_counts(created: list[str], weeks: int, today: date) -> list[tuple[date, int]]:

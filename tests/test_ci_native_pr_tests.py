@@ -13,6 +13,7 @@ from scripts.ci_native_pr_tests import (
     declared_classes,
     enumerate_tests,
     enumeration,
+    execute_tests,
     fixture_env,
     selection,
     verify,
@@ -336,6 +337,62 @@ def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
     listing.parent.mkdir(parents=True)
     listing.write_text(str(swift) + "\n")
     verify_membership(TARGET, sources, tmp_path)
+
+
+@pytest.mark.parametrize("mode, calls", [
+    ("green", 1), ("stall", 2), ("normal assertion", 1), ("budget exhausted", 1),
+    ("extra failure", 1), ("missing contract", 1), ("rerun skipped", 2),
+    ("wrong bundle", 2), ("rerun red", 2), ("extra rerun case", 2),
+])
+def test_selected_execution_recovers_only_the_stalled_method(tmp_path, monkeypatch, capfd, mode, calls):
+    case = "-[AvibeTests.PhoneTests testOnPhone]"
+    log = f"""Test Case '{case}' started.
+WebContent process (0x114121d80) took 30.805767 seconds to launch
+T.swift:1: error: {case} : Asynchronous wait failed: Exceeded timeout
+Test Case '{case}' failed (61 seconds).
+Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
+"""
+    if mode == "normal assertion":
+        log = log.replace("Asynchronous wait failed: Exceeded timeout", "XCTAssertEqual failed")
+    seen = []
+    env = {"FIXTURE": "same"}
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+
+    def run(cmd, *, env, stdout=None, stderr=None, check=False):
+        assert env == {"FIXTURE": "same"} and cmd[-1] == "test-without-building"
+        seen.append([s for s in cmd if s.startswith("-only-testing:")])
+        if stdout is not None:
+            stdout.write(log.encode())
+            return subprocess.CompletedProcess(cmd, 0 if mode == "green" else 65)
+        assert check
+        if mode == "rerun red":
+            raise subprocess.CalledProcessError(65, cmd)
+
+    def receipt(cmd):
+        if cmd[-1] == str(tmp_path / f"{TARGET}.xcresult"):
+            outcomes = {PHONE: "Passed" if mode == "green" else "Failed", COMMON: "Passed"}
+            if mode == "extra failure":
+                outcomes[OPTIONAL] = "Failed"
+            if mode == "missing contract":
+                del outcomes[COMMON]
+            return json.dumps(tree(outcomes))
+        assert cmd[-1] == str(tmp_path / f"{TARGET}Rerun1.xcresult")
+        outcomes = {PHONE: "Skipped" if mode == "rerun skipped" else "Passed"}
+        if mode == "extra rerun case":
+            outcomes[COMMON] = "Passed"
+        return json.dumps(tree(outcomes, "OtherTests" if mode == "wrong bundle" else TARGET))
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "check_output", receipt)
+    args = (["xcodebuild"], TARGET, [TARGET], {COMMON, PHONE}, [], env, tmp_path, 0 if mode == "budget exhausted" else 3)
+    if mode in ("green", "stall"):
+        assert execute_tests(*args) == calls - 1
+    else:
+        with pytest.raises((ValueError, subprocess.CalledProcessError)):
+            execute_tests(*args)
+    assert seen == [["-only-testing:" + TARGET], ["-only-testing:" + PHONE]][:calls]
+    assert (tmp_path / "ios-simulator-stall.txt").exists() == (calls == 2)
+    assert ("::warning title=Simulator stall::" in capfd.readouterr().out) == (calls == 2)
 
 
 def test_only_required_identities_must_pass_from_the_right_bundle():
