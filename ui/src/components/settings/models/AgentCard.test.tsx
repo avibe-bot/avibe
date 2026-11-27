@@ -16,6 +16,13 @@ import { readyRegion } from './regionRead';
 import { freshRuntimeProjection } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, Source } from './types';
 
+// A Direct card's own menu read (the Session picker's) is covered in DirectModelMenu.test.tsx; these cases
+// render the card's header and gateway actions only.
+vi.mock('./DirectModelMenu', () => ({
+  useDirectModelMenu: () => ({ models: null, failed: false, removed: [], canEdit: false, pending: new Set(), setRemoved: () => {}, retry: () => {} }),
+  DirectModelList: () => null,
+}));
+
 const runtime: RuntimeDependency = {
   contract_version: 23,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },

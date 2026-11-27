@@ -1014,6 +1014,10 @@ export type ApiContextType = {
   codexAgents: (cwd?: string) => Promise<{ ok: boolean; agents?: { id: string; name: string; path: string; source?: string; description?: string }[]; error?: string }>;
   codexModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
   antigravityModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
+  /** Whoever may add models: the models a backend offers now that its Direct menu hides (removed in Settings · Models). */
+  readDirectModelRemovals: (backend: string) => Promise<{ ok: boolean; models?: { id: string; label: string }[]; error?: string }>;
+  /** Whoever may add models: hide a model from a backend's Direct menu, or bring it back. */
+  setDirectModelRemoved: (backend: string, modelId: string, removed: boolean) => Promise<{ ok: boolean; error?: string }>;
   /** Picker-safe persisted catalog. Null tells pickers to use the native fallback. */
   readModelHubAgentCatalogForModelPicker: (
     backend: string,
@@ -4835,6 +4839,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     codexAgents: (cwd) => cwd ? getJson(`/api/codex/agents?cwd=${encodeURIComponent(cwd)}`) : getJson('/api/codex/agents'),
     codexModels: () => getJson('/api/codex/models'),
     antigravityModels: () => getJson('/api/antigravity/models'),
+    readDirectModelRemovals: (backend) => getJson(`/api/backend/${encodeURIComponent(backend)}/models/visibility`, { handleError: false }),
+    setDirectModelRemoved: async (backend, modelId, removed) => {
+      const path = `/api/backend/${encodeURIComponent(backend)}/models/visibility`;
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId, removed }),
+      }, path, { handleError: false });
+      if (!res.ok || payloadJson?.ok !== true) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, payloadJson?.error ?? null);
+      return payloadJson;
+    },
     // Direct mode, rolling upgrades, and a temporarily unreadable Hub catalog
     // all keep the existing native picker behavior without surfacing a toast.
     readModelHubAgentCatalogForModelPicker: (backend) =>

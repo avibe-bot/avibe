@@ -7532,11 +7532,17 @@ async def _telegram_get_me(bot_token: str, proxy_url: str | None = None) -> dict
     return result.get("result") or {}
 
 
+async def _opencode_menu_data(data: dict, apply_removals: bool) -> dict:
+    return await asyncio.to_thread(opencode_direct_menu, data) if apply_removals else data
+
+
 async def opencode_options_async(
     cwd: str,
     *,
     model_hub_models: dict[str, Any] | None = None,
+    apply_removals: bool = True,
 ) -> dict:
+    """OpenCode's model options. In Direct mode, the menu (``apply_removals=False``: the full live list)."""
     # Expand ~ to user home directory
     expanded_cwd = os.path.expanduser(cwd)
     cache_entry = _OPENCODE_OPTIONS_CACHE.get(expanded_cwd, {})
@@ -7595,7 +7601,7 @@ async def opencode_options_async(
             and cache_projection_matches
             and cache_mode_matches
         ):
-            return {"ok": True, "data": cache_data, "cached": True}
+            return {"ok": True, "data": await _opencode_menu_data(cache_data, apply_removals), "cached": True}
         config = to_app_config(v2_config)
         if not config.opencode:
             return {"ok": False, "error": "opencode disabled"}
@@ -7723,7 +7729,7 @@ async def opencode_options_async(
             "model_hub_projection": projection_key,
             "mode": "direct",
         }
-        return {"ok": True, "data": data}
+        return {"ok": True, "data": await _opencode_menu_data(data, apply_removals)}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
         if (
@@ -7732,7 +7738,12 @@ async def opencode_options_async(
             and cache_projection_matches
             and cache_mode_matches
         ):
-            return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
+            return {
+                "ok": True,
+                "data": await _opencode_menu_data(cache_data, apply_removals),
+                "cached": True,
+                "warning": str(exc),
+            }
         return {"ok": False, "error": str(exc)}
     finally:
         if lease is not None:
@@ -8647,13 +8658,125 @@ def codex_agents(cwd: Optional[str] = None) -> dict:
 
 
 def claude_models(*, schedule_refresh: bool = True) -> dict:
-    """Return the immediate shared Claude model-catalog snapshot."""
-    return backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=schedule_refresh)
+    """Claude's Direct menu: what every surface (Web, IM, ``vibe agent models``) offers."""
+    return direct_model_menu("claude", schedule_refresh=schedule_refresh)
 
 
 def antigravity_models(*, schedule_refresh: bool = True) -> dict:
-    """Return the immediate shared Antigravity model-catalog snapshot."""
-    return backend_model_catalog.backend_model_snapshot("antigravity", schedule_refresh=schedule_refresh)
+    """Antigravity's Direct menu: what every surface (Web, IM, ``vibe agent models``) offers."""
+    return direct_model_menu("antigravity", schedule_refresh=schedule_refresh)
+
+
+# Direct menus: the stable selection IDs the native backend offers, less those removed in Settings · Models.
+# Every surface reads them through the functions below; docs/plans/effective-model-menu.md is the
+# contract. Removing hides a row from menus only: a Session or Agent already on it keeps it.
+
+
+def _direct_menu_rows(ids) -> list:
+    from core.handlers.direct_model_menu import PickerModel
+
+    rows = []
+    for model_id in dict.fromkeys(ids):
+        try:
+            rows.append(PickerModel(model_id))
+        except ValueError:
+            continue
+    return rows
+
+
+def _direct_menu_ids(backend: str, ids, *, removed: bool = False) -> list[str]:
+    """The IDs of ``ids`` (current supply, in order) a Direct menu offers, or with ``removed`` the ones it hides.
+
+    No account snapshot is read yet: the native producers (#4411) prove an identity, and until a
+    surface has one the contract's reader uses None, so the current catalog is the supply.
+    Storage IO: call off the event loop.
+    """
+    from core.handlers.direct_model_menu import read_menu
+
+    menu = read_menu(backend, None, fallback=_direct_menu_rows(ids), removed=removed)
+    return [row.id for row in menu.models]
+
+
+def direct_model_menu(backend: str, *, schedule_refresh: bool = True, removed: bool = False) -> dict:
+    """A Claude, Codex or Antigravity catalog snapshot as its Direct menu shows it.
+
+    ``removed`` answers the restore list instead: the rows of the current catalog the menu hides.
+    """
+    snapshot = backend_model_catalog.backend_model_snapshot(backend, schedule_refresh=schedule_refresh)
+    if not snapshot.get("ok"):
+        return snapshot
+    models = _direct_menu_ids(backend, snapshot.get("models") or [], removed=removed)
+    kept = set(models)
+    labels = snapshot.get("model_labels") or {}
+    options = snapshot.get("reasoning_options") or {}
+    return {
+        **snapshot,
+        "models": models,
+        "model_labels": {model: label for model, label in labels.items() if model in kept},
+        "reasoning_options": {model: entry for model, entry in options.items() if model == "" or model in kept},
+    }
+
+
+def _opencode_menu_rows(data: dict) -> list[tuple[str, dict, str, object]]:
+    """(picker value, provider, model id, model info) for every model an OpenCode options payload lists."""
+    from modules.agents.opencode.utils import opencode_model_picker_value
+
+    rows = []
+    models = data.get("models") if isinstance(data.get("models"), dict) else {}
+    for provider in models.get("providers") or []:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = provider.get("id") or provider.get("provider_id") or provider.get("name")
+        items = provider.get("models")
+        if isinstance(items, dict):
+            pairs = list(items.items())
+        elif isinstance(items, list):
+            pairs = [(item.get("id"), item) for item in items if isinstance(item, dict)]
+        else:
+            pairs = []
+        for model_id, info in pairs:
+            if isinstance(provider_id, str) and provider_id and isinstance(model_id, str) and model_id:
+                rows.append((opencode_model_picker_value(provider_id, model_id, info), provider, model_id, info))
+    return rows
+
+
+def opencode_menu_values(data: dict) -> list[str]:
+    """The picker values (``provider/id``, or a Hub-projected bare ID) an OpenCode options payload lists."""
+    return list(dict.fromkeys(value for value, *_ in _opencode_menu_rows(data)))
+
+
+def opencode_direct_menu(data: dict, *, removed: bool = False) -> dict:
+    """An OpenCode Direct options payload as its menu shows it (``removed``: only the rows it hides).
+
+    Values are the picker's ``provider/id`` keys. Storage IO: call off the event loop.
+    """
+    rows = _opencode_menu_rows(data)
+    values = [value for value, *_ in rows]
+    kept = set(_direct_menu_ids("opencode", values, removed=removed))
+    if not removed and kept == set(values):
+        return data
+    dropped = {(id(provider), model_id) for value, provider, model_id, _ in rows if value not in kept}
+    providers = []
+    for provider in (data.get("models") or {}).get("providers") or []:
+        if not isinstance(provider, dict):
+            providers.append(provider)
+            continue
+        items = provider.get("models")
+        if isinstance(items, dict):
+            items = {key: info for key, info in items.items() if (id(provider), key) not in dropped}
+        elif isinstance(items, list):
+            items = [info for info in items if not (isinstance(info, dict) and (id(provider), info.get("id")) in dropped)]
+        providers.append({**provider, "models": items})
+    reasoning = data.get("reasoning_options")
+    return {
+        **data,
+        "models": {**(data.get("models") or {}), "providers": providers},
+        **(
+            {"reasoning_options": {key: value for key, value in reasoning.items() if key in kept}}
+            if isinstance(reasoning, dict)
+            else {}
+        ),
+    }
 
 
 def _effort_values(reasoning_entries: object) -> list[str]:
@@ -8712,6 +8835,7 @@ def _opencode_model_options(
     if cached_only:
         cached = _OPENCODE_OPTIONS_CACHE.get(os.path.expanduser(resolved_cwd), {})
         data = cached.get("data") if cached.get("mode") == "direct" else None
+        data = opencode_direct_menu(data) if data else None
         raw = {"ok": bool(data), "data": data}
     else:
         raw = opencode_options(resolved_cwd)
@@ -16027,8 +16151,8 @@ def set_opencode_default_provider(payload: dict) -> dict:
 
 
 def codex_models(*, schedule_refresh: bool = True) -> dict:
-    """Return the immediate shared Codex model-catalog snapshot."""
-    return backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=schedule_refresh)
+    """Codex's Direct menu: what every surface (Web, IM, ``vibe agent models``) offers."""
+    return direct_model_menu("codex", schedule_refresh=schedule_refresh)
 
 
 def _lark_api_base(domain: str = "feishu") -> str:

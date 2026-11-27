@@ -93,7 +93,6 @@ def management_http(tmp_path, monkeypatch):
 # This inventory describes retained effects independently of the policy rules.
 # A newly registered Owner-only management route must be consciously classified.
 _RETAINED_OWNER_ROUTES = {
-    ("PUT", "/api/backend/{backend}/models/visibility"),
     ("POST", "/api/dependencies/model-hub-engine/check"),
     ("POST", "/api/dependencies/model-hub-engine/update"),
     ("POST", "/api/dependencies/model-hub-engine/auto-update"),
@@ -232,8 +231,8 @@ def test_complete_registered_api_management_inventory():
     # Three independent engine channel controls are owner-only, including metadata refresh.
     # Two Owner unbind methods and four direct-loopback-only RB2 confirmation methods.
     # + 2 Owner-only Settings › Experimental › Source filter methods (local hook scripts).
-    # + 1 Owner-only Direct picker deletion/restore method.
-    assert len(endpoints) == 398
+    # + 2 Member Direct picker removal/restore methods (write and the read of what it hides).
+    assert len(endpoints) == 399
     for method in ("GET", "POST"):
         assert (method, "/api/backend/antigravity/auth") in endpoints
         assert http_authorization_policy(method, "/api/backend/antigravity/auth").minimum_role == "member"
