@@ -438,9 +438,6 @@ enum DirectListenerState: Equatable, Sendable {
     case failed
 }
 
-/// Whether the shell may create or reload a runtime's WebView now. Derived,
-/// each time it is asked, from the current store's route and the listener's
-/// lifecycle; nothing keeps a copy.
 /// What a load made while the App is in the background would meet
 /// (`DirectPathController.backgroundLoadCheck`).
 enum DirectBackgroundCheck: Equatable, Sendable {
@@ -470,6 +467,9 @@ enum DirectBackgroundCheck: Equatable, Sendable {
     }
 }
 
+/// Whether the shell may create or reload a runtime's WebView now. Derived,
+/// each time it is asked, from the current store's route and the listener's
+/// lifecycle; nothing keeps a copy.
 enum DirectLoadGate: Equatable, Sendable {
     /// The host has no route on the current store (WebKit's normal path),
     /// or its route points at a listener that serves, or at one whose port

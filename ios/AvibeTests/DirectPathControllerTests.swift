@@ -3123,6 +3123,23 @@ extension DirectPathControllerTests {
             await impatient.controller.backgroundLoadCheck(forInstanceURL: url) == .gate(.held)
         }
 
+        // No time to ask the port at all: once the App's own socket has
+        // closed, the answer is that the port gave none.
+        let mute = try Harness(
+            timing: DirectPathTiming(
+                listenerWaitSeconds: 30, rebindSeconds: 10, foregroundSeconds: 600,
+                retrySeconds: [0.1], portProbeSeconds: 0
+            ),
+            test: self
+        )
+        try await mute.signIn()
+        try await mute.select("instance-1")
+        let muteURL = try XCTUnwrap(mute.lastOpened).instance.url
+        mute.enterBackground()
+        try await eventually { mute.controller.listenerState == .closedForBackground }
+        let noAnswer = await mute.controller.backgroundLoadCheck(forInstanceURL: muteURL)
+        XCTAssertEqual(noAnswer, .undecided(.noAnswer))
+
         // The App returns and leaves again at once: the return's attempt to
         // bind the port is under way. Asked now, the answer waits for that
         // attempt to end and its socket to close.
