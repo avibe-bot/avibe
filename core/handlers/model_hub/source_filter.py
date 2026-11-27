@@ -29,7 +29,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Final, Mapping, Optional
+from typing import Any, AsyncContextManager, Awaitable, Callable, Final, Mapping, Optional
 
 from config import paths
 from core.agent_core.messages import HOSTED_ERROR_MAX_CHARS
@@ -86,8 +86,11 @@ def _locate(name: str) -> tuple[Path, str] | None:
     return script, str(venv) if venv.is_file() else sys.executable
 
 
-def hook_env() -> dict[str, str]:
+def hook_env(gateway: Mapping[str, str] | None = None) -> dict[str, str]:
+    """A hook's environment: a minimal inherited set, ``AVIBE_HOME``, and the run's own gateway address and key."""
+
     env = {key: os.environ[key] for key in _INHERITED_ENV if key in os.environ}
+    env.update(gateway or {})
     env["AVIBE_HOME"] = str(paths.get_vibe_remote_dir())
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
@@ -200,6 +203,8 @@ class SourceFilterHooks:
     def __init__(self, *, timeout: float = HOOK_TIMEOUT_SECONDS) -> None:
         self.timeout = timeout
         self._failures: dict[str, dict[str, str]] = {}
+        # Set by the turn gateway: each run gets ``AVIBE_GATEWAY_URL`` and a key that lives only while it runs.
+        self.gateway: Optional[Callable[[], AsyncContextManager[Mapping[str, str]]]] = None
 
     def status(self) -> dict[str, Any]:
         """What Settings › Experimental › Source filter shows: the folder and each script's state."""
@@ -218,7 +223,11 @@ class SourceFilterHooks:
             return HookAnswer(None)
         script, python = located
         try:
-            response = await self._run(name, script, python, request)
+            if self.gateway is None:
+                response = await self._run(name, script, python, request, {})
+            else:
+                async with self.gateway() as gateway:
+                    response = await self._run(name, script, python, request, gateway)
         except HookFailed as failed:
             self.note_failure(name, failed)
             raise
@@ -232,7 +241,9 @@ class SourceFilterHooks:
         self._failures[name] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "reason": reason}
         logger.warning("Source filter hook %s failed: %s", name, reason)
 
-    async def _run(self, name: str, script: Path, python: str, request: Mapping[str, Any]) -> dict[str, Any]:
+    async def _run(
+        self, name: str, script: Path, python: str, request: Mapping[str, Any], gateway: Mapping[str, str],
+    ) -> dict[str, Any]:
         # A fetch request carries a whole page: encoded off the controller loop.
         data = await asyncio.to_thread(lambda: json.dumps(request, ensure_ascii=False).encode("utf-8"))
         try:
@@ -240,7 +251,7 @@ class SourceFilterHooks:
             process = await asyncio.create_subprocess_exec(
                 python, str(script),
                 cwd=str(script.parent),
-                env=hook_env(),
+                env=hook_env(gateway),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

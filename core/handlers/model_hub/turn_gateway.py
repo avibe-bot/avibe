@@ -8,6 +8,7 @@ import functools
 import json
 import logging
 import math
+import secrets
 import socket
 import tempfile
 from collections import deque
@@ -171,6 +172,35 @@ def _codex_request_metadata(raw: str | None) -> dict | None:
 # from ``HopResolution.request_headers``: its credential answers for a route
 # that the session's later turns reuse, so ownership is named, never inferred.
 VIBEY_TURN_HEADER: Final = "x-avibe-turn-id"
+# Process scopes of the per-run keys source filter hooks call models with (``hook_gateway_env``).
+HOOK_SCOPE_PREFIX: Final = "source-filter-hook:"
+
+
+async def _hook_request_refusal(request: web.Request) -> Optional[str]:
+    """Why a source filter hook's key may not make this request, or None: plain chat completions only.
+
+    A hook's model call must not search or fetch on its own (that would bypass the hooks, or recurse into them), so
+    it declares function tools at most, and carries no pin or turn header.
+    """
+
+    if request.match_info.get("endpoint", "").strip("/") != "chat/completions":
+        return "hook_endpoint_not_allowed"
+    if any(header in request.headers for header in (PIN_SOURCE_HEADER, PIN_MODEL_HEADER, VIBEY_TURN_HEADER)):
+        return "hook_request_not_allowed"
+    try:
+        raw = await request.read()
+        payload = await asyncio.to_thread(lambda: json.loads(raw.decode(request.charset or "utf-8")))
+    except (ValueError, UnicodeDecodeError, RecursionError, web.HTTPException):
+        # The usual request handling answers malformed bodies.
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tools = payload.get("tools")
+    if "web_search_options" in payload or (
+        isinstance(tools, list) and any(not isinstance(tool, dict) or tool.get("type") != "function" for tool in tools)
+    ):
+        return "hook_tool_not_allowed"
+    return None
 
 
 def _request_metadata(backend: str, request: web.Request) -> dict | None:
@@ -468,6 +498,10 @@ class ModelHubTurnGateway:
         )
         self._start_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
+        # Source filter hooks may call this gateway's models with a key minted for one run (``hook_gateway_env``).
+        hooks = getattr(service, "_source_filter_hooks", None)
+        if hooks is not None:
+            hooks.gateway = self.hook_gateway_env
         self._site: web.SockSite | None = None
         self._base_url: str | None = None
         self._turn_requests: dict[str, set[_OwnedGatewayRequest]] = {}
@@ -689,6 +723,24 @@ class ModelHubTurnGateway:
         assert self._base_url is not None
         return f"{self._base_url}/{backend}", token
 
+    @asynccontextmanager
+    async def hook_gateway_env(self) -> AsyncIterator[dict[str, str]]:
+        """A source filter hook's gateway address and a key that lives only while the hook runs.
+
+        The key is an untracked Vibey credential of its own process scope: it names a Vibey menu model on
+        ``chat/completions`` and nothing else (``_hook_request_refusal``); it owns no turn, so the hosted-tool
+        endpoint refuses it, and it is retired when the hook ends.
+        """
+
+        scope = f"{HOOK_SCOPE_PREFIX}{secrets.token_hex(8)}"
+        token = self.correlation.credentials("vibey", scope, None)
+        try:
+            await self._ensure_started()
+            assert self._base_url is not None
+            yield {"AVIBE_GATEWAY_URL": f"{self._base_url}/vibey/v1", "AVIBE_GATEWAY_KEY": token}
+        finally:
+            self.correlation.retire_scope("vibey", scope)
+
     async def close(self) -> None:
         runner = self._runner
         self._runner = None
@@ -902,6 +954,10 @@ class ModelHubTurnGateway:
         token = self._authorized_token(request, backend)
         if token is None:
             return self._error_response(status=401, code="authentication_error")
+        if backend == "vibey" and (self.correlation.credential_scope(backend, token) or "").startswith(HOOK_SCOPE_PREFIX):
+            refusal = await _hook_request_refusal(request)
+            if refusal is not None:
+                return self._error_response(status=403, code=refusal)
         terminalizer = self.correlation.gateway_terminalizer(
             backend=backend,
             token=token,
