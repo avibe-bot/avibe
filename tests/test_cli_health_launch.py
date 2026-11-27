@@ -62,8 +62,20 @@ def test_supervisor_console_policy_is_opt_in_and_not_leaked(tmp_path, monkeypatc
     assert seen == [not hidden]
 
 
-@pytest.mark.parametrize("hidden", [False, True])
-def test_windows_worker_hides_actual_child_only_when_requested(monkeypatch, hidden):
+@pytest.mark.parametrize("policy", [False, True, "codex-inventory"])
+def test_windows_worker_hides_actual_child_only_when_requested(monkeypatch, policy):
+    hidden = policy
+    if policy == "codex-inventory":
+        from unittest.mock import AsyncMock
+        from core.handlers.direct_inventory_identity import NativeScope
+        from modules.agents import direct_inventory
+
+        runner = AsyncMock(return_value=SimpleNamespace(
+            exit_code=0, timed_out=False, stdout_truncated=False, stdout='{"models": []}',
+        ))
+        monkeypatch.setattr(direct_inventory, "run_supervised_command", runner)
+        asyncio.run(direct_inventory._codex("fixture-codex", NativeScope("fixture", "revision", "api")))
+        hidden = runner.await_args.kwargs.get("hide_console", False)
     env = {watch_worker.PROCESS_IDENTITY_ENV: "owned-fixture-marker", "KEEP": "retained"}
     if hidden:
         env[watch_worker.HIDE_CONSOLE_ENV] = "1"
@@ -85,4 +97,4 @@ def test_windows_worker_hides_actual_child_only_when_requested(monkeypatch, hidd
     )
     assert watch_worker._run_watch_worker() == 0
     assert calls[0][1]["env"] == {"KEEP": "retained"}
-    assert calls[0][1].get("creationflags", 0) == (0x08000000 if hidden else 0)
+    assert calls[0][1].get("creationflags", 0) == (0 if policy is False else 0x08000000)

@@ -447,7 +447,10 @@ async def run_antigravity_connection_probe(
             await client.initialize(client_info=_ACP_CLIENT_INFO)
             await authenticate_antigravity_client(client, auth_mode)
             session = await client.session_new(cwd, mcp_servers=())
-            session_id = str(session.get("sessionId") or "").strip() or None
+            raw_session_id = session.get("sessionId") if isinstance(session, Mapping) else None
+            if not isinstance(raw_session_id, str) or not raw_session_id.strip():
+                return _result(False, error="session_create_failed", detail="ACP session/new returned no sessionId.")
+            session_id = raw_session_id.strip()
             active_session_id = session_id
             live_models = extract_acp_live_models(session)
             state.update(authenticated=True, credentials_present=True, models=live_models, catalog_available=bool(live_models))
@@ -459,8 +462,6 @@ async def run_antigravity_connection_probe(
             )
 
             try:
-                if not session_id:
-                    return _result(False, error="session_create_failed", detail="ACP session/new returned no sessionId.")
                 raw_options = session.get("configOptions")
                 applied = await apply_model_and_effort(
                     client, session_id,
