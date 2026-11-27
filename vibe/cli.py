@@ -1313,7 +1313,6 @@ def _task_add_examples_text() -> str:
 
         Examples:
           vibe task add --cron '0 9 * * mon-fri' --message 'Share the morning summary.'
-          vibe task add --at '2026-03-31T09:00:00+08:00' --create-session --scope-id slack::channel::C123 --message-file briefing.md
           vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'The sync failed. Diagnose it.'
         """
     )
@@ -21211,7 +21210,6 @@ def build_parser():
     task_add_parser = task_subparsers.add_parser(
         "add",
         help="Create a scheduled task",
-        description="Schedule an Agent message (message task) or a command with no Agent turn (command task).",
         epilog=_task_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe task add --help",

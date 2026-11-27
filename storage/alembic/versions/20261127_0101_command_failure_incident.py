@@ -19,6 +19,7 @@ def upgrade() -> None:
         sa.Column("reported", sa.Integer(), nullable=False),
         sa.Column("prior_fingerprint", sa.String(), nullable=True),
         sa.Column("prior_reported", sa.Integer(), nullable=False),
+        sa.Column("recovery_fire_id", sa.String(), nullable=True),
         if_not_exists=True,
     )
 

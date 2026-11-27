@@ -18273,6 +18273,52 @@ def test_repeat_failure_late_stop_does_not_count_or_replace_an_incident(tmp_path
         assert store.sqlite_backend.owed_failure_notice(run['id']) is None
 
 
+def test_repeat_failure_only_a_settled_success_clears_the_incident(tmp_path, monkeypatch):
+    """A zero exit code is not recovery until its Run wins terminal settlement."""
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command='read status < status; exit "$status"',
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_recovery"), on_failure="agent-on-repeat",
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    for code, stop, expected_reports in [
+        (7, None, 0), (0, "interrupt", 0), (7, None, 1),
+        (0, "interrupt", 1), (7, None, 1), (7, None, 1),
+        (0, "flag", 1), (7, None, 1), (7, None, 2),
+    ]:
+        (tmp_path / "status").write_text(f"{code}\n")
+        task = store.get_task(task.id)
+        if stop is None:
+            assert _fire_command_task(service, task)["status"] == "failed"
+        else:
+            queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+            claimed = service.request_store.claim(queued.id)
+            assert claimed is not None
+            original_reconcile = service._reconcile_jobs_off_loop
+            stopped = False
+
+            async def stop_after_stamp():
+                nonlocal stopped
+                if not stopped:
+                    stopped = True
+                    assert service.request_store.cancel_run(queued.id)
+                    if stop == "interrupt":
+                        raise asyncio.CancelledError
+                return await original_reconcile()
+
+            with monkeypatch.context() as patch:
+                patch.setattr(service, "_reconcile_jobs_off_loop", stop_after_stamp)
+                if stop == "interrupt":
+                    with pytest.raises(asyncio.CancelledError):
+                        asyncio.run(service._execute_claimed_request(claimed))
+                else:
+                    asyncio.run(service._execute_claimed_request(claimed))
+            assert stopped
+            assert service.request_store.get_run(queued.id)["status"] == ("canceled" if stop == "interrupt" else "succeeded")
+        assert len(_escalation_runs(store)) == expected_reports, (code, stop)
+
+
 def _queued_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
     assert store._sqlite is not None
     return [run for run in store._sqlite.list_runs() if run["status"] == "queued"]

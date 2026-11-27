@@ -20,7 +20,7 @@ def test_command_failure_incident_upgrade_and_downgrade(tmp_path):
     migrations.run_migrations(path, revision=revision)
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute('select count(*) from command_failure_incidents').fetchone() == (0,)
-        conn.execute("insert into command_failure_incidents values('legacy','test','fire',1,'test',0)")
+        conn.execute("insert into command_failure_incidents values('legacy','test','fire',1,'test',0,null)")
         conn.commit()
     command.downgrade(migrations.alembic_config(path), previous)
     with closing(sqlite3.connect(path)) as conn:

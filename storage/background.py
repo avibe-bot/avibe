@@ -4198,7 +4198,10 @@ class SQLiteBackgroundTaskStore:
                 incident = command_failure_incidents
                 match_task = incident.c.definition_id == values["id"]
                 if not repeat_failure_key:
-                    conn.execute(incident.delete().where(match_task))
+                    # A zero exit is provisional: Stop can still win settlement.
+                    # Keep the incident intact until this exact Run is succeeded.
+                    assert expected_uncanceled_run_id
+                    conn.execute(update(incident).where(match_task).values(recovery_fire_id=expected_uncanceled_run_id))
                 else:
                     assert expected_uncanceled_run_id
                     previous = conn.execute(select(incident).where(match_task)).first()
@@ -4220,6 +4223,7 @@ class SQLiteBackgroundTaskStore:
                     facts = dict(
                         fingerprint=repeat_failure_key, fire_id=expected_uncanceled_run_id,
                         reported=int(same), prior_fingerprint=prior_key, prior_reported=int(prior_reported),
+                        recovery_fire_id=None,
                     )
                     if previous is None:
                         conn.execute(insert(incident).values(definition_id=values["id"], **facts))
@@ -7181,6 +7185,15 @@ class SQLiteBackgroundTaskStore:
                 )
                 if transition.rowcount:
                     written_status = status
+                    if status == "succeeded" and row["run_type"] == "scheduled" and exit_code == 0:
+                        # Clear only the incident that named this fire as a possible
+                        # recovery. A canceled/losing settle or an older Run cannot
+                        # erase another fire's evidence; both writes roll back together.
+                        incident = command_failure_incidents
+                        conn.execute(incident.delete().where(
+                            incident.c.definition_id == row["definition_id"],
+                            incident.c.recovery_fire_id == run_id,
+                        ))
                     _defer_run_ids_updated_from_connection(conn, [run_id])
                     break
                 if final_attempt:

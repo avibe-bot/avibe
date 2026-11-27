@@ -420,6 +420,7 @@ command_failure_incidents = Table(
     Column("reported", Integer, nullable=False),
     Column("prior_fingerprint", String, nullable=True),
     Column("prior_reported", Integer, nullable=False),
+    Column("recovery_fire_id", String, nullable=True),
 )
 
 agent_runs = Table(
