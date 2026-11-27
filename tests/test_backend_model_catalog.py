@@ -445,7 +445,8 @@ def test_codex_hub_catalog_preserves_native_modalities_without_an_override():
     assert payload["models"][0]["auto_compact_token_limit"] == 180_000
 
 
-def test_codex_hub_catalog_promotes_a_configured_hidden_native_model():
+@pytest.mark.parametrize("visible", [True, False])
+def test_codex_hub_catalog_uses_the_projected_menu_but_preserves_launch_metadata(visible):
     efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]
     raw = json.dumps(
         {
@@ -479,13 +480,14 @@ def test_codex_hub_catalog_promotes_a_configured_hidden_native_model():
                     "id": "gpt-6-astra",
                     "display_name": "GPT-6-Astra",
                     "reasoning_efforts": efforts,
+                    "menu_visible": visible,
                 }
             ],
         )
     )
 
     assert payload["models"][0]["slug"] == "gpt-6-astra"
-    assert payload["models"][0]["visibility"] == "list"
+    assert payload["models"][0]["visibility"] == ("list" if visible else "hide")
     assert payload["models"][0]["supported_in_api"] is True
     assert payload["models"][0]["default_reasoning_level"] == "low"
     assert payload["models"][0]["supported_reasoning_levels"] == [

@@ -1588,12 +1588,21 @@ class CodexAgent(BaseAgent):
         else:
             binary, binary_identity = inputs.binary, inputs.identity["binary"]
         configured_models = None
+        model_hub_service = getattr(self.controller, "model_hub_service", None)
         if config is None:
-            model_hub_service = getattr(self.controller, "model_hub_service", None)
             store = getattr(model_hub_service, "store", None)
             config = store.load() if store is not None else None
         if config is not None:
-            configured_models = [model.to_payload() for model in config.agents["codex"].models]
+            if model_hub_service is not None:
+                configured_models = await asyncio.to_thread(model_hub_service.codex_launch_catalog, config)
+            else:
+                from core.handlers.model_hub.family_inventory import FAMILY_INVENTORY_FILE, FamilyInventory
+
+                def offline_catalog():
+                    evidence = FamilyInventory.load(paths.get_state_dir() / FAMILY_INVENTORY_FILE)
+                    return evidence.codex_launch_rows(config, evidence.hidden(config, "codex"))
+
+                configured_models = await asyncio.to_thread(offline_catalog)
         key = (
             json.dumps(binary_identity, sort_keys=True),
             hashlib.sha256(json.dumps(configured_models, sort_keys=True).encode()).hexdigest(),

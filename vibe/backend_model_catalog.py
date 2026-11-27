@@ -378,7 +378,9 @@ def _codex_hub_catalog_bytes(
                 else model_id
             )
             row["priority"] = priority
-            row["visibility"] = "list"
+            # Saved selections still need the native launch metadata. Visibility
+            # is a picker property, not permission to discard the route.
+            row["visibility"] = "hide" if configured.get("menu_visible") is False else "list"
             row["supported_in_api"] = True
             context_window = configured.get("context_window")
             if (

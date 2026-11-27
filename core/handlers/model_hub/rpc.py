@@ -127,7 +127,9 @@ async def dispatch_model_hub_rpc(
     if operation == "agent_model_candidates":
         service.request_inventory_refresh()
         backend = payload.get("backend")
-        if backend in MODEL_HUB_NATIVE_BACKENDS:
+        # A Hub menu is already projected from controller-owned data. Looking
+        # for a local CLI cannot improve its supply or its list of candidates.
+        if backend in MODEL_HUB_NATIVE_BACKENDS and (await asyncio.to_thread(service.store.load)).agents[backend].mode == "direct":
             await _refresh_agent_presence(service, (backend,))
             if backend != "opencode":
                 await service.reconcile_builtin_models((backend,))

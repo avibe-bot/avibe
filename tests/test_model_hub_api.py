@@ -3162,7 +3162,7 @@ def test_concurrent_same_id_add_keeps_the_route_matched_by_the_first_writer(tmp_
     ]
 
 
-def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_row(
+def test_hub_reconcile_does_not_import_native_snapshot_or_manual_source_routes(
     monkeypatch,
     tmp_path,
 ):
@@ -3219,25 +3219,11 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     changed = asyncio.run(service.reconcile_builtin_models(("codex",)))
 
     agent = store.config.agents["codex"]
-    assert changed == ["codex"]
-    assert [model.id for model in agent.models] == [
-        "gpt-alpha",
-        "provider-row",
-        "models-dev-row",
-        "manual-row",
-        "gpt-new",
-        "gpt-omega",
-        "gpt-withdrawn",
-    ]
-    created = next(model for model in agent.models if model.id == "gpt-new")
-    assert created.display_name == "GPT New"
-    assert created.reasoning_efforts == ["low", "high"]
+    assert changed == []
+    assert [model.id for model in agent.models] == list(unchanged)
+    assert {model.id: model.to_payload() for model in agent.models} == unchanged
     assert "gpt-new" not in agent.routes
-    assert service.agent_chain("codex", "gpt-new")["current"] == {"source_id": source.id, "model_id": "gpt-new"}
-    assert "gpt-hidden" not in {model.id for model in agent.models}
-    assert "invalid\ud800" not in {model.id for model in agent.models}
-    assert {model.id: model.to_payload() for model in agent.models if model.id in unchanged} == unchanged
-    assert refreshed == ["codex"]
+    assert refreshed == []
 
 
 def test_builtin_reconcile_gives_claude_rows_back_the_names_a_native_suffix_replaced(
@@ -3498,6 +3484,7 @@ def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp
     for store_writable in (False, True):
         service, store, _adapter = _service(tmp_path)
         agent = store.config.agents["codex"]
+        agent.mode = "direct"
         before = copy.deepcopy(agent.to_payload())
         store.recovery = not store_writable
         saves = []
@@ -3594,6 +3581,7 @@ def test_model_producers_emit_admissible_backend_payloads(
     elif producer == "reconcile_seed":
         producer_backend = "codex"
         service, store, _adapter = _service(tmp_path)
+        store.config.agents[producer_backend].mode = "direct"
         monkeypatch.setattr(
             service,
             "_builtin_snapshots",
@@ -3733,6 +3721,7 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
     tmp_path,
 ):
     service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].mode = "direct"
     existing = store.config.agents["codex"].models[0].id
     snapshot = {
         "codex": {
@@ -3775,13 +3764,16 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
     assert applies == [("codex",), ("codex",)]
 
 
-def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
+@pytest.mark.parametrize("mode", ["hub", "direct"])
+def test_candidates_read_only_reconciles_the_native_menu_in_direct_mode(
     monkeypatch,
     tmp_path,
+    mode,
 ):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
     service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].mode = mode
     existing = store.config.agents["codex"].models[0].id
     snapshot = {
         "codex": {
@@ -3819,9 +3811,9 @@ def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
             {"backend": "codex"},
         )
     )
-    assert "gpt-cli-refresh" in {
+    assert ("gpt-cli-refresh" in {
         model.id for model in store.config.agents["codex"].models
-    }
+    }) is (mode == "direct")
 
 
 def test_builtin_reconcile_loads_legacy_baseline_before_reading_snapshot(
@@ -3853,6 +3845,7 @@ def test_builtin_reconcile_retries_failed_runtime_refresh(
     tmp_path,
 ):
     service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].mode = "direct"
     existing = store.config.agents["codex"].models[0].id
     monkeypatch.setattr(
         service,
@@ -5413,15 +5406,14 @@ async def _shorten_chain_past_a_newer_family_member(service):
     ))
 
 
-async def _reconcile_builtin_supplied_model(service):
-    service.store.config.sources[0].models.append(
-        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
-    )
-    catalog = [{"id": model.id} for model in service.store.config.agents["claude"].models]
-    service._builtin_snapshots = lambda _backends: {
-        "claude": {"complete": True, "models": [*catalog, {"id": "claude-extra-model"}]},
-    }
-    return await service.reconcile_builtin_models(("claude",))
+async def _reconcile_observed_family_model(service):
+    source = service.store.config.sources[0]
+    mid = "claude-extra-model"
+    source.models.append(ModelHubModelConfig(id=mid, provenance="discovered"))
+    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+        mid: {"name": mid, "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    }}}
+    await service._observe_family_listing(source, [DiscoveredModel(id=mid)])
 
 
 _PROJECTION_MODEL = "claude-opus-4-6"
@@ -5474,8 +5466,8 @@ _PROJECTION_MUTATIONS = {
         _delete_seeded_custom_model,
         lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL,),
     ),
-    "reconcile_builtin_models": (
-        _reconcile_builtin_supplied_model,
+    "reconcile_observed_family_model": (
+        _reconcile_observed_family_model,
         lambda bindings: "claude-extra-model" in bindings["src_first0001"].route_model_ids,
     ),
     "refresh_source": (
@@ -8299,6 +8291,52 @@ def test_hub_reauth_replaces_pending_flow_unknown_to_restarted_adapter(
     assert replacement_binding.source_id == source.id
     assert adapter.oauth_start_calls == [(source.id, "anthropic")]
     assert restarted_adapter.oauth_start_calls == [(source.id, "anthropic")]
+
+
+def test_renewal_finalizes_while_a_previous_generations_menu_write_is_blocked(tmp_path, monkeypatch):
+    from core.handlers.model_hub.family_inventory import FamilyInventory
+
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_renewal01", kind="subscription", vendor="anthropic", display_name="Subscription",
+        protocol="anthropic", supply_channel="hub", billing="monthly", models=[],
+        credential_ref="cred_prior", state=ModelHubSourceStateConfig(status="standby"),
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    entered, release = threading.Event(), threading.Event()
+
+    def unavailable_disk(self, path):
+        entered.set()
+        assert release.wait(5)
+        raise OSError("injected menu disk failure")
+
+    monkeypatch.setattr(FamilyInventory, "save", unavailable_disk)
+
+    async def run():
+        refresh = asyncio.create_task(service._refresh_source_in_background(source.id))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            flow = (await service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+            fid = flow["flow_id"]
+            adapter.flows[fid] = OAuthFlowState(**{**adapter.flows[fid].__dict__, "state": "success",
+                                                  "credential_ref": "cred_renewed"})
+            response = await asyncio.wait_for(service.oauth_status(fid), timeout=2)
+            # A healthy Source renewed; `recovered` reports recovery from an
+            # error, not flow completion. The new grant and cleanup prove the latter.
+            assert response["recovered"] is False
+            assert response["source"]["state"]["status"] == "standby"
+            assert store.load().sources[0].credential_ref == "cred_renewed"
+            assert adapter.revoked == ["cred_prior"]
+            assert service.revocations.list() == []
+            assert (await service.oauth_status(fid))["recovered"] == response["recovered"]
+            assert adapter.revoked == ["cred_prior"]
+        finally:
+            release.set()
+            await refresh
+        assert store.load().sources[0].credential_ref == "cred_renewed"
+
+    asyncio.run(run())
 
 
 def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(

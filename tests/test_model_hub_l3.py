@@ -2484,6 +2484,16 @@ def test_runtime_resolution_sees_controller_reconcile_after_remote_catalog_refre
         if reconcile_task is not None:
             await reconcile_task
 
+        # A remote catalog describes the ID; only the assigned Source can
+        # offer it. Preserve the controller-to-runtime boundary in this test.
+        assert model_id not in {row.id for row in service.store.config.agents["codex"].models}
+        service.models_dev_catalog = lambda: {"openai": {"name": "OpenAI", "models": {
+            model_id: {"name": "Runtime refresh", "tool_call": True,
+                       "modalities": {"input": ["text"], "output": ["text"]}},
+        }}}
+        monkeypatch.setattr(service.adapter, "discover_models", AsyncMock(return_value=(DiscoveredModel(id=model_id),)), raising=False)
+        await service._refresh_source_in_background(source.id)
+
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:

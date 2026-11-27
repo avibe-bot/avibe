@@ -92,6 +92,87 @@ def test_due_sources_gain_new_models_and_fresh_sources_are_left_alone(
         assert persisted.last_discovered_at == before
 
 
+@pytest.mark.parametrize("kind", ["api_key", "subscription"])
+@pytest.mark.parametrize(("backend", "vendor", "mid"), [
+    ("codex", "openai", "gpt-new-family"), ("claude", "anthropic", "claude-new-family"),
+])
+def test_family_menu_follows_complete_listings_without_forgetting_the_route(tmp_path, kind, backend, vendor, mid):
+    source = _hub_source("src_familyscope", kind=kind, vendor=vendor)
+    service, store, adapter, _ = _background(tmp_path, [source], ListingAdapter((mid,)))
+    service.models_dev_catalog = lambda: {vendor: {"name": vendor, "models": {
+        mid: {"name": "New chat model", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    }}}
+
+    def offers(reader):
+        return {row["id"] for row in reader.get_agent_sources(backend)["catalog_models"]}
+
+    def refresh():
+        asyncio.run(service._refresh_source_in_background(source.id))
+
+    assert mid not in offers(service)
+    refresh()
+    assert mid in offers(service)
+    adapter.discovery_error = ModelDiscoveryError("fixture unavailable")
+    refresh()
+    assert mid in offers(service)
+    adapter.discovery_error = None
+    adapter.discovered = ()
+    refresh()
+    assert mid not in offers(service)
+    persisted = store.load()
+    assert mid in {row.id for row in persisted.agents[backend].models}
+    restarted, _, _ = _service(tmp_path, persisted)
+    assert mid not in offers(restarted)
+    assert mid not in {row["id"] for row in restarted.agent_model_candidates(backend)["providers"]}
+    if backend == "codex":
+        assert next(row for row in restarted.codex_launch_catalog(persisted) if row["id"] == mid)["menu_visible"] is False
+
+
+@pytest.mark.parametrize("damage", [b"{", b'{"version":2}', b'{"version":1,"automatic":{},"listings":[]}'])
+def test_damaged_inventory_preserves_routes_and_recovery_bytes(tmp_path, damage):
+    from config.v2_config import ModelHubBackendModelConfig
+    from core.handlers.model_hub.family_inventory import FAMILY_INVENTORY_FILE, FamilyInventory
+
+    source = _hub_source("src_damaged01", vendor="openai")
+    config = _config([source])
+    agent = config.agents["codex"]
+    agent.models = [ModelHubBackendModelConfig(id="gpt-explicit", origin="manual"),
+                    ModelHubBackendModelConfig(id="gpt-former-auto", origin="provider")]
+    path = tmp_path / FAMILY_INVENTORY_FILE
+    path.write_bytes(damage)
+    service, store, _ = _service(tmp_path, config, ListingAdapter(()))
+    assert [row["id"] for row in service.backend_catalog_models("codex")] == ["gpt-explicit"]
+    inventory = FamilyInventory.load(path)
+    assert inventory.status == "damaged"
+    offline = inventory.codex_launch_rows(config, inventory.hidden(config, "codex"))
+    assert offline == service.codex_launch_catalog(config)
+    assert [(row["id"], row["menu_visible"]) for row in offline] == [("gpt-explicit", True), ("gpt-former-auto", False)]
+    asyncio.run(service._refresh_source_in_background(source.id))
+    assert [row.id for row in store.load().agents["codex"].models] == ["gpt-explicit", "gpt-former-auto"]
+    assert path.read_bytes() == damage
+
+
+def test_private_models_do_not_follow_a_reused_subscription_handle_to_a_new_grant(tmp_path):
+    mid = "claude-private-family"
+    source = _hub_source("src_scopecheck", kind="subscription")
+    service, store, _, _ = _background(tmp_path, [source], ListingAdapter((mid,)))
+    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+        mid: {"name": "Listed model", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    }}}
+    asyncio.run(service._refresh_source_in_background(source.id))
+    assert mid in {row["id"] for row in service.backend_catalog_models("claude")}
+
+    # Model the persisted boundary of a renewal that reused the engine handle;
+    # the older route is deliberately retained. No new grant listing landed.
+    config = copy.deepcopy(store.load())
+    config.sources[0].credential_generation = "new-generation"
+    assert mid in {row.id for row in config.sources[0].models}
+    restarted, _, _ = _service(tmp_path, config)
+    assert mid not in {row["id"] for row in restarted.backend_catalog_models("claude")}
+    assert mid not in {row["id"] for row in restarted.agent_model_candidates("claude")["providers"]}
+    assert mid not in {row["id"] for row in restarted.list_sources()[0]["models"]}
+
+
 def test_background_failure_keeps_source_untouched_and_backs_off_until_a_success(tmp_path, caplog):
     source = _listed(_hub_source("src_backoff1"), Clock(), hours_ago=7)
     service, store, adapter, clock = _background(tmp_path, [source])
