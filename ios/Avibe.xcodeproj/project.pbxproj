@@ -114,6 +114,7 @@
 		910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000002 /* FixtureKeyboardViewport.swift */; };
 		910000000000000000000155 /* FixtureHoldPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000007 /* FixtureHoldPage.swift */; };
 		910000000000000000000156 /* HoldTouchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000004 /* HoldTouchUITests.swift */; };
+		910000000000000000000157 /* TurnLiveActivityLayoutUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000005 /* TurnLiveActivityLayoutUITests.swift */; };
 		910000000000000000000003 /* MobileAccount.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
@@ -170,6 +171,7 @@
 		16000000000000000000000033 /* VoiceCaptureBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000033 /* VoiceCaptureBanner.swift */; };
 		A15B00000000000000000011 /* TurnActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000001 /* TurnActivityAttributes.swift */; };
 		A15B00000000000000000012 /* TurnActivityCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000002 /* TurnActivityCoordinator.swift */; };
+		A15B00000000000000000020 /* TurnActivityFixtureLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000020 /* TurnActivityFixtureLaunch.swift */; };
 		A15B00000000000000000013 /* TurnLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* TurnLiveActivity.swift */; };
 		A15B00000000000000000014 /* TurnActivityAttributes.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000001 /* TurnActivityAttributes.swift */; };
 		A15B00000000000000000015 /* TurnLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* TurnLiveActivity.swift */; };
@@ -328,6 +330,7 @@
 		920000000000000000000002 /* FixtureKeyboardViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureKeyboardViewport.swift; sourceTree = "<group>"; };
 		920000000000000000000007 /* FixtureHoldPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureHoldPage.swift; sourceTree = "<group>"; };
 		930000000000000000000004 /* HoldTouchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldTouchUITests.swift; sourceTree = "<group>"; };
+		930000000000000000000005 /* TurnLiveActivityLayoutUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnLiveActivityLayoutUITests.swift; sourceTree = "<group>"; };
 		920000000000000000000003 /* FixtureMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; path = FixtureMobile; sourceTree = "<group>"; };
 		920000000000000000000004 /* AvibeSheetFixture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AvibeSheetFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		920000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -368,6 +371,7 @@
 		26000000000000000000000033 /* VoiceCaptureBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureBanner.swift; sourceTree = "<group>"; };
 		A15A00000000000000000001 /* TurnActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityAttributes.swift"; sourceTree = "<group>"; };
 		A15A00000000000000000002 /* TurnActivityCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityCoordinator.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000020 /* TurnActivityFixtureLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnActivityFixtureLaunch.swift; sourceTree = "<group>"; };
 		A15A00000000000000000003 /* TurnLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnLiveActivity.swift"; sourceTree = "<group>"; };
 		A15A00000000000000000004 /* TurnActivity.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = "TurnActivity.xcstrings"; sourceTree = "<group>"; };
 		A15A00000000000000000005 /* TurnActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityTests.swift"; sourceTree = "<group>"; };
@@ -498,6 +502,7 @@
 				200000000000000000000007 /* WebViewController.swift */,
 				26000000000000000000000001 /* VoiceCaptureActivity.swift */,
 				A15A00000000000000000002 /* TurnActivityCoordinator.swift */,
+				A15A00000000000000000020 /* TurnActivityFixtureLaunch.swift */,
 				A15A00000000000000000001 /* TurnActivityAttributes.swift */,
 				26000000000000000000000002 /* VoiceCaptureIntent.swift */,
 				26000000000000000000000003 /* VoiceCaptureController.swift */,
@@ -646,6 +651,7 @@
 				930000000000000000000004 /* HoldTouchUITests.swift */,
 				930000000000000000000001 /* InstanceSheetGestureUITests.swift */,
 				930000000000000000000003 /* RealBundleCaptureUITests.swift */,
+				930000000000000000000005 /* TurnLiveActivityLayoutUITests.swift */,
 			);
 			path = AvibeSheetFixtureTests;
 			sourceTree = "<group>";
@@ -1097,6 +1103,7 @@
 				100000000000000000000007 /* WebViewController.swift in Sources */,
 				16000000000000000000000001 /* VoiceCaptureActivity.swift in Sources */,
 				A15B00000000000000000012 /* TurnActivityCoordinator.swift in Sources */,
+				A15B00000000000000000020 /* TurnActivityFixtureLaunch.swift in Sources */,
 				A15B00000000000000000011 /* TurnActivityAttributes.swift in Sources */,
 				16000000000000000000000002 /* VoiceCaptureIntent.swift in Sources */,
 				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
@@ -1219,6 +1226,7 @@
 				910000000000000000000156 /* HoldTouchUITests.swift in Sources */,
 				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
 				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
+				910000000000000000000157 /* TurnLiveActivityLayoutUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
