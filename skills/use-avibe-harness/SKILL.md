@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.3.4
+version: 0.3.5
 ---
 
 # Use Avibe Harness
