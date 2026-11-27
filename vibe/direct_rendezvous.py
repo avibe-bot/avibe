@@ -222,6 +222,27 @@ def log_path_use(entries: Any) -> None:
         )
 
 
+def log_handovers(entries: Any) -> None:
+    """Log the client's bounded per-ask observations without changing rendezvous state."""
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.keys() != {"age_s", "ms", "refused", "other", "closed", "kept", "path"}:
+            return
+        if (entry["refused"] not in ("none", "not_usable", "other_documents")
+                or entry["other"] not in ("none", "voice", "child", "runtime", "unloaded", "unknown")
+                or entry["path"] not in _LEG_FAULT_PATHS):
+            return
+        for key, maximum in (("age_s", 86400), ("ms", 2**31 - 1), ("closed", 2**31 - 1), ("kept", 2**31 - 1)):
+            if type(entry[key]) is not int or not 0 <= entry[key] <= maximum:
+                return
+    for entry in entries:
+        logger.info(
+            "direct rendezvous handover age_s=%d ms=%d refused=%s other=%s closed=%d kept=%d path=%s",
+            entry["age_s"], entry["ms"], entry["refused"], entry["other"], entry["closed"], entry["kept"], entry["path"],
+        )
+
+
 def log_startup(entries: Any) -> None:
     """One bounded observation per restored cold start with both measurements."""
     if not isinstance(entries, list) or not 1 <= len(entries) <= 5:
