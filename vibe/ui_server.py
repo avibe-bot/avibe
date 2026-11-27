@@ -9319,10 +9319,20 @@ def direct_rendezvous():
         auth = getattr(g, "authorization_context", None)
         identity = getattr(g, "remote_session_identity", None)
         registered_session = None
+        session_kind = None
         if identity and identity.get("sub") == subject and identity.get("browser_session_id") and identity.get("_device_binding"):
+            from sqlalchemy.exc import SQLAlchemyError
+            from storage import device_registry
+
             registered_session = (identity["_device_binding"], identity["browser_session_id"])
+            # The native sign-in and this WebView need not send the same UA.
+            # Use the registered session's kind, never a hint in this report.
+            try:
+                session_kind = device_registry.session_kind(registered_session[0], subject, registered_session[1])
+            except (OSError, SQLAlchemyError):
+                pass  # Optional diagnostic; don't deny an otherwise valid offer.
         result = rendezvous_state.rendezvous.offer(
-            session=registered_session,
+            session=registered_session, session_kind=session_kind,
             is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
@@ -9332,6 +9342,7 @@ def direct_rendezvous():
     rendezvous_state.log_listener_faults(payload.get("listener_faults"))
     rendezvous_state.log_leg_faults(payload.get("leg_faults"))
     rendezvous_state.log_path_use(payload.get("path_use"))
+    rendezvous_state.log_startup(payload.get("startup"))
     rendezvous_state.log_slow_store_removals(payload.get("slow_store_removals_ms"))
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"

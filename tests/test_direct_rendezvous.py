@@ -378,6 +378,34 @@ def test_trial_consent_only_changes_from_host_shell(instance):
     assert cs.relay_enrolled(V2Config.load())
 
 
+def test_path_kind_comes_from_registered_sign_in_not_rendezvous_ua(instance, monkeypatch):
+    from storage import device_registry
+    from sqlalchemy.exc import OperationalError
+
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    epochs = []
+    rv.set_admission_listener(lambda peer, ttl, epoch: epochs.append(epoch))
+    for i, (ua, expected) in enumerate((("AvibeDesktop/3.2.9-rc.3", "desktop"),
+                                         ("AvibeiOS/56.1", "ios"), ("Safari/1", "browser"), ("", "unknown"))):
+        peer = f"{i:064x}"
+        cookie = remote_access.make_session_cookie(config, "viewer@example.com", "sub-viewer", session_claims={
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id, "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "email",
+        }, device_headers={"User-Agent": ua})
+        client = app.test_client()
+        client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
+        response = _post(client, _body(peer), headers={**csrf_headers(client, ORIGIN), "User-Agent": "Chrome/1"})
+        assert response.get_json()["status"] == "ready"
+        assert rv.observe_path(peer, epochs[-1], 1, "open", None) == expected
+        assert rv.observe_path(peer, 0, 1, "close", None) == "unknown"
+    def unavailable(*args):
+        raise OperationalError(None, None, OSError())
+    monkeypatch.setattr(device_registry, "session_kind", unavailable)
+    assert _post(client, _body(peer)).get_json()["status"] == "ready"
+    assert rv.observe_path(peer, epochs[-1], 1, "close", None) == "unknown"
+
+
 def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
     config, rendezvous = instance
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
@@ -571,8 +599,8 @@ def test_path_use_logs_only_its_fixed_words_and_numbers_without_changing_the_off
         # Seventeen connections: the tunnel won every race against the relay.
         _path_use(tunnel=17, raced=17, tunnel_won=17, tunnel_ms=140, handover_asked=3, handover_refused=3,
                   handover_rule="not_usable", retired=1, retired_rule="no_permitted_path"),
-        _path_use(client="ios", age_min=0, path="none", tunnel=4, no_direct=4, retired_rule="background", retired=2),
-        _path_use(age_min=1440, path="lan", direct=2**31 - 1, sticky=2, direct_ms=2**31 - 1, strict=1,
+        _path_use(client="ios", app="56.1", age_min=0, path="none", tunnel=4, no_direct=4, retired_rule="background", retired=2),
+        _path_use(age_min=1440, app="3.2.9-rc.3", path="lan", direct=2**31 - 1, sticky=2, direct_ms=2**31 - 1, strict=1,
                   tunnel_only=1, direct_failed=1, direct_timed_out=1, direct_won=1, handover_done=1,
                   handover_rule="other_documents", retired_rule="lease"),
     ]
@@ -589,12 +617,12 @@ def test_path_use_logs_only_its_fixed_words_and_numbers_without_changing_the_off
                  " direct=0 tunnel=4 raced=0 direct_won=0 tunnel_won=0 direct_ms=0 tunnel_ms=0"
                  " no_direct=4 sticky=0 strict=0 tunnel_only=0 direct_failed=0 direct_timed_out=0"
                  " handover_asked=0 handover_done=0 handover_refused=0 handover_rule=none"
-                 " retired=2 retired_rule=background"),
+                 " retired=2 retired_rule=background app=56.1"),
         ("INFO", "direct rendezvous path_use client=desktop age_min=1440 path=lan"
                  f" direct={2**31 - 1} tunnel=0 raced=0 direct_won=1 tunnel_won=0 direct_ms={2**31 - 1} tunnel_ms=0"
                  " no_direct=0 sticky=2 strict=1 tunnel_only=1 direct_failed=1 direct_timed_out=1"
                  " handover_asked=0 handover_done=1 handover_refused=0 handover_rule=other_documents"
-                 " retired=0 retired_rule=lease"),
+                 " retired=0 retired_rule=lease app=3.2.9-rc.3"),
     ]
     # Every word of the contract is accepted, one entry at a time, and the lists are pinned.
     for key, words in (("client", direct_rendezvous._PATH_USE_CLIENTS), ("path", direct_rendezvous._LEG_FAULT_PATHS),
@@ -645,10 +673,43 @@ def test_invalid_path_use_batches_are_ignored_in_full(instance, caplog):
         response = _post(client, {**_body(), "path_use": entries})
         assert response.status_code == 200 and response.get_json() == baseline, entries
     assert not any("path_use" in line for line in caplog.messages)
+    for value in (None, 1, [], "", "x" * 33, "a\nb", "a\tb", "\x7f", "é"):
+        response = _post(client, {**_body(), "path_use": [good, {**good, "app": value}]})
+        assert response.get_json() == baseline
+    assert not any("path_use" in line for line in caplog.messages)
+    # A 32-byte build with printable punctuation cannot forge another log field.
+    unusual = "x" * 24 + " path=/%"
+    _post(client, {**_body(), "path_use": [{**good, "app": unusual}]})
+    assert any(line.endswith(" app=" + "x" * 24 + "%20path%3D%2F%25") for line in caplog.messages)
+    caplog.clear()
     # Each count and each time is checked on its own.
     for key in direct_rendezvous._PATH_USE_COUNTS + direct_rendezvous._PATH_USE_MILLISECONDS:
         _post(client, {**_body(), "path_use": [{**good, key: -1}]})
     assert not any("path_use" in line for line in caplog.messages)
+
+
+def test_startup_is_bounded_and_independent_of_the_offer_and_path_use(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    cached = dict(bind_ms=240, visible_ms=320, late=False, visible="cached")
+    live = dict(bind_ms=2**31-1, visible_ms=0, late=True, visible="live")
+    def ask(entries):
+        caplog.clear()
+        response = _post(client, {**_body(), "path_use": [_path_use(app="56.1")], "startup": entries})
+        assert response.get_json() == baseline
+        assert any(" path_use " in line and line.endswith(" app=56.1") for line in caplog.messages)
+        return [line for line in caplog.messages if " startup " in line]
+    first = "direct rendezvous startup bind_ms=240 visible_ms=320 late=no visible=cached"
+    last = "direct rendezvous startup bind_ms=2147483647 visible_ms=0 late=yes visible=live"
+    assert ask([cached] * 4 + [live]) == [first] * 4 + [last]
+    for invalid in (None, [], cached, [cached] * 6, [cached, None], [cached, {"late": True}],
+                    *([cached, {**cached, key: value}] for key, value in (
+                        ("app", "56.1"), ("bind_ms", True), ("bind_ms", -1), ("visible_ms", 2**31),
+                        ("visible_ms", 0.5), ("late", 1), ("visible", {}), ("visible", "none")))):
+        assert ask(invalid) == []
 
 
 def test_slow_store_removals_are_logged_in_milliseconds_without_changing_the_offer(instance, caplog):

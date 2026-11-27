@@ -504,7 +504,8 @@ async def test_device_sideband_projection_is_independent_of_log_budget(caplog):
     rv.publish(DirectEndpoint(ENDPOINT_ONE, ("192.168.1.2:3210",)))
     epochs = []
     rv.set_admission_listener(lambda _peer, _ttl, epoch: epochs.append(epoch))
-    rv.offer(instance_id="instance", hostname="test", subject="owner", client_endpoint_id=PEER, session=("binding", "sid"))
+    rv.offer(instance_id="instance", hostname="test", subject="owner", client_endpoint_id=PEER, session=("binding", "sid"),
+             session_kind="desktop_app")
     supervisor = DirectTransportSupervisor("unused", RecordingIngress(), rv)
     supervisor._endpoint_id = ENDPOINT_ONE
     supervisor._path_reports = supervisor._device_reports = True
@@ -526,6 +527,7 @@ async def test_device_sideband_projection_is_independent_of_log_budget(caplog):
         # `none` where there is none: through the relay.
         line = [r.getMessage() for r in caplog.records if r.getMessage().startswith("direct path ")][-1]
         assert f" selected={family} scope={scope or 'none'} partial=" in line
+        assert " client=desktop " in line and "app=" not in line
     for ordinal in range(2, 100):
         supervisor._handle_path_report({**msg, "ordinal": ordinal})
     assert len(rv._admissions[PEER].connections) == 32
@@ -556,7 +558,7 @@ async def test_path_budget_reserves_terminal_ipv6_evidence(caplog):
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("direct path ")]
     assert len(lines) == 60 and "phase=close" in lines[-1] and "ipv6.rx_bytes=17" in lines[-1]
     # A sidecar that does not report the class: `none`, never a guess.
-    assert all(" selected=relay scope=none partial=" in line for line in lines)
+    assert all(" selected=relay scope=none partial=" in line and " client=unknown " in line for line in lines)
     reader = asyncio.StreamReader()
     reader.feed_data(json.dumps({**msg, "endpoint_id": PEER}).encode() + b"\n")
     reader.feed_eof()
