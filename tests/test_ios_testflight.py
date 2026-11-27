@@ -941,11 +941,12 @@ def test_the_testflight_workflow_runs_by_hand_from_master_and_scopes_its_secrets
     workflow = yaml.safe_load((ROOT / ".github/workflows/ios-testflight.yml").read_text(encoding="utf-8"))
     workflow_text = (ROOT / ".github/workflows/ios-testflight.yml").read_text(encoding="utf-8")
     project_text = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
-    assert workflow[True] == {"workflow_dispatch": None}
+    assert set(workflow[True]) == {"workflow_dispatch"}
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {"group": "ios-testflight", "cancel-in-progress": False}
     job = workflow["jobs"]["testflight"]
     assert job["if"] == "github.ref == 'refs/heads/master'"
+    assert job["needs"] == "source"
     steps = job["steps"]
     shell = yaml.safe_load((ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8"))
     assert workflow["env"] == shell["env"]  # the same pinned Xcode
@@ -994,3 +995,36 @@ def test_sign_in_with_apple_is_the_apps_alone():
         assert testflight.SIGN_IN_WITH_APPLE in testflight.forbidden_entitlements(bundle_id)
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
     assert entitlements[testflight.SIGN_IN_WITH_APPLE] == ["Default"]
+
+
+def test_the_testflight_workflow_builds_only_a_proven_master_commit():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ios-testflight.yml").read_text(encoding="utf-8"))
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs == {"source_sha": {
+        "description": "Full 40-character master commit to build; its own full master CI run must be green",
+        "required": True,
+        "type": "string",
+    }}
+    gate = workflow["jobs"]["source"]
+    assert gate["if"] == "github.ref == 'refs/heads/master'"
+    assert gate["permissions"] == {"actions": "read", "contents": "read"}
+    assert gate["outputs"] == {"source_sha": "${{ steps.gate.outputs.source_sha }}"}
+    assert "secrets." not in json.dumps(gate)
+    prove = next(step for step in gate["steps"] if step.get("id") == "gate")
+    # The input reaches the shell only through the environment, never interpolated.
+    assert prove["env"]["SOURCE_SHA"] == "${{ inputs.source_sha }}"
+    assert "inputs." not in prove["run"]
+    assert prove["run"].startswith("python3 scripts/testflight_source_gate.py ")
+
+    job = workflow["jobs"]["testflight"]
+    assert job["needs"] == "source"
+    steps = job["steps"]
+    checkout = steps[0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"] == {"ref": "${{ needs.source.outputs.source_sha }}"}
+    confirm = steps[1]
+    assert confirm["name"] == "Confirm the proven source commit"
+    assert confirm["env"] == {"SOURCE_SHA": "${{ needs.source.outputs.source_sha }}"}
+    assert '"$(git rev-parse HEAD)" = "$SOURCE_SHA"' in confirm["run"]
+    first_secret = next(i for i, step in enumerate(steps) if "secrets." in json.dumps(step))
+    assert first_secret > 1

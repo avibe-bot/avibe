@@ -507,60 +507,7 @@ class FetchChain:
         return answer
 
     def _record(self, raw: Mapping[str, Any]) -> dict[str, Any]:
-        content = raw.get("content") if isinstance(raw.get("content"), str) else str(raw.get("error") or "No page content was retained.")
-        status = "completed" if raw.get("status") == "completed" else "failed"
-        provider_truncated = bool(raw.get("provider_truncated"))
-        attempts = tuple(self._attempt_objects())
-        base = {
-            "status": status,
-            "requested_url": self.requested_url,
-            "content": content,
-            "size_bytes": len(content.encode("utf-8", "surrogatepass")),
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "budget_method": "utf8_bytes_div4_v1",
-            "final_url": raw.get("final_url"),
-            "canonical_url": raw.get("canonical_url"),
-            "title": raw.get("title"),
-            "content_type": raw.get("content_type", "text/markdown" if status == "completed" else None),
-            "source_content_type": raw.get("source_content_type"),
-            "source_size_bytes": raw.get("source_size_bytes"),
-            "error": raw.get("error") if status == "failed" else None,
-            "error_code": raw.get("error_code") if status == "failed" else None,
-            "attempts": attempts,
-            "transport_degraded": raw.get("transport_degraded"),
-            "transport_degraded_reason": raw.get("transport_degraded_reason"),
-            "charset_fallback": raw.get("charset_fallback"),
-        }
-        # Extraction may have capped the source before sanitization shrank it;
-        # a small retained frame does not prove the original document was whole.
-        reason = "budget" if raw.get("content_overflow") else "provider_limit" if provider_truncated else None
-        try:
-            candidate = WebFetchRecord(**base, truncated=reason is not None, truncation_reason=reason)
-            if reason is None:
-                return _record_payload(candidate)
-        except ValueError:
-            reason = reason or "budget"
-        hi = len(content)
-        lo = 1
-        best = None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            candidate_content = content[:mid]
-            try:
-                candidate = WebFetchRecord(
-                    **{**base, "content": candidate_content, "size_bytes": len(candidate_content.encode("utf-8", "surrogatepass")),
-                       "truncated": True, "truncation_reason": reason},
-                )
-            except ValueError:
-                hi = mid - 1
-            else:
-                best = candidate
-                lo = mid + 1
-        if best is None:
-            best = WebFetchRecord(
-                **{**base, "content": " ", "size_bytes": 1, "truncated": True, "truncation_reason": reason},
-            )
-        return _record_payload(best)
+        return fetch_record(raw, requested_url=self.requested_url, attempts=tuple(self._attempt_objects()))
 
     def _attempt_objects(self):
         for fact in self.facts:
@@ -569,6 +516,66 @@ class FetchChain:
                 error_code=fact.get("error_code"), skipped=fact.get("skipped"), retry_at=fact.get("retry_at"),
                 needs_action=fact.get("needs_action"), cost=_cost(fact.get("cost")),
             )
+
+
+def fetch_record(
+    raw: Mapping[str, Any], *, requested_url: str, attempts: tuple[HostedAttempt, ...] = (),
+) -> dict[str, Any]:
+    """The bounded ``WebFetchRecord`` payload for one fetch outcome: content cut to the record's budget."""
+
+    content = raw.get("content") if isinstance(raw.get("content"), str) else str(raw.get("error") or "No page content was retained.")
+    status = "completed" if raw.get("status") == "completed" else "failed"
+    provider_truncated = bool(raw.get("provider_truncated"))
+    base = {
+        "status": status,
+        "requested_url": requested_url,
+        "content": content,
+        "size_bytes": len(content.encode("utf-8", "surrogatepass")),
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "budget_method": "utf8_bytes_div4_v1",
+        "final_url": raw.get("final_url"),
+        "canonical_url": raw.get("canonical_url"),
+        "title": raw.get("title"),
+        "content_type": raw.get("content_type", "text/markdown" if status == "completed" else None),
+        "source_content_type": raw.get("source_content_type"),
+        "source_size_bytes": raw.get("source_size_bytes"),
+        "error": raw.get("error") if status == "failed" else None,
+        "error_code": raw.get("error_code") if status == "failed" else None,
+        "attempts": attempts,
+        "transport_degraded": raw.get("transport_degraded"),
+        "transport_degraded_reason": raw.get("transport_degraded_reason"),
+        "charset_fallback": raw.get("charset_fallback"),
+    }
+    # Extraction may have capped the source before sanitization shrank it;
+    # a small retained frame does not prove the original document was whole.
+    reason = "budget" if raw.get("content_overflow") else "provider_limit" if provider_truncated else None
+    try:
+        candidate = WebFetchRecord(**base, truncated=reason is not None, truncation_reason=reason)
+        if reason is None:
+            return _record_payload(candidate)
+    except ValueError:
+        reason = reason or "budget"
+    hi = len(content)
+    lo = 1
+    best = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate_content = content[:mid]
+        try:
+            candidate = WebFetchRecord(
+                **{**base, "content": candidate_content, "size_bytes": len(candidate_content.encode("utf-8", "surrogatepass")),
+                   "truncated": True, "truncation_reason": reason},
+            )
+        except ValueError:
+            hi = mid - 1
+        else:
+            best = candidate
+            lo = mid + 1
+    if best is None:
+        best = WebFetchRecord(
+            **{**base, "content": " ", "size_bytes": 1, "truncated": True, "truncation_reason": reason},
+        )
+    return _record_payload(best)
 
 
 def _cost(value: object) -> HostedCost | None:

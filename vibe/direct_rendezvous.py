@@ -90,6 +90,14 @@ _LEG_FAULT_CODES = (
     # of the reason it gave.
     "not_ready_certificate", "not_ready_owner_required", "not_ready_not_running", "not_ready_permission",
     "not_ready_transport", "not_ready_disabled", "not_ready_no_address", "not_ready_other",
+    # What `no_permitted_path` used to cover, told apart: the connection had
+    # no selected path at all, or its selected path's address was one the
+    # offer does not permit, by the class of that address (`AddressClass` in
+    # desktop/src-tauri/src/direct/path.rs). A class, never an address.
+    "path_unselected",
+    "path_refused_relay", "path_refused_private", "path_refused_cgnat", "path_refused_ula",
+    "path_refused_linklocal", "path_refused_loopback", "path_refused_public", "path_refused_global",
+    "path_refused_nat64", "path_refused_mapped", "path_refused_other",
 )
 _LEG_FAULT_PATHS = ("lan", "punched", "relay", "none")
 

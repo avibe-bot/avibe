@@ -943,6 +943,28 @@ final class DirectPathControllerTests: XCTestCase {
         try await eventually { harness.status("instance-1").losses.count == 2 }
         XCTAssertEqual(harness.status("instance-1").losses.last?.cause, .generationReplaced)
         XCTAssertEqual(harness.status("instance-1").losses.last?.relays, 1)
+        // The same connections and closes in the account of path use: each
+        // connection once, when the listener granted it, and each close
+        // under the path and the cause read when it was decided.
+        let scope = DirectPathUse.Scope(store: harness.websiteDataStore.identifier, host: one)
+        harness.pathUseClock.now += 60
+        let use = harness.pathUse.pending(for: scope)
+        XCTAssertEqual(use.map(\.path), [DirectPathUse.Path.none, .punched])
+        let counted = try use.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.json.utf8)) as? [String: Any])
+        }
+        // One before the path was usable, three on it while its kind was
+        // not known, and the close for the replaced generation.
+        XCTAssertEqual(counted[0]["tunnel"] as? Int, 1)
+        XCTAssertEqual(counted[0]["no_direct"] as? Int, 1)
+        XCTAssertEqual(counted[0]["direct"] as? Int, 3)
+        XCTAssertEqual(counted[0]["direct_won"] as? Int, 3)
+        XCTAssertEqual(counted[0]["retired"] as? Int, 1)
+        XCTAssertEqual(counted[0]["retired_rule"] as? String, "superseded")
+        // The loss on an address whose class was never read.
+        XCTAssertEqual(counted[1]["retired"] as? Int, 1)
+        XCTAssertEqual(counted[1]["retired_rule"] as? String, "path_monitor")
+        XCTAssertEqual(counted[1]["direct"] as? Int, 0)
         // The replaced generation is never accepted again.
         let before = harness.preferences
         harness.transport.report(.verifying, for: target)
@@ -2371,6 +2393,10 @@ private final class Harness {
     private(set) var availabilityChanges = 0
     private(set) var lastOpened: MobileRuntimeContext?
 
+    /// This harness's own account of path use, on a clock the test moves.
+    let pathUseClock = DirectPathUseTestClock()
+    private(set) lazy var pathUse = DirectPathUse(seconds: { [pathUseClock] in pathUseClock.now })
+
     private(set) lazy var controller: DirectPathController = DirectPathController(
         websiteDataStore: websiteDataStore,
         transport: transport,
@@ -2381,6 +2407,7 @@ private final class Harness {
         limits: .patient,
         timing: timing,
         notificationCenter: notifications,
+        pathUse: pathUse,
         onStatusChanged: { [unowned self] in
             self.announcements += 1
             let status = self.status("instance-1")
@@ -2916,6 +2943,102 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
 // Apart from the tests above, so that tests added among them by another
 // change meet this one nowhere.
 extension DirectPathControllerTests {
+    // MARK: The account of path use
+
+    /// A connection is counted once, when the listener says what became of
+    /// it, under the path its plan was made on as that path was named
+    /// then, and for its own instance; a hand-over under the path in use.
+    @MainActor
+    func testConnectionsAndHandOversAreCountedOnceUnderThePathOfTheirOwnMoment() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let authority = try XCTUnwrap(DirectAuthority(host: one))
+        let store = harness.websiteDataStore.identifier
+        let scope = DirectPathUse.Scope(store: store, host: one)
+
+        // Through the relay: two connections raced, one each way, and a
+        // hand-over refused for another document.
+        harness.transport.currentPath = .relay
+        harness.transport.selectedPath = DirectSelectedPath(kind: .relay, local: nil, rttMs: 120)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let lost = try XCTUnwrap(harness.controller.plan(for: authority))
+        lost.recordRace?(DirectRaceRecord(
+            direct: .cancelled, publicOrigin: .ready(80), winner: .publicOrigin, path: .relay, sticky: false
+        ))
+        lost.connectionSettled?(.publicOrigin)
+        // A race that ended and was planned again is not a connection: its
+        // record is kept for diagnosis and nothing is counted for it.
+        let fenced = try XCTUnwrap(harness.controller.plan(for: authority))
+        fenced.recordRace?(DirectRaceRecord(
+            direct: .ready(5), publicOrigin: .cancelled, winner: .direct, path: .relay, sticky: false
+        ))
+        let won = try XCTUnwrap(harness.controller.plan(for: authority))
+        won.recordRace?(DirectRaceRecord(
+            direct: .ready(120), publicOrigin: .cancelled, winner: .direct, path: .relay, sticky: false
+        ))
+        won.connectionSettled?(.direct)
+        try await eventually { harness.status("instance-1").races.count == 3 }
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
+        var answered: DirectHandoverOutcome?
+        harness.controller.handover(for: harness.origin("instance-1"), soleDocument: false) { answered = $0 }
+        XCTAssertEqual(answered, .skipped(.otherDocuments))
+
+        // On a LAN address: the plan is named `lan` when it is made. Its
+        // connection is settled after the path's class is no longer
+        // readable, and is still counted as `lan`.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 4)
+        harness.transport.report(.pathChanged(.ipv4), for: target)
+        let local = try XCTUnwrap(harness.controller.plan(for: authority))
+        harness.transport.selectedPath = nil
+        local.recordRace?(DirectRaceRecord(
+            direct: .ready(9), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: true
+        ))
+        local.connectionSettled?(.direct)
+        // A plan made while the address's class is not known is never
+        // called LAN.
+        let unread = try XCTUnwrap(harness.controller.plan(for: authority))
+        unread.recordRace?(DirectRaceRecord(
+            direct: .ready(30), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: true
+        ))
+        unread.connectionSettled?(.direct)
+
+        // Nothing is reported while the minute is counting.
+        XCTAssertEqual(harness.pathUse.pending(for: scope), [])
+        harness.pathUseClock.now += 60
+        let reports = harness.pathUse.pending(for: scope)
+        XCTAssertEqual(reports.map(\.path), [.lan, .punched, .relay])
+        func entry(_ index: Int) throws -> [String: Any] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reports[index].json.utf8)) as? [String: Any])
+        }
+        let lan = try entry(0)
+        XCTAssertEqual(lan["direct"] as? Int, 1)
+        XCTAssertEqual(lan["sticky"] as? Int, 1)
+        XCTAssertEqual(lan["direct_ms"] as? Int, 9)
+        XCTAssertEqual(try entry(1)["direct"] as? Int, 1)
+        let relay = try entry(2)
+        XCTAssertEqual(relay["raced"] as? Int, 2)
+        XCTAssertEqual(relay["direct"] as? Int, 1)
+        XCTAssertEqual(relay["tunnel"] as? Int, 1)
+        XCTAssertEqual(relay["direct_won"] as? Int, 1)
+        XCTAssertEqual(relay["tunnel_won"] as? Int, 1)
+        XCTAssertEqual(relay["direct_ms"] as? Int, 120)
+        XCTAssertEqual(relay["tunnel_ms"] as? Int, 80)
+        XCTAssertEqual(relay["handover_asked"] as? Int, 1)
+        XCTAssertEqual(relay["handover_refused"] as? Int, 1)
+        XCTAssertEqual(relay["handover_rule"] as? String, "other_documents")
+        XCTAssertEqual(relay["tunnel_only"] as? Int, 0)
+        XCTAssertEqual(relay["strict"] as? Int, 0)
+        // Another instance's request carries none of it, and an account
+        // change drops what was not sent.
+        XCTAssertEqual(harness.pathUse.pending(for: DirectPathUse.Scope(store: store, host: two)), [])
+        harness.controller.accountWillChange()
+        XCTAssertEqual(harness.pathUse.pending(for: scope), [])
+    }
+}
+
+extension DirectPathControllerTests {
     // MARK: A measurement's link
 
     /// 「线路测速」 measures the path in use through `measurementLink`: there
@@ -3023,16 +3146,16 @@ extension DirectPathControllerTests {
 }
 
 extension DirectPathControllerTests {
-    // MARK: The background's load gate
+    // MARK: The background's load check
 
     /// A load made in the background (a voice take) asks the port itself:
     /// the synchronous gate cannot know what took the port since the App
     /// left. In front the two are the same. In the background a refused
-    /// connection leaves the gate's answer, anything that accepts is a
-    /// fault, and neither is asked before the listener's own socket has
+    /// connection leaves the gate's answer, anything that accepts is
+    /// foreign, and neither is asked before the listener's own socket has
     /// closed. Asking records nothing.
     @MainActor
-    func testInTheBackgroundAStrangerOnThePortIsAFaultAndAClosedPortIsTheGatesOwnAnswer() async throws {
+    func testInTheBackgroundAStrangerOnThePortIsForeignAndAClosedPortIsTheGatesOwnAnswer() async throws {
         let listening = try listeningSockets()
         let harness = try Harness(timing: .askingThePort, test: self)
         try await harness.signIn()
@@ -3044,16 +3167,16 @@ extension DirectPathControllerTests {
 
         // In front: the synchronous gate, whatever it says.
         XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .open)
-        let inFront = await controller.backgroundLoadGate(forInstanceURL: routed)
-        XCTAssertEqual(inFront, .open)
+        let inFront = await controller.backgroundLoadCheck(forInstanceURL: routed)
+        XCTAssertEqual(inFront, .gate(.open))
 
         // The App leaves, and the gate is asked in the same turn: the
         // listener's own socket is still open, and would accept. The answer
         // waits until it has closed, and is then that nothing listens.
         harness.enterBackground()
         XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .held)
-        let leaving = await controller.backgroundLoadGate(forInstanceURL: routed)
-        XCTAssertEqual(leaving, .held)
+        let leaving = await controller.backgroundLoadCheck(forInstanceURL: routed)
+        XCTAssertEqual(leaving, .gate(.held))
         let stillListening = await LoopbackClient.canConnect(to: port)
         XCTAssertFalse(stillListening)
         XCTAssertEqual(controller.listenerState, .closedForBackground)
@@ -3068,8 +3191,8 @@ extension DirectPathControllerTests {
         )
         defer { stranger.close() }
         XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .held)
-        let taken = await controller.backgroundLoadGate(forInstanceURL: routed)
-        XCTAssertEqual(taken, .fault)
+        let taken = await controller.backgroundLoadCheck(forInstanceURL: routed)
+        XCTAssertEqual(taken, .foreign)
         // Nothing was recorded or changed by asking.
         XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .held)
         XCTAssertTrue(controller.listenerFailures.isEmpty)
@@ -3077,28 +3200,28 @@ extension DirectPathControllerTests {
         XCTAssertEqual(controller.listenerState, .closedForBackground)
         // A host with no route is not sent to the port: nothing is asked.
         XCTAssertEqual(controller.loadGate(forInstanceURL: unrouted), .open)
-        let other = await controller.backgroundLoadGate(forInstanceURL: unrouted)
-        XCTAssertEqual(other, .open)
+        let other = await controller.backgroundLoadCheck(forInstanceURL: unrouted)
+        XCTAssertEqual(other, .gate(.open))
 
         // The stranger lets the port go: nothing listens, the gate's own.
         stranger.close()
         try await eventually {
-            await controller.backgroundLoadGate(forInstanceURL: routed) == .held
+            await controller.backgroundLoadCheck(forInstanceURL: routed) == .gate(.held)
         }
 
         // Back in front the port is the listener's again, and it is not
         // asked: the answer is the gate's, also while the return is held.
         harness.enterForeground()
         let returning = controller.loadGate(forInstanceURL: routed)
-        let asked = await controller.backgroundLoadGate(forInstanceURL: routed)
-        XCTAssertTrue([returning, .open].contains(asked), "\(asked) after \(returning)")
+        let asked = await controller.backgroundLoadCheck(forInstanceURL: routed)
+        XCTAssertTrue([DirectBackgroundCheck(returning), .gate(.open)].contains(asked), "\(asked) after \(returning)")
         try await eventually { controller.listenerState == .ready }
-        let served = await controller.backgroundLoadGate(forInstanceURL: routed)
-        XCTAssertEqual(served, .open)
+        let served = await controller.backgroundLoadCheck(forInstanceURL: routed)
+        XCTAssertEqual(served, .gate(.open))
     }
 
     /// The wait for the listener's own socket has a bound, and what is
-    /// still unknown at the bound is a fault. An attempt to bind that was
+    /// still unknown at the bound is undecided, for that reason. An attempt to bind that was
     /// running when the App left is waited for like a close.
     @MainActor
     func testInTheBackgroundTheListenersOwnSocketIsWaitedForUpToABound() async throws {
@@ -3115,13 +3238,30 @@ extension DirectPathControllerTests {
         try await impatient.select("instance-1")
         let url = try XCTUnwrap(impatient.lastOpened).instance.url
         impatient.enterBackground()
-        let unknown = await impatient.controller.backgroundLoadGate(forInstanceURL: url)
-        XCTAssertEqual(unknown, .fault)
+        let unknown = await impatient.controller.backgroundLoadCheck(forInstanceURL: url)
+        XCTAssertEqual(unknown, .undecided(.ownSocketOpen))
         // Once it has closed there is nothing to wait for, bound or not.
         try await eventually { impatient.controller.listenerState == .closedForBackground }
         try await eventually {
-            await impatient.controller.backgroundLoadGate(forInstanceURL: url) == .held
+            await impatient.controller.backgroundLoadCheck(forInstanceURL: url) == .gate(.held)
         }
+
+        // No time to ask the port at all: once the App's own socket has
+        // closed, the answer is that the port gave none.
+        let mute = try Harness(
+            timing: DirectPathTiming(
+                listenerWaitSeconds: 30, rebindSeconds: 10, foregroundSeconds: 600,
+                retrySeconds: [0.1], portProbeSeconds: 0
+            ),
+            test: self
+        )
+        try await mute.signIn()
+        try await mute.select("instance-1")
+        let muteURL = try XCTUnwrap(mute.lastOpened).instance.url
+        mute.enterBackground()
+        try await eventually { mute.controller.listenerState == .closedForBackground }
+        let noAnswer = await mute.controller.backgroundLoadCheck(forInstanceURL: muteURL)
+        XCTAssertEqual(noAnswer, .undecided(.noAnswer))
 
         // The App returns and leaves again at once: the return's attempt to
         // bind the port is under way. Asked now, the answer waits for that
@@ -3136,8 +3276,8 @@ extension DirectPathControllerTests {
         try await eventually { harness.controller.listenerState == .closedForBackground }
         harness.enterForeground()
         harness.enterBackground()
-        let waited = await harness.controller.backgroundLoadGate(forInstanceURL: routed)
-        XCTAssertEqual(waited, .held)
+        let waited = await harness.controller.backgroundLoadCheck(forInstanceURL: routed)
+        XCTAssertEqual(waited, .gate(.held))
         let stillListening = await LoopbackClient.canConnect(to: port)
         XCTAssertFalse(stillListening)
         XCTAssertEqual(harness.controller.listenerState, .closedForBackground)
@@ -3148,18 +3288,24 @@ extension DirectPathControllerTests {
         typealias Controller = DirectPathController
         for gate in [DirectLoadGate.open, .held] {
             // Refused: nothing listens, so the gate's own answer.
-            XCTAssertEqual(Controller.backgroundGate(.refused, stay: .same, otherwise: gate), gate)
-            // Accepted by something, or no answer within the bound.
-            XCTAssertEqual(Controller.backgroundGate(.accepted, stay: .same, otherwise: gate), .fault)
-            XCTAssertEqual(Controller.backgroundGate(.undecided, stay: .same, otherwise: gate), .fault)
-            for probe in [DirectPortProbe.accepted, .refused, .undecided] {
+            XCTAssertEqual(Controller.backgroundCheck(.refused, stay: .same, otherwise: gate), .gate(gate))
+            // Accepted by something: foreign. No answer within the bound, or
+            // the App's own socket not closed in time: undecided, and why.
+            XCTAssertEqual(Controller.backgroundCheck(.accepted, stay: .same, otherwise: gate), .foreign)
+            XCTAssertEqual(Controller.backgroundCheck(.undecided, stay: .same, otherwise: gate), .undecided(.noAnswer))
+            XCTAssertEqual(Controller.backgroundCheck(nil, stay: .same, otherwise: gate), .undecided(.ownSocketOpen))
+            for probe in [DirectPortProbe.accepted, .refused, .undecided, nil] {
                 // Back in front: the listener's own port, and the gate's answer.
-                XCTAssertEqual(Controller.backgroundGate(probe, stay: .ended, otherwise: gate), gate)
+                XCTAssertEqual(Controller.backgroundCheck(probe, stay: .ended, otherwise: gate), .gate(gate))
                 // Away again after a return: nothing was learnt of this stay.
-                XCTAssertEqual(Controller.backgroundGate(probe, stay: .another, otherwise: gate), .fault)
+                XCTAssertEqual(Controller.backgroundCheck(probe, stay: .another, otherwise: gate), .undecided(.stayChanged))
             }
         }
-        XCTAssertEqual(Controller.backgroundGate(.refused, stay: .same, otherwise: .fault), .fault)
+        // A gate that is already a fault is foreign, whatever the port said.
+        XCTAssertEqual(Controller.backgroundCheck(.refused, stay: .same, otherwise: .fault), .foreign)
+        XCTAssertEqual(Controller.backgroundCheck(nil, stay: .ended, otherwise: .fault), .foreign)
+        XCTAssertEqual(DirectBackgroundCheck(.held), .gate(.held))
+        XCTAssertEqual(DirectBackgroundCheck(.fault), .foreign)
         XCTAssertEqual(DirectPathTiming.standard.portProbeSeconds, 0.3)
         XCTAssertEqual(DirectPathTiming.standard.ownCloseSeconds, 3)
     }

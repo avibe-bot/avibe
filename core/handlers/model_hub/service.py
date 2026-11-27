@@ -23,6 +23,7 @@ from config import paths
 from config.model_hub_snapshot import freeze_model_hub
 from config.v2_config import (
     CONFIG_LOCK,
+    hosted_tool_setting,
     KEYLESS_EXA_DISPLAY_NAME,
     KEYLESS_EXA_SOURCE_ID,
     KEYLESS_EXA_SERVICE_ID,
@@ -172,6 +173,7 @@ from .hosted_images import (
 from .hosted_turn import IMAGE_TOOL, ExecutorSlot, TurnHostedTools
 from . import hosted_tools as hosted_tools_module
 from .search_services import ServiceCooldowns
+from .source_filter import SOURCE_FILTER_TOOLS, SourceFilterHooks, filtered_call, record_for
 from .search_chain import SearchChain
 from .hosted_tools import (
     ExecutorCandidate,
@@ -1761,6 +1763,8 @@ class ModelHubService:
         self._search_trial_identities: dict[str, tuple] = {}
         self._search_reenable_checks: dict[str, asyncio.Task] = {}
         self._service_cooldowns = ServiceCooldowns()
+        # Settings › Experimental › Source filter: the owner's hook scripts around web_search and web_fetch.
+        self._source_filter_hooks = SourceFilterHooks()
         # Exa's anonymous endpoint is per-IP limited; cap active MCP calls
         # without serializing a turn or the session's independent JSON-RPC ids.
         self._keyless_exa_call_semaphore = asyncio.Semaphore(
@@ -7668,6 +7672,62 @@ class ModelHubService:
         return await SearchChain(self, call, turn, say).run()
 
     async def run_hosted_tool(
+        self,
+        tool: str,
+        payload: object,
+        *,
+        turn: TurnHostedTools | None,
+        language: str = "en",
+    ) -> dict:
+        """Run one proxied call; under the turn's source filter, between the owner's hook scripts."""
+
+        if turn is None or not turn.source_filter or tool not in SOURCE_FILTER_TOOLS or tool not in turn.tools:
+            return await self._run_hosted_tool(tool, payload, turn=turn, language=language)
+        try:
+            # The model's own call is validated as usual before any hook sees it.
+            call = await asyncio.to_thread(parse_call, tool, payload)
+        except ExecutorCallRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+
+        def say(key: str, **params: str) -> str:
+            return i18n_t(key, language, **params)
+
+        async def run(arguments: dict) -> dict:
+            try:
+                return await self._run_hosted_tool(tool, {"arguments": arguments}, turn=turn, language=language)
+            except ModelHubError as refused:
+                # Arguments a before hook wrote take the tool's usual checks when they are sent; a refusal is the
+                # call's failed output, which the after hook sees like any other.
+                output = {"ok": False, "error": {
+                    "code": refused.code, "message": say("modelHub.sourceFilter.refused", code=refused.code),
+                }}
+                url = str(arguments.get("url") or "") if tool == "web_fetch" else ""
+                return {"record": await asyncio.to_thread(record_for, tool, output, requested_url=url)}
+
+        return await filtered_call(self._source_filter_hooks, tool, dict(call.arguments), run, say)
+
+    def source_filter_status(self) -> dict:
+        """Settings › Experimental › Source filter: the switch, the hook folder and each script's state."""
+
+        config = self.store.load()
+        return {"enabled": hosted_tool_setting(config, "web_search").source_filter, **self._source_filter_hooks.status()}
+
+    async def set_source_filter(self, enabled: object) -> dict:
+        """Turn the experiment on or off; it applies from the next turn."""
+
+        if not isinstance(enabled, bool):
+            raise ModelHubError("invalid_parameter", status=400)
+        async with self._mutation_lock:
+            # The config grows with use: read it off the controller loop.
+            previous = await asyncio.to_thread(self.store.load)
+            setting = hosted_tool_setting(previous, "web_search")
+            if setting.source_filter != enabled:
+                config = await asyncio.to_thread(self._clone_config, previous)
+                config.hosted_tools["web_search"] = replace(setting, source_filter=enabled)
+                await self._commit_synced(previous, config)
+        return await asyncio.to_thread(self.source_filter_status)
+
+    async def _run_hosted_tool(
         self,
         tool: str,
         payload: object,

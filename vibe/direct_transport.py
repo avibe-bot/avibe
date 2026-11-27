@@ -637,9 +637,15 @@ class DirectTransportSupervisor:
             self._report_skipped += 1
             return
         self._report_lines += 1
+        # The class of the selected path's address, as the sidecar classed it:
+        # `local` (private, shared address space, unique-local, link-local)
+        # or `global`; `none` through the relay, for an unknown path, and
+        # from a sidecar that does not say. Never the address.
+        scope = msg.get("scope") if self._device_reports else None
         # Construct the logged values exclusively from the fixed schema above.
-        logger.info("direct path connection=%d phase=%s selected=%s partial=%s suppressed=%d %s",
-                    msg["ordinal"], msg["phase"], msg["selected"], msg["partial"], self._report_skipped,
+        logger.info("direct path connection=%d phase=%s selected=%s scope=%s partial=%s suppressed=%d %s",
+                    msg["ordinal"], msg["phase"], msg["selected"], scope or "none", msg["partial"],
+                    self._report_skipped,
                     " ".join(f"{family}.{k}={row[k]}" for family, row in
                              zip(("relay", "ipv4", "ipv6", "unknown"), rows) for k in fields))
         self._report_skipped = 0

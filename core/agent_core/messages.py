@@ -103,6 +103,9 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "fetch_refused",
     "fetch_unavailable",
     "fetch_sources_blocked",
+    # Settings › Experimental › Source filter (core/handlers/model_hub/source_filter.py).
+    "source_filter_blocked",
+    "source_filter_failed",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
