@@ -18,6 +18,7 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
+from itertools import chain
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Literal, Mapping, Sequence
@@ -2083,17 +2084,27 @@ def _normalize_catalog(payload: object, *, strict: bool = False) -> dict[str, An
             raise ValueError("Backend model catalog must contain a backends object")
         return {}
 
+    # The v3.2.8 reader rejects new names under `backends` but skips unknown
+    # top-level fields. Keep its published feed and the new menus in one fetch.
+    additional = payload.get("additional_backends", {})
+    if not isinstance(additional, dict):
+        if strict:
+            raise ValueError("Backend model catalog additional_backends must be an object")
+        additional = {}
+
     normalized_backends: dict[str, Any] = {}
-    for backend, raw_backend in backends.items():
-        if not isinstance(backend, str) or not isinstance(raw_backend, dict):
+    for backend, raw_backend in chain(backends.items(), additional.items()):
+        backend_key = backend.strip().lower() if isinstance(backend, str) else ""
+        if backend_key not in _SUPPORTED_BACKENDS:
+            continue
+        if not isinstance(raw_backend, dict):
             if strict:
                 raise ValueError("Backend model catalog contains an invalid backend entry")
             continue
-        backend_key = backend.strip().lower()
-        if strict and backend_key not in _SUPPORTED_BACKENDS:
-            raise ValueError(f"Backend model catalog contains an unsupported backend: {backend_key}")
+        if strict and backend_key in normalized_backends:
+            raise ValueError(f"Backend model catalog contains a duplicate backend: {backend_key}")
         models = raw_backend.get("models")
-        if not backend_key or not isinstance(models, list):
+        if not isinstance(models, list):
             if strict:
                 raise ValueError(f"Backend model catalog models must be a list: {backend_key}")
             continue

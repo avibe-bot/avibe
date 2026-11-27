@@ -59,19 +59,20 @@ Updating CPA for an Avibe release requires changing the packaged manifest in the
 same change as its frozen contract test. The release tag and source commit are
 fixed, and every supported archive records its published byte size, archive
 SHA-256, and extracted binary SHA-256. The verified upstream bytes are published
-  under an Avibe-owned release tag before the manifest is pinned. For patched
-  dependencies, the assets are built from the reviewed source and patch before
-  publication. A scheduled guard verifies that release and preserves a
-  manifest-keyed backup that can restore missing assets without overwriting a
-  mismatched asset. For this change,
-the reviewed target is Avibe-owned CLIProxyAPI `v8.1.2` at source commit
-`85225381d89915595598ed13766cd79890c03a84`, built with Go 1.26.10 for
-darwin-arm64, darwin-x64, linux-amd64, linux-arm64, windows-amd64 and
-windows-arm64. The release assets are built from that exact upstream source
-with the patches in `patches/model-hub-cpa-v8.1.2/`, applied in the order the
-manifest's `build.patches` records; the packaged manifest records the resulting
-archive and binary digests. Rolling back means reverting the whole adoption
-change, which restores the previous patch directory and manifest together.
+under an Avibe-owned release tag before the manifest is pinned. For patched
+dependencies, the assets are built from the reviewed source and patches before
+publication. A scheduled guard verifies that release and preserves a
+manifest-keyed backup that can restore missing assets without overwriting a
+mismatched asset.
+
+The packaged target is `model-hub-engine-v8.1.7-1`: CLIProxyAPI `v8.1.7` at
+`47f18e4d82bd72f7d2b5ecf5ede93e4837a4625e`, built with Go 1.26.10 for
+macOS, Linux and Windows on x64 and arm64. The packaged manifest is an exact
+copy of the [reviewed candidate manifest](../../patches/model-hub-engine-candidates/model-hub-engine-v8.1.7-1/model-hub-engine-manifest.json).
+It retains the seven v8.1.2 patches in order and appends the
+[error comparability adapter](../../patches/model-hub-cpa-v8.1.7/README.md).
+Reverting the pin and its frozen contract restores the previous engine target
+in subsequent Avibe builds; it does not alter already published releases.
 
 ### Hosted passthrough
 

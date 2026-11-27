@@ -104,12 +104,12 @@ final class TurnActivityCoordinator {
     private let beginBackgroundTask: BackgroundTask
     private let isActive: @MainActor () -> Bool
     private static let settingKey = "avibe.liveActivities.enabled"
-    /// Lock Screen and Dynamic Island progress is switched off pending a
-    /// redesign (11-26): the shell does not announce `lockScreenProgress`, the
-    /// setting reads and stays off, nothing starts a card, and a card an
-    /// earlier build left ends at launch and whenever the App comes to the
-    /// front. The feature's code stays; this is the one switch.
-    static let shipsLockScreenProgress = false
+    /// Lock Screen and Dynamic Island progress ships (back on 11-27, after the
+    /// black-card fix). Off, the setting reads and stays off, nothing starts a
+    /// card, and a card an earlier build left ends at launch and whenever the
+    /// App comes to the front. Switching off also means removing the
+    /// `lockScreenProgress` line from NativeShellMetadata.capabilities by hand.
+    static let shipsLockScreenProgress = true
     private let available: Bool
     var deviceEnabled: Bool { available && defaults.bool(forKey: Self.settingKey) }
 
@@ -159,7 +159,7 @@ final class TurnActivityCoordinator {
         self.beginBackgroundTask = beginBackgroundTask
         self.defaults = defaults
         self.available = available
-        // Switched on by an earlier build: it stays off until the redesign.
+        // Switched off: a setting an earlier build stored on is forced off.
         if !available { defaults.set(false, forKey: Self.settingKey) }
         self.mayRequest = mayRequest
         self.now = now

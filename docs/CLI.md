@@ -896,12 +896,11 @@ target. Explicit `--session-id` and session creation flags still win. To target
 an IM channel or thread that has no Session yet, create one with
 `--create-session` (or `--create-session-per-run`) and `--scope-id`.
 
-A pure command task (`--on-failure none`, the default) skips that caller-session
-default and takes no session, scope, or agent flags. Successful runs are silent;
-a failed run records a durable failure notice naming the command and its exit
-code. With `--on-failure agent --message '<instructions>'` the failure instead
-starts one Agent turn carrying the failure report, and that turn replaces the
-notice for the run. `vibe task update` can change a command task's `--shell`,
+For a new recurring command, no failure flag is needed. The first failure stays in Run history. The second consecutive matching failure is handed to the creating Session, or the maintainer named by `--session-id`. With no maintainer, or if the handoff fails, Avibe uses a failure notice. Further matches do not repeat the report. Success resets the count; a different failure starts a new pair. One-shot commands notify immediately.
+
+Explicit `--on-failure none` sends a notice on every failure; `--on-failure agent` starts a turn on every failure. Existing tasks keep their stored policy. Older versions recorded `none` even when the flag was omitted.
+
+`vibe task update` can change a command task's `--shell`,
 argv, `--timeout`, or `--cwd`, but switching a task between message and command
 form, or changing `--on-failure`, is rejected — remove the task and recreate it.
 
@@ -918,7 +917,7 @@ definition also *creates* a Session:
   scope instead (`--same-scope` / `--scope-id`) and omit `--cwd` if you want the
   Session to inherit its directory.
 
-Without the flag, a Session-bound command follows that Session's directory —
+Without the flag, a recurring command using the default failure handling keeps its invocation directory when bound to an existing maintainer. With explicit `--on-failure agent`, a Session-bound command follows that Session's directory —
 read live at fire time, so `/setcwd` on that conversation relocates the job —
 and every other command records the directory you ran `vibe task add` from. For
 a message task `--cwd` still places the Session it creates, and is still refused

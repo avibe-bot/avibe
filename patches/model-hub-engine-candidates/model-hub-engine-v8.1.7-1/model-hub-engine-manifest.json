@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "name": "cliproxyapi",
+  "version": "v8.1.7",
+  "source": "router-for-me/CLIProxyAPI",
+  "source_url": "https://github.com/router-for-me/CLIProxyAPI/tree/47f18e4d82bd72f7d2b5ecf5ede93e4837a4625e",
+  "source_sha": "47f18e4d82bd72f7d2b5ecf5ede93e4837a4625e",
+  "release_tag": "v8.1.7",
+  "asset_release_tag": "model-hub-engine-v8.1.7-1",
+  "license": "MIT",
+  "assets": [
+    {
+      "platform": "darwin-arm64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.1.7-1/CLIProxyAPI_8.1.7_darwin_aarch64.tar.gz",
+      "size_bytes": 47792911,
+      "sha256": "92271de06204b4887861d489b9aa08a06ea0b4505c975a579290d3011b4a67d5",
+      "binary_sha256": "c8117733b1c115875dd1cdee986825dc3d4943b88b450f3c3bade59137104007",
+      "bin_path": "cli-proxy-api"
+    },
+    {
+      "platform": "darwin-x64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.1.7-1/CLIProxyAPI_8.1.7_darwin_amd64.tar.gz",
+      "size_bytes": 50785869,
+      "sha256": "758801bbea72f695c0b4b14c8ef18f1ad672080936b5135ce3afefc4b616fda3",
+      "binary_sha256": "0429087b01b89ef2c60aba343ee29fa9139737338caf75f4a6f48ed661a1f0b2",
+      "bin_path": "cli-proxy-api"
+    },
+    {
+      "platform": "linux-amd64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.1.7-1/CLIProxyAPI_8.1.7_linux_amd64.tar.gz",
+      "size_bytes": 48494052,
+      "sha256": "c540e4f2d9edaa8faa61a40e475fb2feff2edd249d1aa6283766b8f0fda6d863",
+      "binary_sha256": "e0b4f7d59f52271dc03c99922affe0e57318703fb1ed928b28cb54a221e5c29f",
+      "bin_path": "cli-proxy-api"
+    },
+    {
+      "platform": "linux-arm64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.1.7-1/CLIProxyAPI_8.1.7_linux_aarch64.tar.gz",
+      "size_bytes": 44444909,
+      "sha256": "9236123e9cfd8bb1b881f16c89fbe1f65585e3aa55fef29fb2c6ee3a61afe855",
+      "binary_sha256": "a9d5ef436f78f926861c3ea418e653c27d0c440cca0efc3baeb22821e85ab590",
+      "bin_path": "cli-proxy-api"
+    },
+    {
+      "platform": "windows-amd64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.1.7-1/CLIProxyAPI_8.1.7_windows_amd64.tar.gz",
+      "size_bytes": 49079911,
+      "sha256": "58b5aba691c778aa307bf57f4de78e86bf0e63c24ad640d8b97d0823f3d60230",
+      "binary_sha256": "a296965e9395c2e32e933000418997c940949e49e4ef7dc60873dc3f46035e66",
+      "bin_path": "cli-proxy-api.exe"
+    },
+    {
+      "platform": "windows-arm64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.1.7-1/CLIProxyAPI_8.1.7_windows_aarch64.tar.gz",
+      "size_bytes": 44739485,
+      "sha256": "35b4c70d2c206a44bef93f839c9503c2ec19c4b98d474b107b30c9897988c03a",
+      "binary_sha256": "e12705d19dbd7e0bad555d90477a5ad134df564f4d15e499b9fb5ce1a085fda9",
+      "bin_path": "cli-proxy-api.exe"
+    }
+  ],
+  "build": {
+    "builder": "scripts/build_model_hub_engine.py",
+    "go_version": "go1.26.10",
+    "cgo_enabled": false,
+    "trimpath": true,
+    "buildvcs": false,
+    "patches": [
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/openai-compat-native-token-field.patch",
+        "sha256": "844a0bda93bad1436f0ab1bad1a9be2a7e1a879274e9acc18992b5a950d0a3c8"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/oauth-callback-forwarder-loopback.patch",
+        "sha256": "e9d854ed6376553bf24194b6926f18f98c8e0a9cec58498e62ae48dd2349eb85"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/antigravity-static-catalog-until-probe.patch",
+        "sha256": "86f00a29f2674f970579d91a68a198539e0870ffcb82c5069d35c4a257d75be0"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/codex-utls-h2-ping-health-check.patch",
+        "sha256": "a018086c971b7c0a6abe2ab4e8e797e54958a2f32e3ed724e6fe4469136f70dc"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/fallback-transport-h2-ping-health-check.patch",
+        "sha256": "0162cd93aacd08d1b2b1fe9575ca9b46263c568bb3c73c701023c2ca9ad82baf"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/codex-compat-upstream-item-ids.patch",
+        "sha256": "bdb1cdd8b38dfb01e914820ee8b8188c471426266a6a4d901e2f3fc1d2be1287"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.2/claude-retry-headers-on-error-responses.patch",
+        "sha256": "91b77d0f1cfdbba73d7e3b5300a8e81f27278b14fef22e378c507f637d33b352"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.1.7/status-error-comparability.patch",
+        "sha256": "b26afc7690dfbae4691837f57ce061e6cac2337a4e7e3b2e2747dc0579ff7f82"
+      }
+    ],
+    "source_date_epoch": 0
+  }
+}

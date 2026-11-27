@@ -5682,7 +5682,8 @@
     },
     "onFailure": {
       "none": "Notice only (no Agent)",
-      "agent": "Escalate to an Agent"
+      "agent": "Escalate to an Agent",
+      "auto": "Report the second matching failure once"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",

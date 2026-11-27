@@ -5682,7 +5682,8 @@
     },
     "onFailure": {
       "none": "仅通知（无 Agent）",
-      "agent": "升级给 Agent 处理"
+      "agent": "升级给 Agent 处理",
+      "auto": "同一错误连续两次，只报告一次"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",

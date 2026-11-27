@@ -2703,16 +2703,19 @@ def wait_for_desktop_startup_ready(
         holder = resolve_service_owner_pid(include_starting=True)
         return holder is not None and service_instance_migrating(holder)
 
-    async def wait():
+    async def wait(previous_tick: float, was_migrating: bool):
         nonlocal deadline
         current_pid = service_pid
-        previous_tick = time.monotonic()
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
-            while time.monotonic() < deadline:
+            while True:
                 now = time.monotonic()
-                if migrating():
+                # Charge the elapsed interval to the phase observed at its start.
+                if was_migrating:
                     deadline = min(hard_deadline, deadline + (now - previous_tick))
+                if now >= deadline:
+                    return None
                 previous_tick = now
+                was_migrating = migrating()
                 owner_pid = resolve_service_owner_pid(include_starting=False)
                 if owner_pid is not None:
                     current_pid = owner_pid
@@ -2733,9 +2736,10 @@ def wait_for_desktop_startup_ready(
                 if not pid_alive(current_pid) and owner_pid is None:
                     return None
                 await asyncio.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-        return None
 
-    return asyncio.run(wait())
+    # Client setup can span the end of a database update before the first probe.
+    first_tick = time.monotonic()
+    return asyncio.run(wait(first_tick, first_tick < deadline and migrating()))
 
 
 def _is_ui_server_command(command: str) -> bool:

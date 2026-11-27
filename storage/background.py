@@ -51,6 +51,7 @@ from storage.models import (
     agent_sessions,
     message_deliveries,
     messages,
+    command_failure_incidents,
     run_definitions,
     runtime_records,
     scopes,
@@ -2078,6 +2079,8 @@ def _owed_failure_notice_for_transition(
     existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
     if isinstance(existing, dict) and str(existing.get("state") or "").strip():
         return None
+    if metadata.get("quiet_command_run_id") == run_id:
+        return None
     if str(metadata.get("escalation_run_id") or "").strip():
         # The escalation turn IS the user-visible report for this failure.
         return None
@@ -2333,7 +2336,7 @@ def _run_can_own_failure_notice(
         )
     if not will_settle_failed:
         return False
-    if str(metadata.get("escalation_run_id") or "").strip():
+    if metadata.get("quiet_command_run_id") == row["id"] or str(metadata.get("escalation_run_id") or "").strip():
         return False
     return not _callback_parent_owns_failure_notice(
         conn,
@@ -3682,6 +3685,8 @@ class SQLiteBackgroundTaskStore:
                 .where(run_definitions.c.deleted_at.is_(None))
                 .values(deleted_at=deleted_at or _utc_now_iso())
             )
+            if result.rowcount:
+                conn.execute(command_failure_incidents.delete().where(command_failure_incidents.c.definition_id == definition_id))
             return bool(result.rowcount)
 
     def set_definition_enabled(
@@ -4120,7 +4125,8 @@ class SQLiteBackgroundTaskStore:
         payload: dict[str, Any],
         *,
         expect: DefinitionWriteExpectation | None,
-        run_payload: dict[str, Any],
+        run_payload: Optional[dict[str, Any]],
+        repeat_failure_key: Optional[str] = None,
         expected_uncanceled_run_id: Optional[str] = None,
         expected_schedule_generation: Optional[dict[str, str]] = None,
         expected_terminal_run_id: Optional[str] = None,
@@ -4162,12 +4168,12 @@ class SQLiteBackgroundTaskStore:
 
         def write(conn: Any) -> bool:
             values = self._scheduled_task_values(payload)
-            run_values = self._run_values(run_payload)
             reserve_write_lock(conn)
             if expected_uncanceled_run_id and agent_run_cancellation_won_in_connection(
                 conn, expected_uncanceled_run_id
             ):
                 return False
+            report = run_payload is not None
             if not upsert_definition_in_connection(
                 # Only the refusal LOG's label; the row's ``definition_type`` column
                 # comes from ``_scheduled_task_values``. Spelled the way the rest of
@@ -4186,10 +4192,65 @@ class SQLiteBackgroundTaskStore:
                 ),
             ):
                 return False
-            _pin_run_to_definition_agent(
-                conn, run_values, agent_name=values.get("agent_name")
-            )
-            enqueue_run_in_connection(conn, run_values)
+            if repeat_failure_key is not None:
+                # Serialized with this command stamp. An independent definition
+                # rename or schedule edit cannot overwrite runtime incident state.
+                incident = command_failure_incidents
+                match_task = incident.c.definition_id == values["id"]
+                if not repeat_failure_key:
+                    # A zero exit is provisional: Stop can still win settlement.
+                    # Keep the incident intact until this exact Run is succeeded.
+                    assert expected_uncanceled_run_id
+                    conn.execute(update(incident).where(match_task).values(recovery_fire_id=expected_uncanceled_run_id))
+                else:
+                    assert expected_uncanceled_run_id
+                    previous = conn.execute(select(incident).where(match_task)).first()
+                    # A replay of the same stamp is not another occurrence; the
+                    # decision and any outbox entry were already committed together.
+                    if previous is not None and previous.fire_id == expected_uncanceled_run_id:
+                        return True
+                    # A stop can retract a fire after its stamp. Ignore it and
+                    # compare against the incident it replaced, even if it was
+                    # a different error. All lookups here are by primary key.
+                    prior_key, prior_reported = None, False
+                    if previous is not None:
+                        if agent_run_cancellation_won_in_connection(conn, previous.fire_id):
+                            prior_key, prior_reported = previous.prior_fingerprint, previous.prior_reported
+                        else:
+                            prior_key, prior_reported = previous.fingerprint, previous.reported
+                    same = prior_key == repeat_failure_key
+                    report = same and not prior_reported
+                    facts = dict(
+                        fingerprint=repeat_failure_key, fire_id=expected_uncanceled_run_id,
+                        reported=int(same), prior_fingerprint=prior_key, prior_reported=int(prior_reported),
+                        recovery_fire_id=None,
+                    )
+                    if previous is None:
+                        conn.execute(insert(incident).values(definition_id=values["id"], **facts))
+                    else:
+                        conn.execute(update(incident).where(match_task).values(**facts))
+            if report and run_payload is not None:
+                run_values = self._run_values(run_payload)
+                _pin_run_to_definition_agent(conn, run_values, agent_name=values.get("agent_name"))
+                enqueue_run_in_connection(conn, run_values)
+            if repeat_failure_key:
+                # Bind the notice decision to the actual command Run, never to the
+                # definition or a hypothetical escalation. A refused transaction
+                # leaves the ordinary user notice intact.
+                assert expected_uncanceled_run_id
+                if report and run_payload is None:
+                    # No maintenance Session: the normal terminal failure notice
+                    # is the report. Do not suppress it or invent an Agent turn.
+                    return True
+                key, value = (("escalation_run_id", run_payload["id"]) if report else
+                              ("quiet_command_run_id", expected_uncanceled_run_id))
+                result = conn.execute(update(agent_runs).where(
+                    agent_runs.c.id == expected_uncanceled_run_id,
+                    agent_runs.c.definition_id == values["id"],
+                    agent_runs.c.run_type == "scheduled",
+                ).values(metadata_json=func.json_set(agent_runs.c.metadata_json, f"$.{key}", value)))
+                if result.rowcount != 1:
+                    raise ValueError("repeat failure decision requires its command run")
             return True
 
         return _retry_run_update_write(self.engine, write)
@@ -7127,6 +7188,15 @@ class SQLiteBackgroundTaskStore:
                 )
                 if transition.rowcount:
                     written_status = status
+                    if status == "succeeded" and row["run_type"] == "scheduled" and exit_code == 0:
+                        # Clear only the incident that named this fire as a possible
+                        # recovery. A canceled/losing settle or an older Run cannot
+                        # erase another fire's evidence; both writes roll back together.
+                        incident = command_failure_incidents
+                        conn.execute(incident.delete().where(
+                            incident.c.definition_id == row["definition_id"],
+                            incident.c.recovery_fire_id == run_id,
+                        ))
                     _defer_run_ids_updated_from_connection(conn, [run_id])
                     break
                 if final_attempt:
