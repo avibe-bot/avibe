@@ -9,7 +9,7 @@ final class DirectRendezvousTests: XCTestCase {
 
     private var expectation: DirectRendezvousExpectation {
         DirectRendezvousExpectation(
-            attemptID: 1,
+            instanceID: "inst_1",
             hostname: "alice-app.avibe.bot",
             clientEndpointID: client
         )
