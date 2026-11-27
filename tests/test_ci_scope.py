@@ -326,12 +326,27 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     extras = {
         'storage/alembic/env.py': {'install-upgrade-shards'},
         'ios/Avibe/NavigationPolicy.swift': {'ios-shell'},
-        'ui/src/App.tsx': {'ios-shell'},
+        'ui/src/App.tsx': set(),  # The Linux floor builds and type-checks the mobile bundle.
     }.get(path, set())
     assert routed['portfolio'] == 'true' and routed['sensitive'] == str(bool(extras)).lower()
     assert {k for k, v in json.loads(routed['dispatch_jobs']).items() if v == 'run'} == LINUX | extras
     assert json.loads(routed['unit_shards']) == list(range(24))
     assert routed['advisory_ios'] == 'skip'
+    assert outputs['native_path_receipt'] == ''
+    if 'ios-shell' in extras:
+        from scripts.ci_fast_pr import native_path_receipt
+        from scripts.ci_native_pr_tests import verified_merge_paths
+        shallow = tmp_path / 'native-worker'
+        subprocess.run(['git', 'clone', '--depth=2', repo.as_uri(), str(shallow)], check=True)
+        assert verified_merge_paths(shallow, routed['native_path_receipt']) == (event['pull_request']['base']['sha'], (path,))
+        for stale in ('', native_path_receipt('1' * 40, (path,)), native_path_receipt(sha, ('wrong/path',))):
+            with pytest.raises(ValueError, match='do not match'):
+                verified_merge_paths(shallow, stale)
+        subprocess.run(['git', 'checkout', '--detach', 'HEAD^2'], cwd=shallow, check=True)
+        with pytest.raises(ValueError, match='two-parent merge'):
+            verified_merge_paths(shallow, routed['native_path_receipt'])
+    else:
+        assert routed['native_path_receipt'] == ''
     output.unlink()
     result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -341,6 +356,35 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     event_file.write_text("{}")
     result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0 and output.read_text() == "ios=run\n"
+
+
+def test_native_receipt_uses_the_classified_checkout_not_another_run(tmp_path):
+    from scripts.ci_native_pr_tests import verified_merge_paths
+    from tests.test_ci_docs_only import make_repo, synthetic_pr, write
+
+    path = 'ios/Avibe/NavigationPolicy.swift'
+    cases = []
+    for name in ('first', 'second'):
+        repo = make_repo(tmp_path / name)
+        event, merge = synthetic_pr(repo, lambda root: write(root, path, f'// {name}\n'))
+        cases.append((repo, event, merge))
+    repo, event, merge = cases[0]
+    other, _, other_merge = cases[1]
+    assert merge != other_merge
+    payload, output = tmp_path / 'event.json', tmp_path / 'scope.out'
+    payload.write_text(json.dumps(event))
+    env = {**os.environ, 'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REF': 'refs/pull/1/merge',
+           'GITHUB_EVENT_PATH': str(payload), 'GITHUB_OUTPUT': str(output), 'FAST_PR_ENABLED': 'true'}
+    command = [sys.executable, str(ROOT / 'scripts/ci_scope.py')]
+    # Two valid merges change the same path. A stale run identity must fail on
+    # the issuing worker, before any receipt or dispatch outputs are written.
+    mixed = subprocess.run(command, cwd=repo, env={**env, 'GITHUB_SHA': other_merge}, capture_output=True, text=True)
+    assert mixed.returncode != 0 and 'classified checkout' in mixed.stdout and not output.exists()
+    subprocess.run(command, cwd=repo, env={**env, 'GITHUB_SHA': merge}, check=True, capture_output=True)
+    receipt = dict(line.split('=', 1) for line in output.read_text().splitlines())['native_path_receipt']
+    assert verified_merge_paths(repo, receipt) == (event['pull_request']['base']['sha'], (path,))
+    with pytest.raises(ValueError, match='do not match'):
+        verified_merge_paths(other, receipt)
 
 
 @pytest.mark.parametrize("path", ["vibe/ui_network_access.py", "tests/test_ui_listener_lifecycle.py"])
@@ -354,6 +398,18 @@ def test_native_ui_listener_changes_run_on_all_three_operating_systems(path):
 @pytest.mark.parametrize("path", ["vibe/ui_server.py", "vibe/desktop_runtime.py"])
 def test_listener_consumers_alone_do_not_trigger_install_regressions(path):
     assert make_plan("PR", scope(path))["jobs"]["install-upgrade-shards"] == "skip"
+
+
+@pytest.mark.parametrize('paths', [
+    ('desktop/src-tauri/src/direct/offer.rs', 'desktop/src-tauri/tests/direct/cross_network.rs'),
+    ('desktop/src-tauri/src/direct/shell_windows.rs', 'desktop/src-tauri/src/lib.rs'),
+    ('desktop/new-product-area/new-file.rs',),
+])
+def test_desktop_directory_requires_desktop_shell_only_beyond_linux(paths):
+    from scripts.ci_fast_pr import LINUX, selected
+
+    assert selected(scope(*paths)) == ({'desktop'}, LINUX | {'desktop-shell'})
+    assert 'desktop-shell' in workflow()['jobs']['sensitive-proof']['needs']
 
 
 def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
@@ -404,7 +460,7 @@ def test_named_files_and_manual_request_select_real_proofs():
     assert selected(scope('vibe/model_hub_runtime/cliproxyapi_manifest.json')) == (
         {'engine-wire'}, LINUX | {'model-hub-hosted-wire'},
     )
-    assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell', 'ios-shell'}
+    assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell'}
     assert selected(scope('patches/model-hub-engine-channel.json')) == ({'shared'}, LINUX | {'manifest-consistency'})
     assert selected(scope('storage/alembic/versions/new_revision.py'))[1] == LINUX | {'install-upgrade-shards'}
     assert selected(scope('ios/AvibeTests/MobileOnboardingTests.swift', 'ui/thread_bootstrap.ts'))[1] == LINUX | {'ios-shell'}
@@ -413,8 +469,8 @@ def test_named_files_and_manual_request_select_real_proofs():
 
 @pytest.mark.parametrize('path', [
     'ios/Avibe/DirectPathController.swift', 'ios/AvibeTests/LiveActivityTests.swift',
-    '.github/workflows/ios-shell.yml', 'ui/src/components/MobileChrome.tsx', 'ui/mobile.html',
-    'ui/package-lock.json', 'ui/scripts/bundleNotices.mjs', 'packaging/iroh-apple/release.json',
+    '.github/workflows/ios-shell.yml', 'ui/src/lib/native.ts', 'ui/src/mobile/bridge.ts',
+    'packaging/iroh-apple/release.json',
     'tests/fixtures/live_activity/contract_vectors.json', 'scripts/cargo_notices.py',
     'tests/fixtures/system_schedule_contract_vectors.json',
 ])
@@ -423,6 +479,20 @@ def test_app_build_input_alone_requires_simulator_proof(path):
 
     assert selected(scope(path)) == ({'ios'}, LINUX | {'ios-shell'})
     assert 'ios-shell' in workflow()['jobs']['sensitive-proof']['needs']
+
+
+@pytest.mark.parametrize('path', [
+    'ui/src/components/MobileChrome.tsx', 'ui/mobile.html', 'ui/package-lock.json',
+    'ui/scripts/bundleNotices.mjs', 'ui/vite.mobile.config.ts',
+])
+def test_ui_bundle_inputs_are_built_on_linux_without_the_simulator(path):
+    from scripts.ci_fast_pr import LINUX, selected
+
+    assert selected(scope(path)) == (set(), LINUX)
+    job = workflow()['jobs']['build-linux-artifacts']
+    assert 'build-linux-artifacts' in LINUX and job['runs-on'] == 'ubuntu-latest'
+    assert any('npm run build:mobile' in s.get('run', '') for s in job['steps'])
+    assert 'tsc -b' in json.loads((ROOT / 'ui/package.json').read_text())['scripts']['build:mobile']
 
 
 @pytest.mark.parametrize('gate', ['fast-gate', 'sensitive-proof'])
