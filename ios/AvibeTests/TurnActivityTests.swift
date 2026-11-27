@@ -954,7 +954,11 @@ final class TurnActivityTests: XCTestCase {
             XCTAssertFalse(english.contains("turn."))
             XCTAssertFalse(chinese.contains("turn."))
             XCTAssertNotEqual(english, chinese)
-            if !phase.isRunning {
+            if phase == .failed {
+                // One line, no running time (Product, 11-27).
+                XCTAssertEqual(english, "Open Avibe to see why")
+                XCTAssertEqual(chinese, "打开 Avibe 查看原因")
+            } else if !phase.isRunning {
                 XCTAssertTrue(english.contains("10"))
                 XCTAssertTrue(chinese.contains("10"))
             }

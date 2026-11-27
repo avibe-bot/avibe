@@ -51,7 +51,7 @@ struct TurnActivityShown {
         case .needsYou: return "hand.raised"
         case .done: return "checkmark"
         case .failed: return "xmark"
-        case .stopped: return "stop"
+        case .stopped: return "stop.fill"
         }
     }
     var tint: Color {
@@ -123,7 +123,9 @@ struct TurnActivityCard: View {
                         .lineLimit(1).truncationMode(.tail)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    TurnActivityGlyph(shown: shown)
+                    // One width for every state's symbol, so the words start
+                    // at the same place after a dot, a tick or a hand.
+                    TurnActivityGlyph(shown: shown).frame(width: 16)
                     (Text(LocalizedStringKey(shown.statusKey), tableName: "TurnActivity")
                         .fontWeight(.semibold).foregroundColor(shown.tint)
                      + Text(" · " + shown.detail(locale: locale)).foregroundColor(.secondary))

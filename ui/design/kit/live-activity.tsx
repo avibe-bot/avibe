@@ -49,7 +49,7 @@ function Glyph({ phase, stale, className }: { phase: TurnPhase; stale?: boolean;
     case 'failed':
       return <X className={clsx('text-destructive-ink', className)} />;
     case 'stopped':
-      return <Square className={clsx('text-muted', className)} />;
+      return <Square fill="currentColor" className={clsx('text-muted', className)} />;
   }
 }
 
@@ -70,7 +70,7 @@ function useTurnCopy() {
       case 'done':
         return { status: t('已完成', 'Done'), detail: t(`用时 ${a.took}，轻点查看回复`, `Took ${a.took}. Tap to read the reply.`) };
       case 'failed':
-        return { status: t('没有完成', "Didn't finish"), detail: t(`运行 ${a.took}，打开 Avibe 查看原因`, `Ran ${a.took}. Open Avibe to see why.`) };
+        return { status: t('没有完成', "Didn't finish"), detail: t('打开 Avibe 查看原因', 'Open Avibe to see why') };
       case 'stopped':
         return { status: t('已停止', 'Stopped'), detail: t(`运行 ${a.took}后停止`, `Stopped after ${a.took}`) };
     }

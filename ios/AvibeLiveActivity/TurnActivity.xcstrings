@@ -160,13 +160,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ran %@. Open Avibe to see why."
+            "value": "Open Avibe to see why"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "运行 %@，打开 Avibe 查看原因"
+            "value": "打开 Avibe 查看原因"
           }
         }
       }
