@@ -3,6 +3,7 @@
 Neither readers nor producers may use a most-recent identity when this returns None.
 The binary revision triggers discovery; it deliberately is *not* the inventory key.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -24,6 +25,7 @@ def _key(*parts) -> str:
 
 def _native_revision(backend: str) -> str | None:
     from vibe.native_oauth_store import read_native_oauth
+
     current = read_native_oauth(backend, allow_secret=False)
     if current and (current.exportable or (current.payload or {}).get("status") == "metadata_only"):
         return current.revision
@@ -37,9 +39,11 @@ def inventory_identity(backend: str, config, *, cwd: str | None = None) -> str |
         return None
     if backend == "antigravity":
         from modules.agents.antigravity.models import account_cache_identity
+
         return account_cache_identity(settings)
     if backend == "codex":
         from vibe.codex_config import get_codex_home, _load_toml
+
         home = get_codex_home()
         native = _load_toml(home / "config.toml")
         provider_id = native.get("model_provider", "openai")
@@ -56,6 +60,7 @@ def inventory_identity(backend: str, config, *, cwd: str | None = None) -> str |
         return _key(str(home), provider_id, provider, os.environ.get("OPENAI_BASE_URL"), key, revision)
     if backend == "claude":
         from vibe.claude_config import build_claude_subprocess_env
+
         env = build_claude_subprocess_env(settings)
         credential = [env.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")]
         revision = None if any(credential) else _native_revision(backend)
@@ -65,11 +70,24 @@ def inventory_identity(backend: str, config, *, cwd: str | None = None) -> str |
     if backend == "opencode":
         from modules.agents.opencode.client_manager import global_config_files
         from vibe.opencode_config import get_opencode_auth_path
+
         directory = Path(cwd or config.runtime.default_cwd).expanduser().resolve()
+        data_home = os.environ.get("XDG_DATA_HOME")
+        auth = Path(data_home) / "opencode/auth.json" if data_home else get_opencode_auth_path()
+        # OpenCode can load an alternate workspace/profile. Don't assume the
+        # default files identify it when a launcher has supplied inline auth.
+        if any(
+            os.environ.get(k)
+            for k in ("OPENCODE_AUTH_CONTENT", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR")
+        ):
+            return None
         # Use the same global provider config files the server uses. Include
         # its cwd's native config, never another workspace's default menu.
-        profile = [_file_revision(p) for p in (*global_config_files(), directory / "opencode.json", directory / "opencode.jsonc")]
-        credential = _file_revision(get_opencode_auth_path())
+        profile = [
+            _file_revision(p)
+            for p in (*global_config_files(), directory / "opencode.json", directory / "opencode.jsonc")
+        ]
+        credential = _file_revision(auth)
         if not credential and not any(profile):
             return None
         return _key(str(directory), credential, profile)

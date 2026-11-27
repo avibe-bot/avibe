@@ -3,6 +3,7 @@
 Store-only tests cannot catch importing the wrong CLI catalog, treating a failed
 probe as [], restoring a deleted row on upgrade, or relabeling one account's reply.
 """
+
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -40,9 +41,11 @@ async def test_codex_upgrade_failure_and_account_cutover(tmp_path, monkeypatch):
     calls = tmp_path / "calls"
 
     def release(rows, *, broken=False):
-        command = f'print({json.dumps({"models": rows})!r})' if not broken else 'print("{truncated")'
-        binary.write_text(f'#!{sys.executable}\nimport sys\nassert sys.argv[1:] == ["debug", "models"]\n'
-                          f'with open({str(calls)!r},"a") as f: f.write("1")\n{command}\n')
+        command = f"print({json.dumps({'models': rows})!r})" if not broken else 'print("{truncated")'
+        binary.write_text(
+            f'#!{sys.executable}\nimport sys\nassert sys.argv[1:] == ["debug", "models"]\n'
+            f'with open({str(calls)!r},"a") as f: f.write("1")\n{command}\n'
+        )
         binary.chmod(0o700)
 
     old = {"slug": "old", "visibility": "list"}
@@ -71,16 +74,19 @@ async def test_codex_upgrade_failure_and_account_cutover(tmp_path, monkeypatch):
 async def test_stalled_probe_does_not_block_menu_or_relabel_its_reply(tmp_path, monkeypatch):
     from core import native_inventory_refresh as refresh
     from core.handlers.direct_model_menu import PickerModel, publish_inventory
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
     config = V2Config.default()
     config.save()
     key = "A"
     monkeypatch.setattr(refresh, "_source", lambda *_: (key, "codex", (1,), "."))
     started, finish = asyncio.Event(), asyncio.Event()
+
     async def blocked(*_):
         started.set()
         await finish.wait()
         return [PickerModel("not-B")]
+
     monkeypatch.setattr(refresh, "discover", blocked)
     publish_inventory("codex", key, [PickerModel("last-good")])
     task = asyncio.create_task(NativeInventoryRefresh(None)._refresh(config, "codex", None))
@@ -99,22 +105,38 @@ async def test_stalled_probe_does_not_block_menu_or_relabel_its_reply(tmp_path, 
 @pytest.mark.asyncio
 async def test_claude_preserves_aliases_even_when_they_resolve_to_one_id(monkeypatch, tmp_path):
     import claude_agent_sdk
+
     monkeypatch.setenv("HOME", str(tmp_path))
+
     class Client:
         def __init__(self, *, options):
             assert options.cli_path == "/fixture/claude" and options.strict_mcp_config
+
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, *_):
             pass
+
         async def get_server_info(self):
-            return {"models": [{"value": value, "displayName": value, "resolvedModel": "claude-new",
-                                "supportedEffortLevels": ["high"]} for value in ("default", "opus")]}
+            return {
+                "models": [
+                    {
+                        "value": value,
+                        "displayName": value,
+                        "resolvedModel": "claude-new",
+                        "supportedEffortLevels": ["high"],
+                    }
+                    for value in ("default", "opus")
+                ]
+            }
+
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     settings = SimpleNamespace(cli_path="/fixture/claude")
     rows = await discover("claude", settings, settings.cli_path, str(tmp_path), None)
     assert [(r.id, r.resolved_model, r.reasoning_efforts) for r in rows] == [
-        ("default", "claude-new", ("high",)), ("opus", "claude-new", ("high",)),
+        ("default", "claude-new", ("high",)),
+        ("opus", "claude-new", ("high",)),
     ]
 
 
@@ -128,6 +150,7 @@ async def test_opencode_selects_connected_provider_in_the_requested_directory(tm
     config = V2Config.default()
     config.agents.opencode.enabled = True
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / ".local/share"))
     auth = get_opencode_auth_path()
     auth.parent.mkdir(parents=True, exist_ok=True)
     auth.write_text('{"one":{"type":"api","key":"fixture-A"}}')
@@ -136,17 +159,27 @@ async def test_opencode_selects_connected_provider_in_the_requested_directory(tm
     assert scope and inventory_identity("opencode", config, cwd=str(tmp_path)) != scope
     auth.write_text('{"one":{"type":"api","key":"fixture-B"}}')
     assert inventory_identity("opencode", config, cwd=folder) != scope
+
     async def providers(request):
         assert request.headers["x-opencode-directory"] == folder
-        return web.json_response({"all": [{"id": pid, "models": {"new": {"name": "New", "variants": {"high": {}}}}}
-                                           for pid in ("one", "two")], "connected": ["one"]})
+        return web.json_response(
+            {
+                "all": [
+                    {"id": pid, "models": {"new": {"name": "New", "variants": {"high": {}}}}} for pid in ("one", "two")
+                ],
+                "connected": ["one"],
+            }
+        )
+
     app = web.Application()
     app.router.add_get("/provider", providers)
     async with TestServer(app) as http:
         server = OpenCodeServerClient(str(http.make_url("")).rstrip("/"))
+
         @asynccontextmanager
         async def current():
             yield server
+
         agent = SimpleNamespace(current_server=current)
         controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"opencode": agent}))
         try:

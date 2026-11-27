@@ -1,4 +1,5 @@
 """Native, non-interactive inventory probes. Only a complete answer is publishable."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,8 +26,12 @@ async def _codex(binary: str) -> list[PickerModel]:
     from vibe.upgrade import get_safe_cwd
 
     answer = await run_supervised_command(
-        command=[binary, "debug", "models"], cwd=get_safe_cwd(), timeout_seconds=10,
-        label="Codex native inventory", discard_stderr=True, max_output_bytes=_MAX_OUTPUT,
+        command=[binary, "debug", "models"],
+        cwd=get_safe_cwd(),
+        timeout_seconds=10,
+        label="Codex native inventory",
+        discard_stderr=True,
+        max_output_bytes=_MAX_OUTPUT,
     )
     if answer.exit_code or answer.timed_out or answer.stdout_truncated:
         raise ValueError("incomplete Codex inventory")
@@ -37,9 +42,14 @@ async def _codex(binary: str) -> list[PickerModel]:
         if row["visibility"] != "list":
             raise ValueError("unknown model visibility")
         efforts = row.get("supported_reasoning_levels")
-        result.append(PickerModel(row["slug"], row.get("display_name"),
-                                  reasoning_efforts=None if efforts is None else tuple(e["effort"] for e in efforts),
-                                  default_reasoning_effort=row.get("default_reasoning_level")))
+        result.append(
+            PickerModel(
+                row["slug"],
+                row.get("display_name"),
+                reasoning_efforts=None if efforts is None else tuple(e["effort"] for e in efforts),
+                default_reasoning_effort=row.get("default_reasoning_level"),
+            )
+        )
     return result
 
 
@@ -50,16 +60,22 @@ async def _claude(settings, binary: str) -> list[PickerModel]:
     env = await asyncio.to_thread(build_claude_subprocess_env, settings)
     with tempfile.TemporaryDirectory() as cwd:
         options = ClaudeAgentOptions(
-            cli_path=binary, cwd=cwd, env=env,
-            settings='{"disableAllHooks":true}', setting_sources=["user"],
-            extra_args={"no-session-persistence": None}, max_buffer_size=_MAX_OUTPUT,
+            cli_path=binary,
+            cwd=cwd,
+            env=env,
+            settings='{"disableAllHooks":true}',
+            setting_sources=["user"],
+            extra_args={"no-session-persistence": None},
+            max_buffer_size=_MAX_OUTPUT,
             **CLAUDE_NATIVE_MCP_DISABLED,
         )
         # Initialize control only. No query, user turn, authentication or TUI.
         async with ClaudeSDKClient(options=options) as client:
             info = await client.get_server_info()
-    return [PickerModel(row["value"], row.get("displayName"), row.get("resolvedModel"), row.get("supportedEffortLevels"))
-            for row in _rows(info, "models")]
+    return [
+        PickerModel(row["value"], row.get("displayName"), row.get("resolvedModel"), row.get("supportedEffortLevels"))
+        for row in _rows(info, "models")
+    ]
 
 
 async def _opencode(controller, cwd: str) -> list[PickerModel]:
@@ -72,8 +88,13 @@ async def _opencode(controller, cwd: str) -> list[PickerModel]:
             variants = info.get("variants")
             if variants is not None and not isinstance(variants, dict):
                 raise ValueError("invalid OpenCode variants")
-            result.append(PickerModel(f'{provider["id"]}/{model_id}', info.get("name"),
-                                      reasoning_efforts=None if variants is None else tuple(variants)))
+            result.append(
+                PickerModel(
+                    f"{provider['id']}/{model_id}",
+                    info.get("name"),
+                    reasoning_efforts=None if variants is None else tuple(variants),
+                )
+            )
     return result
 
 
@@ -86,6 +107,7 @@ async def discover(backend: str, settings, binary: str, cwd: str, controller) ->
         return await _opencode(controller, cwd)
     if backend == "antigravity":
         from modules.agents.antigravity.models import read_antigravity_live_models
+
         rows = await asyncio.to_thread(read_antigravity_live_models, settings)
         if not rows:
             raise ValueError("no authenticated ACP snapshot")

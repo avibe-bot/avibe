@@ -1,4 +1,5 @@
 """Controller-owned background native model discovery. Readers never join these tasks."""
+
 from __future__ import annotations
 
 import asyncio
@@ -24,19 +25,19 @@ _INTERVAL = 3600
 def _source(config, backend, directory):
     mode = config.model_hub.agents.get(backend)
     if is_model_hub_enabled() and getattr(mode, "mode", None) == "hub":
-        vendor = {"codex": "openai", "claude": "anthropic"}.get(backend)
-        if not any(s.vendor == vendor and s.supply_channel == "native_cli" for s in config.model_hub.sources):
-            return None
+        return None
     cwd = str(Path(directory or config.runtime.default_cwd).expanduser().resolve())
     identity = inventory_identity(backend, config, cwd=cwd)
     if identity is None:
         return None
     settings = getattr(config.agents, backend)
-    binary = runtime_agent_cli_path(settings.cli_path, "agy" if backend == "antigravity" else backend,
-                                    resolve_agent_paths=True)
+    binary = runtime_agent_cli_path(
+        settings.cli_path, "agy" if backend == "antigravity" else backend, resolve_agent_paths=True
+    )
     if backend == "claude" and binary == "claude":
         import claude_agent_sdk
         import os
+
         bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
         if bundled.is_file():
             binary = str(bundled)
@@ -54,6 +55,7 @@ class _Attempt:
 
 class NativeInventoryRefresh:
     """One worker, bounded interest in OpenCode directories, last good in PR1's store."""
+
     def __init__(self, controller):
         self.controller = controller
         self.directories = OrderedDict()
@@ -93,7 +95,7 @@ class NativeInventoryRefresh:
         slot = (backend, cwd)
         try:
             source = await asyncio.to_thread(_source, config, backend, cwd)
-        except (ValueError, KeyError, OSError):
+        except Exception:  # A failed scope read for one backend must not starve the others.
             source = None
         if source is None:
             self.attempts.pop(slot, None)
@@ -105,11 +107,14 @@ class NativeInventoryRefresh:
         failures = last.failures if last and last.revision == source else 0
         identity, binary, _, directory = source
         try:
-            rows = await asyncio.wait_for(discover(backend, getattr(config.agents, backend), binary,
-                                                   directory, self.controller), timeout=18)
+            rows = await asyncio.wait_for(
+                discover(backend, getattr(config.agents, backend), binary, directory, self.controller), timeout=18
+            )
+
             def commit_if_current():
                 if _source(V2Config.load(), backend, cwd) == source:
                     publish_inventory(backend, identity, rows)
+
             await asyncio.to_thread(commit_if_current)
         except Exception:
             # Native diagnostics can contain account/provider data, so log only the backend.
