@@ -349,6 +349,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
 
     owner_examples = (
         ("GET", "/api/future-owner-capability"),
+        ("PUT", "/api/backend/claude/models/visibility"),
         ("POST", "/api/backend/opencode/future-mutation"),
         ("POST", "/api/codex/future-mutation"),
         ("PUT", "/api/permissions/authorized-users"),

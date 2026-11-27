@@ -11320,6 +11320,23 @@ def codex_models():
     return jsonify(api.codex_models())
 
 
+@app.put("/api/backend/{backend}/models/visibility", include_in_schema=False)
+async def direct_model_visibility(backend: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.direct_model_menu import set_removed
+
+        payload = request.json
+        if not isinstance(payload, dict) or set(payload) != {"model_id", "removed"}:
+            return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
+        try:
+            await asyncio.to_thread(set_removed, backend, payload["model_id"], payload["removed"])
+        except ValueError:
+            return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
+        return jsonify({"ok": True})
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/antigravity/models", include_in_schema=False)
 async def antigravity_models(starlette_request: FastAPIRequest):
     async def handler():
