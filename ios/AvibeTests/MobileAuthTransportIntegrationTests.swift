@@ -15,15 +15,15 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = store
         let page = WKWebView(frame: .zero, configuration: configuration)
-        DirectWebViewRegistry.shared.register(page)
-        XCTAssertEqual(DirectWebViewRegistry.shared.isSoleDocument(page, host: "instance-one.example"), true)
+        DirectWebViewRegistry.shared.register(page, as: .runtime)
+        XCTAssertEqual(DirectWebViewRegistry.shared.otherDocument(than: page, host: "instance-one.example"), .sole)
 
         // Made, and not yet asked anything: its WebView has no address.
         let transport = MobileAuthTransport(
             controlPlaneURL: try XCTUnwrap(URL(string: "https://avibe.example")),
             websiteDataStore: store
         )
-        XCTAssertEqual(DirectWebViewRegistry.shared.isSoleDocument(page, host: "instance-one.example"), true)
+        XCTAssertEqual(DirectWebViewRegistry.shared.otherDocument(than: page, host: "instance-one.example"), .sole)
         _ = transport.invalidate()
     }
 

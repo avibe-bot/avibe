@@ -503,7 +503,7 @@ final class TurnActivityTests: XCTestCase {
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: store)
             var page: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
-            DirectWebViewRegistry.shared.register(try XCTUnwrap(page))
+            DirectWebViewRegistry.shared.register(try XCTUnwrap(page), as: .runtime)
             var client: VoiceCaptureInstanceClient? = VoiceCaptureInstanceClient(
                 target: VoiceCaptureTarget(
                     accountID: "account-a", instanceID: "",
@@ -517,10 +517,13 @@ final class TurnActivityTests: XCTestCase {
             // keeps its WebView until it is closed.
             _ = try? await client?.request("GET", "/api/web-push/live-activities/turn")
             XCTAssertNotNil(client?.releaseBarrier, "the client holds a WebView")
-            let answer = DirectWebViewRegistry.shared.isSoleDocument(try XCTUnwrap(page), host: "one.invalid")
+            let answer = DirectWebViewRegistry.shared.otherDocument(than: try XCTUnwrap(page), host: "one.invalid")
             // Counted, it is another document of the host, or one with no
             // address left after its failed load: refused either way.
-            XCTAssertEqual(answer == true, sole, "holds off: \(holdsOff), answered \(String(describing: answer))")
+            XCTAssertEqual(answer == .sole, sole, "holds off: \(holdsOff), answered \(answer.rawValue)")
+            // A take is named as one once it has an address; one left with
+            // none after its failed load is `unloaded`.
+            XCTAssertTrue(sole || answer == .voice || answer == .unloaded, answer.rawValue)
 
             // Both WebViews of the named store this case made are let go,
             // and the store is removed (or left to WebKit, which alone may

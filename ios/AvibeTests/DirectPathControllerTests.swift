@@ -3069,8 +3069,19 @@ extension DirectPathControllerTests {
         try await eventually { harness.status("instance-1").races.count == 3 }
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
         var answered: DirectHandoverOutcome?
-        harness.controller.handover(for: harness.origin("instance-1"), soleDocument: false) { answered = $0 }
+        harness.controller.handover(for: harness.origin("instance-1"), other: .voice) { answered = $0 }
         XCTAssertEqual(answered, .skipped(.otherDocuments))
+        // And recorded by itself, with what refused it and the path present
+        // when it was asked, for this instance's next request only.
+        let asked = harness.pathUse.pendingHandovers(for: scope)
+        XCTAssertEqual(asked.json.count, 1)
+        let record = try XCTUnwrap(asked.json.first)
+        XCTAssertTrue(record.hasPrefix(#"{"age_s":0,"ms":"#), record)
+        XCTAssertTrue(
+            record.hasSuffix(#","refused":"other_documents","other":"voice","closed":0,"kept":0,"path":"relay"}"#),
+            record
+        )
+        XCTAssertEqual(harness.pathUse.pendingHandovers(for: DirectPathUse.Scope(store: store, host: two)).json, [])
 
         // On a LAN address: the plan is named `lan` when it is made. Its
         // connection is settled after the path's class is no longer
@@ -3122,6 +3133,7 @@ extension DirectPathControllerTests {
         XCTAssertEqual(harness.pathUse.pending(for: DirectPathUse.Scope(store: store, host: two)), [])
         harness.controller.accountWillChange()
         XCTAssertEqual(harness.pathUse.pending(for: scope), [])
+        XCTAssertEqual(harness.pathUse.pendingHandovers(for: scope).json, [])
     }
 }
 

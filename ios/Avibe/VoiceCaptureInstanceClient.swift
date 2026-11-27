@@ -677,7 +677,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         )
         let webView = WKWebView(frame: .zero, configuration: configuration)
         if holdsOffHandover {
-            DirectWebViewRegistry.shared.register(webView)
+            DirectWebViewRegistry.shared.register(webView, as: .voice)
         }
         webView.navigationDelegate = self
         self.webView?.navigationDelegate = nil

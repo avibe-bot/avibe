@@ -1605,11 +1605,11 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 // Relays of another document's connections are never closed
                 // for this one: only the sole live document of the store with
                 // this host loaded may hand over.
-                let sole = DirectWebViewRegistry.shared.isSoleDocument(
-                    sourceWebView,
+                let other = DirectWebViewRegistry.shared.otherDocument(
+                    than: sourceWebView,
                     host: instanceOrigin.host
                 )
-                directHandover(instanceOrigin, sole) { [weak self] outcome in
+                directHandover(instanceOrigin, other) { [weak self] outcome in
                     self?.reply(replyHandler, result: outcome.jsonObject)
                 }
             }

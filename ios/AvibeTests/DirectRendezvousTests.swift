@@ -836,6 +836,25 @@ final class ColdStartTimingsTests: XCTestCase {
         XCTAssertTrue(timings.pending.isEmpty)
     }
 
+    /// The hand-overs ride the request as `handovers`, after everything
+    /// else, as they were given; at most eight, the newest.
+    func testTheRequestCarriesTheHandovers() throws {
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        let one = #"{"age_s":3,"ms":0,"refused":"other_documents","other":"voice","closed":0,"kept":0,"path":"lan"}"#
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], handovers: [one]),
+            head + ",\"handovers\":[" + one + "]}"
+        )
+        let nine = (0..<9).map {
+            "{\"age_s\":0,\"ms\":0,\"refused\":\"none\",\"other\":\"none\",\"closed\":\($0),\"kept\":0,\"path\":\"lan\"}"
+        }
+        let capped = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], handovers: nine).utf8)
+        ) as? [String: Any])
+        let entries = try XCTUnwrap(capped["handovers"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["closed"] as? Int }, Array(1..<9))
+    }
+
     func testMillisecondsAreWholeAndNeverNegative() {
         XCTAssertEqual(ColdStartTimings.milliseconds(.milliseconds(1_234)), 1_234)
         XCTAssertEqual(ColdStartTimings.milliseconds(.microseconds(999)), 0)

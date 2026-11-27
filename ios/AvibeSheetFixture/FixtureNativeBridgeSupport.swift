@@ -40,9 +40,14 @@ enum DirectHandoverOutcome: Equatable, Sendable {
     }
 }
 
+enum DirectOtherDocument: String, Equatable, Sendable {
+    case sole = "none"
+    case unknown
+}
+
 typealias DirectHandoverProvider = @MainActor (
     WebOrigin,
-    _ soleDocument: Bool?,
+    _ other: DirectOtherDocument,
     @escaping @MainActor (DirectHandoverOutcome) -> Void
 ) -> Void
 
@@ -51,10 +56,8 @@ typealias DirectHandoverProvider = @MainActor (
 final class DirectWebViewRegistry {
     static let shared = DirectWebViewRegistry()
 
-    func register(_ webView: WKWebView) {}
-
-    func isSoleDocument(_ webView: WKWebView, host: String) -> Bool? {
-        nil
+    func otherDocument(than webView: WKWebView, host: String) -> DirectOtherDocument {
+        .unknown
     }
 }
 
