@@ -653,6 +653,13 @@ fn route(state: &Arc<Direct>, session: u64) -> Option<(String, Material)> {
     Some((host.to_owned(), material.clone()))
 }
 
+/// Which build this app is, as its clients say it to the instance with
+/// their account of the legs their windows used: the package version, the
+/// one a page reads as the desktop's version.
+fn build(app: &AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 /// Where the client's listener is. What each window presents to it is that
 /// window's own registration (`pages::register`).
 fn material(client: &Client, exclusive: bool) -> Option<Material> {
@@ -677,7 +684,8 @@ async fn open(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
     let client = match shown.target.host() {
         Some(host) => Client::new(host, shown.target.instance.clone()).await,
         None => None,
-    };
+    }
+    .map(|client| client.built_as(&build(app)));
     let Some((client, material)) =
         client.and_then(|client| material(&client, false).map(|material| (client, material)))
     else {
@@ -928,7 +936,7 @@ pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Op
         }
     }
     let exclusive = lock(&state.wiring).only(&target);
-    let client = tauri::async_runtime::block_on(Client::new(&host, target.instance.clone()))?;
+    let client = tauri::async_runtime::block_on(Client::new(&host, target.instance.clone()))?.built_as(&build(app));
     let material = material(&client, exclusive)?;
     // Where the route is the window's arguments, there is none without them.
     let arguments = native::arguments(&host, &material);

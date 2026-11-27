@@ -188,6 +188,14 @@ impl Client {
             published: None,
         })
     }
+    /// The shell says which build this app is (its package version), for
+    /// the account of which leg carried the windows' connections: each
+    /// `path_use` entry then names it. A string the instance would not
+    /// accept there is no build, and the entries go without it.
+    pub fn built_as(self, build: &str) -> Self {
+        self.listener.access.usage.named(build);
+        self
+    }
     /// Ask the selected session's native adapter for a same-origin reply. The
     /// caller must verify the session/document is still current on completion;
     /// the core binds the body to this instance, hostname, client key and time.
@@ -236,12 +244,11 @@ impl Client {
         let sent = self.clock.now();
         let usage = self.listener.access.usage.clone();
         let (faults, minutes) = (self.faults.take(), usage.take());
-        let now = usage.minute();
         let asked = rendezvous::Asked {
             endpoint: self.key.public().to_string(),
             report: rendezvous::Report {
                 leg_faults: faults.iter().map(faults::LegFault::json).collect(),
-                path_use: minutes.iter().map(|entry| entry.json(now)).collect(),
+                path_use: usage.report(&minutes),
             },
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), fetch(asked)).await;
