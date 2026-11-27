@@ -21,6 +21,8 @@ jobs:
     runs-on: xcode-27
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2  # Verify the PR merge's parents for touched XCTest files.
 
       - name: Report pinned Apple toolchain
         run: |
@@ -120,23 +122,7 @@ jobs:
         if: inputs.fast-native
         run: |
           set -euo pipefail
-          xcodebuild -project ios/Avibe.xcodeproj -scheme Avibe -configuration Debug \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -derivedDataPath "$RUNNER_TEMP/AvibeDerivedData" \
-            -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
-            -parallel-testing-enabled NO \
-            -only-testing:AvibeTests/NativeBadgeTests/testBadgeSetTakesExactlyOneCountNumber \
-            -only-testing:AvibeTests/NavigationPolicyTests/testConfiguredOriginRequiresHTTPSAndCanonicalizesToOrigin \
-            -only-testing:AvibeTests/SystemScheduleTests/testSharedContractVectorsCoverSwiftParsersAndEveryTerminalReceipt \
-            CODE_SIGNING_ALLOWED=NO test
-          xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/AvibeTests.xcresult" > "$RUNNER_TEMP/fast-native-summary.json"
-          python3 - "$RUNNER_TEMP/fast-native-summary.json" <<'PY'
-          import json, sys
-          with open(sys.argv[1]) as source:
-              summary = json.load(source)
-          if summary.get('passedTests') != 3 or summary.get('totalTestCount') != 3:
-              raise SystemExit('Expected three passing native PR contracts: ' + str(summary))
-          PY
+          python3 -m scripts.ci_native_pr_tests
           ios/scripts/verify_iroh_app_product.sh ios/Avibe/IrohLib \
             "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe" \
             "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" YES

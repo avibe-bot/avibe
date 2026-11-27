@@ -641,15 +641,9 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     fast_script = fast_step['run']
     assert fast_step['name'] == 'Compile the app and run the native PR contracts'
     assert not fast_step.get('continue-on-error') and 'set -euo pipefail' in fast_script
-    assert [arg for arg in fast_script.split() if arg.startswith('-only-testing:')] == [
-        '-only-testing:AvibeTests/NativeBadgeTests/testBadgeSetTakesExactlyOneCountNumber',
-        '-only-testing:AvibeTests/NavigationPolicyTests/testConfiguredOriginRequiresHTTPSAndCanonicalizesToOrigin',
-        '-only-testing:AvibeTests/SystemScheduleTests/testSharedContractVectorsCoverSwiftParsersAndEveryTerminalReceipt',
-    ]
-    assert 'CODE_SIGNING_ALLOWED=NO test' in fast_script and '-scheme Avibe ' in fast_script
-    assert fast_script.index('CODE_SIGNING_ALLOWED=NO test') < fast_script.index('xcresulttool get test-results summary')
-    assert fast_script.index("summary.get('passedTests') != 3 or summary.get('totalTestCount') != 3") < fast_script.index('verify_iroh_app_product.sh')
-    assert 'raise SystemExit' in fast_script and 'Avibe.app/Avibe.debug.dylib" YES' in fast_script
+    assert 'python3 -m scripts.ci_native_pr_tests' in fast_script
+    assert fast_script.index('scripts.ci_native_pr_tests') < fast_script.index('verify_iroh_app_product.sh')
+    assert 'Avibe.app/Avibe.debug.dylib" YES' in fast_script
     assert steps.index(fast_step) > verify_index
     assert {s['name'] for s in steps if s.get('if') == '${{ !inputs.fast-native }}'} == {
         'Build for the iOS Simulator SDK', 'Verify linked iroh binary in the simulator product',

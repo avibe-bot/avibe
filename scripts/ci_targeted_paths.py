@@ -13,6 +13,7 @@ BOUNDARIES = {
     'ios-app': frozenset({
         '.github/workflows/ios-shell.yml', 'Dockerfile', 'scripts/cargo_notices.py',
         'vibe/message_types.json', 'tests/fixtures/system_schedule_contract_vectors.json',
+        'scripts/ci_native_pr_tests.py', 'tests/test_ci_native_pr_tests.py',
         'ui/src/lib/native.ts', 'ui/src/mobile/bridge.ts',
     }),
     # The wire comparison and its exception label exist only on pull requests.
