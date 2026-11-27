@@ -13,7 +13,13 @@ on:
         description: "Engine release to publish"
         type: string
       rehearsal_run_id:
-        description: "Untrusted rehearsal run to review before this owner-approved publication/promotion"
+        description: "Designated qualification run ID"
+        required: true
+        type: string
+      rehearsal_attempt:
+        description: "Designated qualification run attempt"
+        required: true
+        default: '1'
         type: string
 
 permissions: {}
@@ -66,26 +72,32 @@ jobs:
     permissions:
       contents: read
       actions: read
-    outputs:
-      baselines: ${{ steps.context.outputs.baselines }}
+    env:
+      REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}
+      REHEARSAL_ATTEMPT: ${{ inputs.rehearsal_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Check out the reviewed producer as data only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 275e150316765a3b5f1e467b249ccdca08327832
+          path: frozen-producer
           persist-credentials: false
 
       - name: Download the untrusted rehearsal and source data
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}
         run: |
           set -euo pipefail
-          if ! [[ "$REHEARSAL_RUN_ID" =~ ^[0-9]+$ ]]; then
-            echo "::error::a rehearsal run id is required"
-            exit 1
-          fi
+          [[ "$REHEARSAL_RUN_ID" =~ ^[1-9][0-9]*$ && "$REHEARSAL_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          report=model-hub-engine-untrusted-rehearsal
+          if [[ "$REHEARSAL_ATTEMPT" != 1 ]]; then report+="-attempt-$REHEARSAL_ATTEMPT"; fi
           gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name model-hub-engine-untrusted-rehearsal --dir "$RUNNER_TEMP/rehearsal"
+            --name "$report" --dir "$RUNNER_TEMP/rehearsal"
           gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name model-hub-engine-untrusted-assets --dir "$RUNNER_TEMP/untrusted-assets"
           test "$(jq -er .run_id "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json")" = "$REHEARSAL_RUN_ID"
@@ -95,33 +107,23 @@ jobs:
       # remain explicitly untrusted; only current checkout code verifies the
       # candidate record, manifest, archive bytes and run identity.
       - name: Verify the rehearsal run and exact candidate context
-        id: context
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           candidate_dir="patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
-          python3 scripts/model_hub_engine_qualification.py trusted-released-context \
-            --candidate-dir "$candidate_dir" \
-            --output-dir "$RUNNER_TEMP/trusted-released"
+          for file in candidate.json model-hub-engine-manifest.json; do
+            cmp "frozen-producer/$candidate_dir/$file" "$candidate_dir/$file"
+          done
           avault="$(python3 scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
-          args=(--avault "$avault" --output-dir "$RUNNER_TEMP/baselines")
-          while IFS= read -r -d '' manifest; do
-            args+=(--bundled "$manifest")
-          done < <(find "$RUNNER_TEMP/trusted-released" -name 'bundled-manifest-*.json' -print0)
-          mkdir -p "$RUNNER_TEMP/baselines"
-          python3 scripts/model_hub_engine_channel.py baselines "${args[@]}"
-          python3 scripts/model_hub_engine_qualification.py verify-untrusted-rehearsal \
-            --candidate-dir "$candidate_dir" \
-            --rehearsal "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json" \
-            --released-dir "$RUNNER_TEMP/trusted-released" \
-            --baselines "$RUNNER_TEMP/baselines/baselines.json"
+          python3 -I scripts/model_hub_engine_rehearsal.py --repo frozen-producer \
+            --run "$REHEARSAL_RUN_ID" --attempt "$REHEARSAL_ATTEMPT" --tag "$ASSET_RELEASE_TAG" \
+            --avault "$avault" --artifact "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json"
           python3 scripts/model_hub_engine_qualification.py evidence-build \
             --candidate-dir "$candidate_dir" \
             --asset-dir "$RUNNER_TEMP/untrusted-assets" \
             --output "$RUNNER_TEMP/verified-assets.json"
-          printf 'baselines=%s\n' "$(jq -c . "$RUNNER_TEMP/baselines/baselines.json")" >> "$GITHUB_OUTPUT"
 
       - name: Show the owner-facing rehearsal context
         shell: bash

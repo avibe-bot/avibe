@@ -1163,9 +1163,18 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     text = (ROOT / ".github/workflows/model-hub-engine-channel.yml").read_text(encoding="utf-8")
     assert "rehearsal_run_id" in workflow[True]["workflow_dispatch"]["inputs"]
     assert workflow["jobs"]["prepare"]["name"] == "trusted prepare"
-    assert "verify-untrusted-rehearsal" in text
-    assert "trusted-released-context" in text
-    assert "--released-dir" in text
+    from scripts import model_hub_engine_rehearsal as rehearsal
+
+    prepare = workflow['jobs']['prepare']
+    checkout = next(s for s in prepare['steps'] if s.get('with', {}).get('path') == 'frozen-producer')
+    assert checkout['with']['ref'] == rehearsal.H
+    assert prepare['env']['REHEARSAL_ATTEMPT'] == '${{ inputs.rehearsal_attempt }}'
+    verify = next(s['run'] for s in prepare['steps'] if 'evidence-build' in s.get('run', ''))
+    assert 'scripts/model_hub_engine_rehearsal.py --repo frozen-producer' in verify
+    assert '--run "$REHEARSAL_RUN_ID" --attempt "$REHEARSAL_ATTEMPT" --tag "$ASSET_RELEASE_TAG"' in verify
+    assert '--avault "$avault" --artifact "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json"' in verify
+    assert 'cmp "frozen-producer/$candidate_dir/$file" "$candidate_dir/$file"' in verify
+    assert 'verify-untrusted-rehearsal' not in text
     assert "qualification-released-*" not in text
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "model-hub-engine-trusted-assets" in text

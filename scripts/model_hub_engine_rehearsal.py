@@ -94,8 +94,10 @@ def main():
     parser.add_argument('--attempt', type=int, required=True)
     parser.add_argument('--tag', required=True)
     parser.add_argument('--artifact', type=Path, required=True, help='original untrusted_rehearsal.json')
+    parser.add_argument('--avault', help='include the authenticated public index in release baselines')
     args = parser.parse_args()
-    candidate = verify(args.repo, args.run, args.attempt, args.tag, supplied=args.artifact.read_bytes())
+    previous = producer._published_payload(args.avault) if args.avault else None
+    candidate = verify(args.repo, args.run, args.attempt, args.tag, supplied=args.artifact.read_bytes(), previous=previous)
     print(f'accepted revision {H}, attempt {args.run}/{args.attempt}, manifest {candidate.manifest_sha256}')
 
 
