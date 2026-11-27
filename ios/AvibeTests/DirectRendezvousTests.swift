@@ -816,5 +816,6 @@ final class ColdStartTimingsTests: XCTestCase {
         XCTAssertEqual(ColdStartTimings.milliseconds(.milliseconds(1_234)), 1_234)
         XCTAssertEqual(ColdStartTimings.milliseconds(.microseconds(999)), 0)
         XCTAssertEqual(ColdStartTimings.milliseconds(.zero - .seconds(1)), 0)
+        XCTAssertEqual(ColdStartTimings.milliseconds(.seconds(3_000_000)), Int(Int32.max))
     }
 }

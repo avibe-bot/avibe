@@ -2663,6 +2663,7 @@ final class ColdStartTimings {
 
     nonisolated static func milliseconds(_ took: Duration) -> Int {
         let (seconds, attoseconds) = took.components
-        return max(0, Int(clamping: seconds) &* 1_000 &+ Int(attoseconds / 1_000_000_000_000_000))
+        // Within the instance's bound (0 ..< 2^31).
+        return min(max(0, Int(clamping: seconds) &* 1_000 &+ Int(attoseconds / 1_000_000_000_000_000)), Int(Int32.max))
     }
 }
