@@ -1,1 +1,1 @@
-Run desktop-shell: this PR changes what the Desktop's direct core reports and counts (desktop/src-tauri/src/direct), and the test on a real link (desktop_direct_real_sidecar) runs only in that job, on macOS and Windows.
+Run desktop-shell: this PR changes the Desktop's direct listener (desktop/src-tauri/src/direct/listener.rs), which only that job builds and tests, on macOS and Windows.
