@@ -57,6 +57,19 @@ def test_the_roster_lists_each_bot_once_as_a_bot():
     assert "`@<name>` without a type, found in older messages, points at an Agent." in roster
 
 
+@pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
+def test_only_a_worker_is_told_it_can_just_do_what_it_readily_can(bot):
+    # A Bot's own section says it does no work itself beyond one read or command; the roster every Session carries
+    # must not tell it otherwise, while an ordinary Session keeps the sentence.
+    ending = "or when another mind makes the result better"
+    clause = "; what you can readily do yourself, you can often just do."
+    worker = _blocks(enabled_agents=_ROSTER)["harness-agents-prompt"]
+    assert ending + clause in worker
+    roster = _blocks(enabled_agents=_ROSTER, bot=bot)["harness-agents-prompt"]
+    assert ending + "." in roster and "you can often just do" not in roster
+    assert roster.replace(ending + ".", ending + clause) == worker
+
+
 def test_bot_sections_appear_only_for_a_bot_and_the_main_section_only_for_the_main_bot():
     worker = _blocks(enabled_agents=_ROSTER)
     assert not {"bot-identity-prompt", "bot-memory-prompt", "bot-main-prompt", "bot-harness-prompt"} & set(worker)
