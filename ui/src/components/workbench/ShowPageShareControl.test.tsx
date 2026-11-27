@@ -938,12 +938,12 @@ describe('ShowPageShareControl native share and export', () => {
   const presentCalls = (call: ReturnType<typeof installShell>) =>
     call.mock.calls.filter(([method]) => method === 'share.present');
 
-  const openControl = async () => {
+  const openControl = async (onOpenChange?: (open: boolean) => void) => {
     api.getShowPage.mockResolvedValue(payload);
     api.getShowPageAccess.mockResolvedValue(showPageAccess());
     render(
       <I18nextProvider i18n={i18n}>
-        <ShowPageShareControl sessionId="ses-1" initialAccess={showPageAccess()} />
+        <ShowPageShareControl sessionId="ses-1" initialAccess={showPageAccess()} onOpenChange={onOpenChange} />
       </I18nextProvider>,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
@@ -1088,6 +1088,18 @@ describe('ShowPageShareControl native share and export', () => {
     expect(screen.getByRole('button', { name: 'Share link' })).toBeTruthy();
     expect(screen.queryByText('Export visible content')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+  });
+
+  it('retains the pre-open visibility sample when the host shields pointer events', async () => {
+    installShell();
+    const frame = mountShowFrame();
+    await openControl((open) => {
+      // Hosts apply this during their React render, after the open callback.
+      queueMicrotask(() => { frame.style.pointerEvents = open ? 'none' : 'auto'; });
+    });
+    await waitFor(() => expect(frame.style.pointerEvents).toBe('none'));
+    expect(screen.getByRole('button', { name: 'Share PDF' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Share image' })).toBeTruthy();
   });
 
   it('explains the update in an App that can only share links, without exporting', async () => {

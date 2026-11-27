@@ -196,6 +196,34 @@ export const ShowPageShareControl: React.FC<{
     setAccessError(false);
   }, [initialAccess, sessionId]);
 
+  useEffect(() => {
+    if (!open || frameVisible || !(nativeShell || exportAvailable)) return;
+    // Keep the successful pre-open sample: some hosts suppress frame pointer
+    // events while their share popover is open. If the body was still loading,
+    // wait for the existing visibility gate to pass without reopening.
+    let pendingFrame = 0;
+    const refreshFrame = () => {
+      if (pendingFrame) return;
+      pendingFrame = window.requestAnimationFrame(() => {
+        pendingFrame = 0;
+        setFrameVisible(isShowFrameVisible(sessionId));
+      });
+    };
+    const observer = new MutationObserver(refreshFrame);
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+    window.addEventListener('resize', refreshFrame);
+    document.addEventListener('scroll', refreshFrame, true);
+    document.addEventListener('load', refreshFrame, true);
+    refreshFrame();
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(pendingFrame);
+      window.removeEventListener('resize', refreshFrame);
+      document.removeEventListener('scroll', refreshFrame, true);
+      document.removeEventListener('load', refreshFrame, true);
+    };
+  }, [open, frameVisible, nativeShell, exportAvailable, sessionId]);
+
   const refresh = () => {
     const seq = ++reqSeq.current;
     const loadPayload = async (granted: boolean) => {
