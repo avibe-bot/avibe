@@ -1433,15 +1433,13 @@ def test_fetch_remote_catalog_rejects_malformed_model_metadata(monkeypatch, mode
         backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
 
 
-def test_published_feed_remains_readable_by_3_2_8(monkeypatch):
-    payload = json.loads(backend_model_catalog.get_bundled_catalog_path().read_text())
-    # Released readers strictly reject any extra key in this map and ignore
-    # unknown top-level fields. Exercise the legacy view, not our normalized one.
-    assert set(payload["backends"]) == {"claude", "codex"}
-    legacy_view = {k: payload[k] for k in ("schema_version", "backends")}
-    monkeypatch.setattr(backend_model_catalog.urllib.request, "urlopen", lambda *a, **kw: _FakeResponse(legacy_view))
-    rows = backend_model_catalog.fetch_remote_catalog()["backends"]["codex"]["models"]
-    assert [row["id"] for row in rows[:2]] == ["gpt-6.2-sol", "gpt-6.2-astra"]
+def test_published_feed_remains_readable_by_3_2_8():
+    from tests.fixtures.backend_model_catalog_v3_2_8 import _normalize_catalog
+
+    # Run the released strict validator on the complete file, just as served.
+    path = Path(__file__).resolve().parents[1] / "vibe/data/backend_models.json"
+    released = _normalize_catalog(json.loads(path.read_bytes().decode("utf-8")), strict=True)
+    assert set(released["backends"]) == {"claude", "codex"}
 
 
 def test_fetch_remote_catalog_ignores_unknown_backends(monkeypatch):
