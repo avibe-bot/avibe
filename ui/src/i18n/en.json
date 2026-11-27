@@ -198,9 +198,27 @@
       "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",
       "error": "Update failed — retry"
     },
+    "providerError": {
+      "accountConflict": "This email is linked to more than one account. Use another way to sign in.",
+      "serverError": "The sign-in service could not complete the request. Retry or choose another method.",
+      "denied": "Permission to sign in was not granted. Retry or choose another method.",
+      "timedOut": "Sign-in timed out. Please try again.",
+      "failed": "Sign-in could not be completed. Retry or choose another method."
+    },
     "providerCallback": {
-      "done": "You can close this tab and return to Avibe.",
-      "failed": "Sign-in didn’t finish. Return to Avibe to try again."
+      "done": "Sign-in complete. You can return to Avibe.",
+      "failed": "Sign-in could not be completed.",
+      "verifyInApp": "Return to Avibe to finish verifying your identity.",
+      "cancelled": "This sign-in was cancelled.",
+      "timedOut": "This sign-in timed out.",
+      "accountConflict": "This email is linked to multiple accounts. Sign-in with this method could not be completed.",
+      "serverError": "The sign-in service could not complete the request.",
+      "denied": "Permission to sign in was not granted.",
+      "emailUnverified": "Verify your email with your sign-in provider first.",
+      "retry": "Return to Avibe to retry or choose another sign-in method.",
+      "accountConflictNext": "Go back to Avibe and use another way to sign in.",
+      "details": "Details",
+      "openApp": "Open Avibe"
     }
   },
   "installHint": {
@@ -332,7 +350,7 @@
       "forgotTitle": "Forgot your password?",
       "forgotSubtitle": "Email sign-in always works.",
       "account": "Account",
-      "signInNowTitle": "Sign in now",
+      "signInNowTitle": "Sign in with an email code",
       "signInNowBody": "We’ll email a code to this address. Enter it here to sign in.",
       "newPasswordTitle": "Set a new password",
       "newPasswordBody": "Open Account security on avibe.bot in Safari. Sign in with your email, then choose Set or change password.",
@@ -1096,7 +1114,7 @@
       "codexDescription": "OpenAI agent · ChatGPT login or OPENAI_API_KEY",
       "antigravityTitle": "Antigravity provider",
       "antigravitySubtitle": "Connect Antigravity with a Google account, Gemini Enterprise, a Gemini API key, or Gemini Enterprise Agent Platform.",
-      "antigravityDescription": "Google Antigravity agent · Google sign-in, Gemini API key, or Agent Platform",
+      "antigravityDescription": "Google Antigravity agent · Google account, Gemini Enterprise, Gemini API key, or Agent Platform",
       "antigravityMethodGoogle": "Google account",
       "antigravityMethodEnterprise": "Gemini Enterprise",
       "antigravityMethodApiKey": "Gemini API key",
@@ -1105,7 +1123,6 @@
       "antigravityMethodEnterpriseCompact": "Enterprise",
       "antigravityMethodApiKeyCompact": "API Key",
       "antigravityMethodAgentPlatformCompact": "Agent Platform",
-      "antigravityPersonalNotice": "With a personal Google sign-in, Google allows Antigravity for work you direct yourself. Google says this sign-in does not cover unattended runs or task queues, such as scheduled Tasks, Watches, or work passed from one Agent to another. For automation, sign in with an API key or Agent Platform instead; both are billed by usage.",
       "antigravityOauthPersonalTitle": "Sign in with your Google account",
       "antigravityOauthPersonalSubtitle": "Open the sign-in link in your browser, approve access, and paste the returned code here.",
       "antigravityOauthPersonalSignedIn": "Antigravity is signed in with your Google account.",
@@ -1120,7 +1137,7 @@
       "antigravitySignInButton": "Sign in to Antigravity",
       "antigravityCallbackCodeLabel": "Authorization code",
       "antigravityCallbackCodePlaceholder": "Paste the authorization code from your browser",
-      "antigravityCallbackCodeHint": "Complete sign-in in your browser, then paste the returned authorization code here.",
+      "antigravityCallbackCodeHint": "Complete sign-in in your browser, then paste the returned authorization code here. You can also paste the full URL from the browser address bar after approving.",
       "antigravityApiKeyLabel": "Gemini API key",
       "antigravityApiKeyPlaceholder": "AIza...",
       "antigravityApiKeyHint": "Used for Gemini Developer API requests.",

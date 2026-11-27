@@ -3180,6 +3180,14 @@ def start_status_heartbeat(config: V2Config | None = None, interval_seconds: int
     def loop() -> None:
         while True:
             _report_runtime_status_async(None, event="heartbeat")
+            # The last minute of a session's traffic is logged here when no
+            # later request comes to log it (direct_path_use).
+            try:
+                from vibe import direct_path_use
+
+                direct_path_use.counts.flush()
+            except Exception:
+                pass
             time.sleep(interval_seconds)
 
     with _STATUS_HEARTBEAT_LOCK:

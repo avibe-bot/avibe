@@ -13445,8 +13445,7 @@ async def start_oauth_web_async(
             "detail": backend_t(
                 "command.setup.loginInProgress",
                 lang,
-                vendor=exc.vendor,
-                backend=backend,
+                backend=backend.capitalize(),
             ),
         }
     except NativeMigrationBlockedError as exc:

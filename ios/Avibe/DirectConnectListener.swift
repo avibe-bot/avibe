@@ -666,6 +666,20 @@ actor DirectConnectListener {
         lifecycle.closeCompleted()
     }
 
+    /// Whether this listener holds no listening socket: none bound, and a
+    /// close that was under way has finished (it is waited for here, as
+    /// `bind(port:)` waits for it). A socket that is bound, being bound, or
+    /// due to be closed by a close that has not begun yet, is still held.
+    func holdsNoListeningSocket() async -> Bool {
+        while let waited = closing {
+            await waited.value
+            if closing == waited {
+                break
+            }
+        }
+        return listener == nil
+    }
+
     private static func cancelAndWait(_ listener: NWListener) async {
         let closed = DirectOnceAnswer<Void>()
         listener.stateUpdateHandler = { state in
@@ -1948,6 +1962,67 @@ actor DirectConnectListener {
             return false
         }
     }
+
+    /// Whether anything accepts a connection on the loopback `port` now.
+    /// One attempt, nothing sent, closed at once. For a port this App does
+    /// not hold at the moment (`DirectPathController.backgroundLoadGate`):
+    /// asked while this listener holds it, the answer is this listener.
+    static func probe(port: UInt16, within seconds: TimeInterval) async -> DirectPortProbe {
+        guard seconds > 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            return .undecided
+        }
+        // The loopback address itself, whatever proxy the system has.
+        let parameters = NWParameters.tcp
+        parameters.preferNoProxies = true
+        let connection = NWConnection(host: "127.0.0.1", port: endpointPort, using: parameters)
+        let answer = DirectOnceAnswer<DirectPortProbe>()
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                answer.resolve(with: .success(.accepted))
+            case .waiting(let error):
+                // A refused connection waits to be tried again: nothing
+                // listens there. Any other wait may still end either way.
+                if case .posix(.ECONNREFUSED) = error {
+                    answer.resolve(with: .success(.refused))
+                }
+            case .failed(let error):
+                if case .posix(.ECONNREFUSED) = error {
+                    answer.resolve(with: .success(.refused))
+                } else {
+                    answer.resolve(with: .success(.undecided))
+                }
+            case .cancelled:
+                answer.resolve(with: .success(.undecided))
+            default:
+                break
+            }
+        }
+        connection.start(queue: .global(qos: .userInitiated))
+        defer {
+            connection.cancel()
+        }
+        let found = try? await directDeadline(seconds) {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    answer.wait(with: continuation)
+                }
+            } onCancel: {
+                answer.resolve(with: .failure(CancellationError()))
+            }
+        }
+        return found ?? .undecided
+    }
+}
+
+/// What a loopback port answered to one connection attempt.
+enum DirectPortProbe: Equatable, Sendable {
+    /// Something accepted the connection.
+    case accepted
+    /// The connection was refused: nothing listens there.
+    case refused
+    /// Neither within the bound, or the attempt failed some other way.
+    case undecided
 }
 
 /// A sticky direct attempt passed its bound without an answer.

@@ -16,3 +16,7 @@ export const AVIBE_DOWNLOAD_URL = 'https://avibe.bot/#download';
 export const AVIBE_BOT_APP_URL = 'https://avibe.bot/app';
 /** The address a phone opens this Avibe at. */
 export const instanceUrl = (host: string) => `https://${host}`;
+
+/** Navigation state the Devices page reads once: the unbinding just finished was binding as a new
+ *  computer whose Avibe was another account's, so its name stays with the original account. */
+export const NAME_WITH_ORIGINAL_ACCOUNT = 'unbindNameWithOriginalAccount';

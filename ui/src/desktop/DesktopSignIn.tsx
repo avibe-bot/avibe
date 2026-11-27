@@ -151,13 +151,13 @@ export function DesktopSignIn({
           </div>
         </div>
       ) : (
-        // The iPhone's first page, smaller and without its brand row, with the Desktop's own
-        // subtitle (Max, 2026-11-20); "continue on this computer" stays, quieter, below it.
-        <div data-account-login className="mx-auto my-auto flex w-full max-w-sm shrink-0 flex-col py-4">
-          <SignInWelcome compact subtitle={[t('desktopAccount.welcomeLine1'), t('desktopAccount.welcomeLine2')]}>
+        // ui/design: desktop/sign-in/start. Approved C adapts this Welcome to window height;
+        // later steps and the iPhone keep their own sizing. The button column stays 384px.
+        <div data-account-login className="mx-auto my-auto flex w-full max-w-sm shrink-0 flex-col py-4 welcome-short:py-0">
+          <SignInWelcome compact subtitle={t('desktopAccount.welcomeSubtitle')}>
             {actions}
           </SignInWelcome>
-          <div className="mt-2 text-center">
+          <div className="mt-8 text-center welcome-short:mt-4 welcome-tall:mt-10">
             <Button variant="ghost" size="sm" className="text-muted" onClick={onLocal}>
               {exitLabel ?? t('desktopAccount.continueLocal')}
             </Button>

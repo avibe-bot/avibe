@@ -18,7 +18,7 @@ import { DevicesApiError, LostAnswer, devicesApi as api } from './api';
 import { awayOnClaim, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
-import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
+import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, NAME_WITH_ORIGINAL_ACCOUNT, instanceUrl } from './paths';
 import { functionOffNeedsConfirm, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
 import type {
   AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach,
@@ -471,7 +471,11 @@ export function DevicesPage() {
       // (30 days where the instance gives none).
       unbind={snapshot.unbind?.state === 'unbinding' ? { state: 'unbinding' }
         : snapshot.unbind?.state === 'unbound'
-          ? { state: 'done', host: snapshot.unbind.host, releaseAt: snapshot.unbind.releaseAt, holdDays: 30 }
+          ? {
+            state: 'done', host: snapshot.unbind.host, releaseAt: snapshot.unbind.releaseAt, holdDays: 30,
+            // Binding as a new computer, of another account's Avibe: the name is that account's.
+            originalAccount: (location.state as Record<string, unknown> | null)?.[NAME_WITH_ORIGINAL_ACCOUNT] === true || undefined,
+          }
           : undefined}
       proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}

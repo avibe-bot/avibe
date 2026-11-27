@@ -314,8 +314,12 @@ jobs:
             scripts/release_package_version.py
             scripts/release_workflow_artifacts.py
             scripts/verify_release_distributions.py
+            scripts/release_dist_manifest.py
             .github/actions/sqlite-predecessor-contract/action.yml
             tests/test_distribution_artifacts.py
+            tests/test_upgrade_flow.py
+            tests/test_install_script.py
+            tests/e2e/test_install_command.py
           sparse-checkout-cone-mode: false
 
       - name: Reuse the exact backstop UI artifact
@@ -420,6 +424,29 @@ jobs:
           AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
             python release-automation/scripts/verify_release_distributions.py \
               release-automation/tests/test_distribution_artifacts.py
+
+      - name: Run release install and upgrade regressions
+        # The same step a stable runs in publish.yml, on this RC's real package
+        # build, so a stable is never the first build that runs it.
+        run: |
+          set -euo pipefail
+          docker info
+          python release-automation/scripts/release_dist_manifest.py dist > "$RUNNER_TEMP/dist-before.sha256"
+          for test_file in \
+            tests/test_upgrade_flow.py \
+            tests/test_install_script.py \
+            tests/e2e/test_install_command.py; do
+            cp "release-automation/$test_file" "$test_file"
+          done
+          export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
+          pytest \
+            tests/test_upgrade_flow.py \
+            tests/test_install_script.py \
+            tests/e2e/test_install_command.py \
+            -v
+          python release-automation/scripts/release_dist_manifest.py dist > "$RUNNER_TEMP/dist-after.sha256"
+          cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"
+          git checkout -- tests/test_upgrade_flow.py tests/test_install_script.py tests/e2e/test_install_command.py
 
       - name: Add Show Runtime release assets
         shell: bash

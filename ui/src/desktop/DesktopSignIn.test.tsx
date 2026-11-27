@@ -45,13 +45,14 @@ it.each([['en', en], ['zh', zh]] as const)(
     );
     const page = view.container.querySelector('[data-account-login]')!;
     const welcome = copy.mobileApp.welcome;
-    // The App's hero, title and footer, word for word.
+    // The App's hero and title stay; Desktop omits the iOS footer.
     expect(screen.getByAltText(welcome.mascotAlt)).toBeTruthy();
     expect(screen.getByText(welcome.greeting)).toBeTruthy();
     expect(screen.getByRole('heading').textContent).toBe(`${welcome.titleLine1}${welcome.titleLine2}`);
-    expect(page.textContent).toContain(`${welcome.footerLine1}${welcome.footerLine2}`);
+    expect(page.textContent).not.toContain(welcome.footerLine1);
+    expect(page.textContent).not.toContain(welcome.footerLine2);
     // The Desktop's own subtitle, not the App's.
-    expect(page.textContent).toContain(`${copy.desktopAccount.welcomeLine1}${copy.desktopAccount.welcomeLine2}`);
+    expect(page.textContent).toContain(copy.desktopAccount.welcomeSubtitle);
     expect(page.textContent).not.toContain(welcome.bodyLine1);
     // No brand row; "continue on this computer" stays.
     expect(page.textContent).not.toContain(copy.mobileApp.brand.agentOs);
@@ -105,3 +106,30 @@ it.each([['en', en], ['zh', zh]] as const)('AUTH-SETUP-183 a provider sign-in na
   fireEvent.click(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithGitHub }));
   expect(send).toHaveBeenCalledWith({ type: 'sign_in_with_provider', provider: 'github', locale: lng });
 });
+
+for (const [code, key] of [
+  ['provider_account_conflict', 'accountConflict'],
+  ['provider_server_error', 'serverError'],
+  ['provider_denied', 'denied'],
+  ['provider_timeout', 'timedOut'],
+  ['provider_failed', 'failed'],
+] as const) {
+  it.each([['en', en], ['zh', zh]] as const)(`AUTH-SETUP-183 ${code} explains the failure and leaves retry and email available (%s)`, async (lng, copy) => {
+    const i18n = createInstance();
+    await i18n.init({ lng, resources: { [lng]: { translation: copy } } });
+    const send = vi.fn(async () => ({ version: 1 as const, request_id: 'fixture', ok: false, state: signedOut, error: { code } }));
+    render(
+      <I18nextProvider i18n={i18n}>
+        <DesktopSignIn state={signedOut} send={send}
+          methods={{ providers: ['google', 'github', 'apple'], passkey: false }}
+          onLocal={() => undefined} onDifferentAccount={() => undefined}
+          onOpenSecurity={() => undefined} renderEnroll={() => null} />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithGitHub }));
+    expect((await screen.findByRole('alert')).textContent).toBe(copy.desktopBootstrap.providerError[key]);
+    expect((screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithGitHub }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(copy.signIn.provider.continueInBrowser)).toBeNull();
+  });
+}

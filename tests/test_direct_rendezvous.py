@@ -439,6 +439,210 @@ def test_invalid_listener_fault_batches_are_ignored_in_full(instance, caplog):
     assert not any("listener_fault" in line for line in caplog.messages)
 
 
+def _leg_fault(**changes):
+    return {"stage": "tls", "code": "closed_by_page", "path": "relay", "strict": False, "ms": 650, "count": 17, **changes}
+
+
+def test_leg_faults_log_only_their_fixed_words_and_numbers_without_changing_the_offer(instance, caplog):
+    from vibe import direct_rendezvous
+
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready" and "leg_faults" not in baseline
+    assert not any("leg_fault" in line for line in caplog.messages)
+    caplog.clear()
+    faults = [
+        _leg_fault(),
+        _leg_fault(stage="dial", code="timeout", path="none", ms=0, count=1),
+        _leg_fault(stage="revert", code="unreachable", path="none", strict=True, ms=2**31 - 1, count=2**31 - 1),
+        _leg_fault(stage="connect", code="status", path="lan", strict=True, ms=12, count=3),
+        _leg_fault(stage="tls", code="lost_race", path="punched", ms=40, count=2),
+    ]
+    response = _post(client, {**_body(), "leg_faults": faults})
+    assert response.status_code == 200 and response.get_json() == baseline
+    assert [(r.levelname, r.getMessage()) for r in caplog.records if r.name == "vibe.direct_rendezvous"] == [
+        ("INFO", "direct rendezvous leg_fault stage=tls code=closed_by_page path=relay strict=no ms=650 count=17"),
+        ("INFO", "direct rendezvous leg_fault stage=dial code=timeout path=none strict=no ms=0 count=1"),
+        ("INFO", "direct rendezvous leg_fault stage=revert code=unreachable path=none strict=yes "
+                 f"ms={2**31 - 1} count={2**31 - 1}"),
+        ("INFO", "direct rendezvous leg_fault stage=connect code=status path=lan strict=yes ms=12 count=3"),
+        ("INFO", "direct rendezvous leg_fault stage=tls code=lost_race path=punched strict=no ms=40 count=2"),
+    ]
+    # Every word of the contract is accepted, one entry at a time.
+    for key, words in (("stage", direct_rendezvous._LEG_FAULT_STAGES), ("code", direct_rendezvous._LEG_FAULT_CODES),
+                       ("path", direct_rendezvous._LEG_FAULT_PATHS)):
+        for word in words:
+            caplog.clear()
+            _post(client, {**_body(), "leg_faults": [_leg_fault(**{key: word})]})
+            assert len([line for line in caplog.messages if f" {key}={word} " in line]) == 1, (key, word)
+    assert direct_rendezvous._LEG_FAULT_STAGES == (
+        "rendezvous", "dial", "open", "connect", "tls", "health", "handover", "revert")
+    assert direct_rendezvous._LEG_FAULT_CODES == (
+        "timeout", "refused", "unreachable", "denied", "status", "closed_by_page", "closed_by_peer",
+        "lost_race", "proxy_auth", "expired", "other", "invalid_offer", "no_permitted_path",
+        "listener_closed", "superseded", "not_ready", "connection_ended", "invalid_head",
+        "not_ready_certificate", "not_ready_owner_required", "not_ready_not_running", "not_ready_permission",
+        "not_ready_transport", "not_ready_disabled", "not_ready_no_address", "not_ready_other")
+    assert direct_rendezvous._LEG_FAULT_PATHS == ("lan", "punched", "relay", "none")
+    # It rides beside the iPhone's fields without either changing the other.
+    caplog.clear()
+    both = _post(client, {**_body(), "leg_faults": [_leg_fault()],
+                          "listener_faults": [{"step": "bind", "code": 48, "background_seconds": 0}]})
+    assert both.get_json() == baseline
+    assert sorted(line.split()[2] for line in caplog.messages if "_fault " in line) == ["leg_fault", "listener_fault"]
+
+
+def test_invalid_leg_fault_batches_are_ignored_in_full(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready"
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    good = _leg_fault()
+    missing = {key: value for key, value in good.items() if key != "count"}
+    for faults in (None, [], good, "tls", [good] * 6, [good, None], [good, missing],
+                   [good, {**good, "host": "private.example"}],
+                   [good, {**good, "stage": "unknown"}], [good, {**good, "stage": []}], [good, {**good, "stage": 1}],
+                   [good, {**good, "stage": "tls\nforged line"}],
+                   [good, {**good, "code": "192.168.1.20:51234"}], [good, {**good, "code": {}}],
+                   [good, {**good, "code": 502}],
+                   [good, {**good, "path": "ipv6"}], [good, {**good, "path": None}], [good, {**good, "path": ["lan"]}],
+                   [good, {**good, "strict": 1}], [good, {**good, "strict": "no"}], [good, {**good, "strict": None}],
+                   [good, {**good, "ms": -1}], [good, {**good, "ms": 2**31}], [good, {**good, "ms": 1.5}],
+                   [good, {**good, "ms": True}], [good, {**good, "ms": "650"}],
+                   [good, {**good, "count": 0}], [good, {**good, "count": 2**31}], [good, {**good, "count": 2.0}],
+                   [good, {**good, "count": True}], [good, {**good, "count": "17"}]):
+        response = _post(client, {**_body(), "leg_faults": faults})
+        assert response.status_code == 200 and response.get_json() == baseline, faults
+    assert not any("leg_fault" in line for line in caplog.messages)
+
+
+def test_leg_faults_change_no_answer_and_keep_nothing(instance, caplog):
+    config, rv = instance
+    client = _signed_in(config)
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    # Reported while the instance has no endpoint: the answer is the same
+    # unavailable one, and the entries are logged all the same.
+    without = _post(client, _body()).get_json()
+    assert without["status"] == "unavailable"
+    caplog.clear()
+    assert _post(client, {**_body(), "leg_faults": [_leg_fault()]}).get_json() == without
+    assert sum("leg_fault" in line for line in caplog.messages) == 1
+    # Nothing of a report is kept: the next request logs none.
+    caplog.clear()
+    assert _post(client, _body()).get_json() == without
+    assert not any("leg_fault" in line for line in caplog.messages)
+    assert "leg_fault" not in repr(vars(rv))
+    # A request the route refuses reports nothing.
+    caplog.clear()
+    refused = _post(client, {"version": 2, "client_endpoint_id": CLIENT_ENDPOINT, "leg_faults": [_leg_fault()]})
+    assert refused.status_code == 400
+    assert not any("leg_fault" in line for line in caplog.messages)
+
+
+def _path_use(**changes):
+    entry = {"client": "desktop", "age_min": 1, "path": "relay", "handover_rule": "none", "retired_rule": "none"}
+    entry.update({key: 0 for key in direct_rendezvous._PATH_USE_COUNTS + direct_rendezvous._PATH_USE_MILLISECONDS})
+    return {**entry, **changes}
+
+
+def test_path_use_logs_only_its_fixed_words_and_numbers_without_changing_the_offer(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready" and "path_use" not in baseline
+    assert not any("path_use" in line for line in caplog.messages)
+    caplog.clear()
+    entries = [
+        # Seventeen connections: the tunnel won every race against the relay.
+        _path_use(tunnel=17, raced=17, tunnel_won=17, tunnel_ms=140, handover_asked=3, handover_refused=3,
+                  handover_rule="not_usable", retired=1, retired_rule="no_permitted_path"),
+        _path_use(client="ios", age_min=0, path="none", tunnel=4, no_direct=4, retired_rule="background", retired=2),
+        _path_use(age_min=1440, path="lan", direct=2**31 - 1, sticky=2, direct_ms=2**31 - 1, strict=1,
+                  tunnel_only=1, direct_failed=1, direct_timed_out=1, direct_won=1, handover_done=1,
+                  handover_rule="other_documents", retired_rule="lease"),
+    ]
+    response = _post(client, {**_body(), "path_use": entries})
+    assert response.status_code == 200 and response.get_json() == baseline
+    assert [(r.levelname, r.getMessage()) for r in caplog.records
+            if r.name == "vibe.direct_rendezvous" and "path_use" in r.getMessage()] == [
+        ("INFO", "direct rendezvous path_use client=desktop age_min=1 path=relay"
+                 " direct=0 tunnel=17 raced=17 direct_won=0 tunnel_won=17 direct_ms=0 tunnel_ms=140"
+                 " no_direct=0 sticky=0 strict=0 tunnel_only=0 direct_failed=0 direct_timed_out=0"
+                 " handover_asked=3 handover_done=0 handover_refused=3 handover_rule=not_usable"
+                 " retired=1 retired_rule=no_permitted_path"),
+        ("INFO", "direct rendezvous path_use client=ios age_min=0 path=none"
+                 " direct=0 tunnel=4 raced=0 direct_won=0 tunnel_won=0 direct_ms=0 tunnel_ms=0"
+                 " no_direct=4 sticky=0 strict=0 tunnel_only=0 direct_failed=0 direct_timed_out=0"
+                 " handover_asked=0 handover_done=0 handover_refused=0 handover_rule=none"
+                 " retired=2 retired_rule=background"),
+        ("INFO", "direct rendezvous path_use client=desktop age_min=1440 path=lan"
+                 f" direct={2**31 - 1} tunnel=0 raced=0 direct_won=1 tunnel_won=0 direct_ms={2**31 - 1} tunnel_ms=0"
+                 " no_direct=0 sticky=2 strict=1 tunnel_only=1 direct_failed=1 direct_timed_out=1"
+                 " handover_asked=0 handover_done=1 handover_refused=0 handover_rule=other_documents"
+                 " retired=0 retired_rule=lease"),
+    ]
+    # Every word of the contract is accepted, one entry at a time, and the lists are pinned.
+    for key, words in (("client", direct_rendezvous._PATH_USE_CLIENTS), ("path", direct_rendezvous._LEG_FAULT_PATHS),
+                       ("handover_rule", direct_rendezvous._PATH_USE_HANDOVER_RULES),
+                       ("retired_rule", direct_rendezvous._PATH_USE_RETIRED_RULES)):
+        for word in words:
+            caplog.clear()
+            _post(client, {**_body(), "path_use": [_path_use(**{key: word})]})
+            assert sum(f" {key}={word}" in f"{line} " and "path_use" in line for line in caplog.messages) == 1, (key, word)
+    assert direct_rendezvous._PATH_USE_CLIENTS == ("ios", "desktop")
+    assert direct_rendezvous._PATH_USE_COUNTS == (
+        "direct", "tunnel", "raced", "direct_won", "tunnel_won", "no_direct", "sticky", "strict", "tunnel_only",
+        "direct_failed", "direct_timed_out", "handover_asked", "handover_done", "handover_refused", "retired")
+    assert direct_rendezvous._PATH_USE_MILLISECONDS == ("direct_ms", "tunnel_ms")
+    assert direct_rendezvous._PATH_USE_HANDOVER_RULES == (
+        "none", "not_usable", "other_documents", "relay_path", "spacing", "cap", "fruitless")
+    assert direct_rendezvous._PATH_USE_RETIRED_RULES == (
+        "none", "path_monitor", "lease", "revocation", "strict_revert", "idle", "background",
+        "network_change") + direct_rendezvous._LEG_FAULT_CODES
+    # Ten entries are taken; it rides beside the other reports.
+    caplog.clear()
+    both = _post(client, {**_body(), "path_use": [_path_use()] * 10, "leg_faults": [_leg_fault()]})
+    assert both.get_json() == baseline
+    assert sum("path_use" in line for line in caplog.messages) == 10
+    assert sum("leg_fault" in line for line in caplog.messages) == 1
+
+
+def test_invalid_path_use_batches_are_ignored_in_full(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    good = _path_use()
+    missing = {key: value for key, value in good.items() if key != "retired"}
+    for entries in (None, [], good, "relay", [good] * 11, [good, None], [good, missing],
+                    [good, {**good, "host": "private.example"}],
+                    [good, {**good, "client": "android"}], [good, {**good, "client": 1}],
+                    [good, {**good, "path": "ipv6"}], [good, {**good, "path": []}],
+                    [good, {**good, "handover_rule": "192.168.1.20:51234"}], [good, {**good, "handover_rule": {}}],
+                    [good, {**good, "retired_rule": "relay\nforged line"}], [good, {**good, "retired_rule": None}],
+                    [good, {**good, "age_min": -1}], [good, {**good, "age_min": 1441}], [good, {**good, "age_min": True}],
+                    [good, {**good, "age_min": 1.0}],
+                    [good, {**good, "tunnel": -1}], [good, {**good, "tunnel": 2**31}], [good, {**good, "tunnel": 1.5}],
+                    [good, {**good, "tunnel": True}], [good, {**good, "tunnel": "17"}],
+                    [good, {**good, "direct_ms": -1}], [good, {**good, "tunnel_ms": 2**31}],
+                    [good, {**good, "retired": None}], [good, {**good, "handover_asked": [1]}]):
+        response = _post(client, {**_body(), "path_use": entries})
+        assert response.status_code == 200 and response.get_json() == baseline, entries
+    assert not any("path_use" in line for line in caplog.messages)
+    # Each count and each time is checked on its own.
+    for key in direct_rendezvous._PATH_USE_COUNTS + direct_rendezvous._PATH_USE_MILLISECONDS:
+        _post(client, {**_body(), "path_use": [{**good, key: -1}]})
+    assert not any("path_use" in line for line in caplog.messages)
+
+
 def test_slow_store_removals_are_logged_in_milliseconds_without_changing_the_offer(instance, caplog):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))

@@ -3,6 +3,7 @@ import type { DesktopClientState } from '@/desktop/bridge';
 import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { SIGN_IN_PROVIDERS, type SignInMethods } from '@/sign-in/types';
 import { frames, type FrameSpec } from '../../frame';
+import { DesktopAccountWindow } from '../../shell/DesktopAccountWindow';
 import { copyFor } from './instances-fixtures';
 
 // Desktop sign-in on the shared flow (#3946), shipped (Max, 2026-11-18: as on the iPhone). Compare each with the shipped card it
@@ -41,8 +42,19 @@ const send = async () => null;
 type Variant = { name: string; title: string; native: DesktopClientState; click?: FrameSpec['click'] };
 const continueWithEmail = 'role=button[name="{t:mobileApp.welcome.continueWithEmail}"]';
 const variants: Variant[] = [
-  { name: 'start', title: '登录第一页 · iPhone 的 Welcome，Desktop 自己的副标题，无品牌行与登记说明', native: signedOut },
+  { name: 'start', title: '登录第一页 · 单行副标题，无底部实例说明', native: signedOut },
   { name: 'email', title: '邮箱 · 发送验证码', native: signedOut, click: [continueWithEmail] },
+  {
+    name: 'forgot',
+    title: '忘记密码 · 用验证码登录或在浏览器设置新密码',
+    native: signedOut,
+    click: [
+      continueWithEmail,
+      { fill: 'input[type="email"]', text: EMAIL },
+      'role=button[name="{t:mobileApp.password.entry}"]',
+      'role=button[name="{t:mobileApp.password.forgot}"]',
+    ],
+  },
   {
     name: 'password',
     title: '邮箱 · 密码登录',
@@ -68,19 +80,36 @@ const designFrames = frames(variants.flatMap(({ name, title, native, click }) =>
   status: 'shipped',
   ...(click ? { click } : {}),
   fixtures: { copy: copyFor(lang === 'en' ? en : zh) },
-  render: () => (
-    <div className="flex h-full flex-col overflow-y-auto bg-background px-10 py-5 text-foreground">
-      <DesktopSignIn
-        state={native}
-        send={send}
-        methods={ALL}
-        onLocal={noop}
-        onDifferentAccount={noop}
-        onOpenSecurity={noop}
-        renderEnroll={() => null}
-      />
-    </div>
-  ),
+  render: () => {
+    const content = <DesktopSignIn
+      state={native}
+      send={send}
+      methods={ALL}
+      onLocal={noop}
+      onDifferentAccount={noop}
+      onOpenSecurity={noop}
+      renderEnroll={() => null}
+    />;
+    return name === 'start' ? <DesktopAccountWindow>{content}</DesktopAccountWindow> :
+      <div className="flex h-full flex-col overflow-y-auto bg-background px-10 py-5 text-foreground">{content}</div>;
+  },
 }))));
 
-export default designFrames;
+// The native main window minimum is 880 × 600 (desktop/src-tauri/tauri.conf.json).
+// Keep the same 40 px horizontal content inset as AccountApp; check the full sentence
+// without widening the action column. Approved by Max on 2026-11-26.
+const minimumWelcome = designFrames.filter((frame) => frame.name.startsWith('start-')).map((frame) => ({
+  ...frame, name: frame.name.replace('start-', 'start-minimum-'),
+  title: `${frame.title} · 880 × 600`, width: 880, height: 600,
+}));
+
+// Approved C uses the product component, with no proposal kit copy. Capture its
+// large windows and both sides of each height boundary in the same shipped set.
+const responsiveWelcome = designFrames.filter((frame) => frame.name.startsWith('start-')).flatMap((frame) =>
+  [[1440, 900], [2000, 1133], [2940, 1660], [880, 779], [880, 780], [880, 899], [880, 900]].map(([width, height]) => ({
+    ...frame, name: frame.name.replace('start-', `start-${width}x${height}-`),
+    title: `${frame.title} · ${width} × ${height}`, width, height,
+  })),
+);
+const allDesignFrames = frames([...designFrames, ...minimumWelcome, ...responsiveWelcome]);
+export default allDesignFrames;

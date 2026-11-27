@@ -3760,6 +3760,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         web_flow = await harness.service.start_web_setup(
             "codex",
             force_reset=False,
+            owner_ref="protected-source",
         )
         self.addAsyncCleanup(harness.service.cancel_web_flow, web_flow.flow_id)
         await harness.service.start_setup(
@@ -6981,9 +6982,11 @@ def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, t
 
 
 def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-931 — recovery, explicit probe, then account-scoped catalog cutover."""
+    """Scenario: AUTH-SETUP-931 — recovery, probe, manual-link Web re-login, callback URL and catalog cutover."""
     from tests.helpers.antigravity_harness import FakeAgyAuthFixture
     from modules.im import MessageContext
+    import httpx
+    from vibe import api
 
     fake_agy = FakeAgyAuthFixture(tmp_path)
     config = V2Config.default()
@@ -7010,6 +7013,8 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         session_handler=None,
     )
     service = AgentAuthService(controller)
+    service._post_web_success_hook = lambda _backend: None
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service)
 
     from modules.agents import acp
     from tests.helpers.acp_probe_stub import make_probe_client
@@ -7021,7 +7026,18 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         chunks=[("sess-probe-1", "echo:Hi")],
         authenticated=lambda: json.loads(fake_agy.state_file.read_text())["authenticated"],
     )
-    monkeypatch.setattr(acp, "AcpClient", Client)
+    class LoginProbeClient(Client):
+        auth_methods = [{"id": "oauth-personal"}]
+        supports_logout = False
+        supports_list = True
+        agent_info = {"version": "fixture"}
+
+        async def session_list(self):
+            if not json.loads(fake_agy.state_file.read_text())["authenticated"]:
+                raise acp.AcpRpcError(acp.ACP_AUTH_REQUIRED, "Authentication required")
+            return {"sessions": []}
+
+    monkeypatch.setattr(acp, "AcpClient", LoginProbeClient)
     ctx = MessageContext(user_id="u1", channel_id="c1", platform="slack")
 
     async def _run():
@@ -7057,10 +7073,71 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         from modules.agents.antigravity.models import read_antigravity_live_models
 
         assert read_antigravity_live_models(config)[0]["id"] == "gemini-4-neon"
-        # A verified OAuth consent can leave the selected auth method unchanged;
-        # the old account's menu must still stop governing subsequent pickers.
-        await service._persist_backend_auth_mode("antigravity", "oauth-personal", strict=True)
-        assert read_antigravity_live_models(config) == []
+        # Exercise the Web wire contract with valid credentials: the HTTP
+        # start must publish the CLI URL and accept code before committing.
+        process = FakeProcess()
+        login_url = "https://accounts.google.com/o/oauth2/auth?state=scenario-relogin"
+        process.stdout = SimpleNamespace(readline=AsyncMock(side_effect=[
+            f"Open URL: {login_url}\nPaste code: ".encode(), b"",
+        ]))
+        codes = []
+
+        def accept_code(payload):
+            codes.append(payload)
+            process.finish()
+
+        process.stdin = SimpleNamespace(
+            is_closing=lambda: False, write=accept_code, drain=AsyncMock(),
+        )
+        # Observe the real launcher: a PTY would select agy's browser mode.
+        async def launch(*command, **kwargs):
+            assert command == (str(fake_agy.binary), "acp", "--login", "--disable-telemetry")
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
+            assert kwargs["stdout"] == asyncio.subprocess.PIPE
+            assert kwargs["stderr"] == asyncio.subprocess.STDOUT
+            return process
+
+        start_login = AsyncMock(side_effect=launch)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", start_login)
+        monkeypatch.setattr(os, "openpty", lambda: pytest.fail("Login must not open a PTY/browser"))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+            token = (await client.get("/api/csrf-token")).json()["csrf_token"]
+            client.cookies.set("vibe_csrf_token", token, domain="localhost")
+            headers = {"Origin": "http://localhost", "X-Vibe-CSRF-Token": token}
+            base = "/api/backend/antigravity/auth/oauth"
+            started = (await client.post(f"{base}/start", headers=headers, json={
+                "force_reset": False, "auth_mode": "oauth-personal",
+            })).json()
+            assert started["ok"] is True
+            flow_id = started["flow_id"]
+            try:
+                for _ in range(100):
+                    status = (await client.get(f"{base}/status/{flow_id}")).json()
+                    if status.get("url"):
+                        break
+                    await asyncio.sleep(0.01)
+                assert status["state"] == "awaiting_code" and status["url"] == login_url
+                assert status["authorization_completed"] is False
+                start_login.assert_awaited_once()
+                assert process.returncode is None and not process.stdin.is_closing()
+                invalid = (await client.post(f"{base}/submit-code", headers=headers, json={
+                    "flow_id": flow_id, "code": "https://antigravity.google/oauth-callback?state=scenario",
+                })).json()
+                assert invalid == {"ok": False, "error": "invalid_format"} and codes == []
+                submitted = (await client.post(f"{base}/submit-code", headers=headers, json={
+                    "flow_id": flow_id, "code": "  https://antigravity.google/oauth-callback?code=replacement-account-code&state=scenario  ",
+                })).json()
+                assert submitted == {"ok": True} and codes == [b"replacement-account-code\n"]
+                for _ in range(100):
+                    status = (await client.get(f"{base}/status/{flow_id}")).json()
+                    if status["state"] in {"success", "failed"}:
+                        break
+                    await asyncio.sleep(0.01)
+                assert status["state"] == "success" and status["authorization_completed"] is True
+                assert V2Config.load().agents.antigravity.auth_mode == "oauth-personal"
+                assert read_antigravity_live_models(config) == []
+            finally:
+                await service.cancel_web_flow(flow_id)
 
         for command, env in observed["commands"]:
             assert "--dangerously-skip-permissions" not in command and "--disable-telemetry" in command
@@ -7131,3 +7208,57 @@ def test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt(pair
     # The completion names the old domain and the date avibe.bot froze with its receipt.
     assert browser.get("/api/devices").get_json()["unbind"] == {
         "state": "unbound", "host": "fixture.avibe.bot", "release_at": "2026-12-25T00:00:00Z"}
+
+
+@pytest.mark.asyncio
+async def test_abandoned_web_login_can_restart_and_complete(monkeypatch):
+    """AUTH-SETUP-934: returning to Settings recovers without an old flow id.
+
+    The API must return a fresh usable flow and commit its successful login;
+    unit ownership tests cannot cover the public start/status response loop.
+    """
+    from vibe import api as vibe_api
+
+    harness = AuthSetupScenarioHarness()
+    service = harness.service
+    processes = []
+
+    async def spawn(**_kwargs):
+        process = FakeProcess()
+        process.stdout.readline.side_effect = [
+            b"https://auth.openai.com/codex/device\n", b"ABCD-12345\n", b"",
+        ]
+        processes.append(process)
+        return process
+
+    service._start_codex_process = spawn
+    service._verify_web_login = AsyncMock(return_value=(True, "signed in"))
+    service._invoke_post_web_success_hook = AsyncMock()
+    monkeypatch.setattr(vibe_api, "_get_oauth_service", lambda: service)
+
+    first = await vibe_api.start_oauth_web_async("codex", force_reset=False)
+    assert first["ok"] is True
+    old = service._flows_by_id[first["flow_id"]]
+    await old.reader_task
+    assert vibe_api.get_oauth_web_status(old.flow_id)["state"] == "awaiting_code"
+    # Closing the browser sends no cancel request. Return with no stored flow id.
+    second = await vibe_api.start_oauth_web_async("codex", force_reset=False)
+    assert second["ok"] is True
+    assert second["flow_id"] != first["flow_id"]
+    new = service._flows_by_id[second["flow_id"]]
+    try:
+        await new.reader_task
+        status = vibe_api.get_oauth_web_status(new.flow_id)
+        assert status["state"] == "awaiting_code"
+        assert status["url"] == "https://auth.openai.com/codex/device"
+        assert old.state == "cancelled"
+        assert processes[0].terminate_calls == 1
+        processes[1].finish()
+        await new.waiter_task
+        status = vibe_api.get_oauth_web_status(new.flow_id)
+        assert status["state"] == "success"
+        assert status["authorization_completed"] is True
+        assert V2Config.load().agents.codex.auth_mode == "oauth"
+        service._invoke_post_web_success_hook.assert_awaited_once_with("codex", persist=False)
+    finally:
+        await service.cancel_web_flow(new.flow_id)

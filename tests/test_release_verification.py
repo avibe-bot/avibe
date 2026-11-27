@@ -802,3 +802,107 @@ def test_release_condition_rejects_failed_backstop():
         "startsWith": lambda value, prefix: value.startswith(prefix),
     })
     assert result is False
+
+
+def test_stable_regressions_take_only_test_files_from_the_workflow_commit():
+    # The tag's commit is built, installed and published; the stable-only regression
+    # step overlays exactly its three test files from the workflow's commit, after the
+    # distributions exist, and proves the distribution set did not change at all.
+    build = _job("publish.yml", "build")
+    assert _step(build, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.source_sha }}"
+    tests = ["tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py"]
+    assert _step(build, "Checkout release automation")["with"]["sparse-checkout"].split() == [
+        "scripts/github_release.py",
+        "scripts/show_runtime_manifest_asset.py",
+        "scripts/release_asset_download.py",
+        "scripts/release_package_version.py",
+        "scripts/release_dist_manifest.py",
+        ".github/actions/sqlite-predecessor-contract/action.yml",
+        "tests/test_distribution_artifacts.py",
+        *tests,
+    ]
+    names = [step.get("name") for step in build["steps"]]
+    regression = names.index("Run release install and upgrade regressions")
+    assert names.index("Verify built distribution contracts") < regression < names.index("Upload GitHub release assets")
+    run = _step(build, "Run release install and upgrade regressions")["run"]
+    loop = re.search(r"for test_file in \\\n(.*?); do\n\s*cp \"release-automation/\$test_file\" \"\$test_file\"\n\s*done", run, re.S)
+    assert loop is not None
+    assert [item.strip(" \\") for item in loop.group(1).split("\n") if item.strip(" \\")] == tests
+    assert run.count("cp ") == 1
+    before = run.index("release_dist_manifest.py dist > \"$RUNNER_TEMP/dist-before.sha256\"")
+    assert before < loop.start() < run.index("pytest") < run.index('cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"')
+
+
+def _dist_manifest(directory):
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts/release_dist_manifest.py"), str(directory)],
+        capture_output=True, text=True,
+    )
+
+
+def test_dist_manifest_refuses_symlinks_and_tells_added_files_apart(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "avibe_os-3.2.8-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "avibe_os-3.2.8.tar.gz").write_bytes(b"sdist")
+    before = _dist_manifest(dist)
+    assert before.returncode == 0 and before.stdout.count("\n") == 2
+
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").write_bytes(b"extra")
+    added = _dist_manifest(dist)
+    assert added.returncode == 0 and added.stdout != before.stdout
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").unlink()
+
+    outside = tmp_path / "outside.whl"
+    outside.write_bytes(b"elsewhere")
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").symlink_to(outside)
+    assert _dist_manifest(dist).returncode != 0
+    (dist / "avibe_os-9.9.9-py3-none-any.whl").unlink()
+
+    (dist / "nested").mkdir()
+    assert _dist_manifest(dist).returncode != 0
+    (dist / "nested").rmdir()
+
+    linked = tmp_path / "linked-dist"
+    linked.symlink_to(dist)
+    assert _dist_manifest(linked).returncode != 0
+    assert _dist_manifest(dist).stdout == before.stdout
+
+
+def test_every_rc_runs_the_stable_release_regressions_on_its_package():
+    # A stable must never be the first build to run these: Stage 1 of every RC runs
+    # the same three files against its real package build, before anything publishes.
+    def pytest_files(run):
+        block = run[run.index("pytest"):run.index("-v", run.index("pytest"))]
+        return [part.strip(" \\\n") for part in block.split() if part.startswith("tests/")]
+
+    stable = _step(_job("publish.yml", "build"), "Run release install and upgrade regressions")["run"]
+    rc_job = _job("release_ai.yml", "build-assets")
+    rc = _step(rc_job, "Run release install and upgrade regressions")["run"]
+    assert pytest_files(rc) == pytest_files(stable) == [
+        "tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py",
+    ]
+    assert 'VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"' in rc
+    assert rc.index('> "$RUNNER_TEMP/dist-before.sha256"') < rc.index("pytest") < rc.index(
+        'cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"'
+    )
+    # The same overlay of the workflow revision's test files as the stable step.
+    def overlaid(run):
+        loop = re.search(r"for test_file in \\\n(.*?); do\n\s*cp \"release-automation/\$test_file\" \"\$test_file\"\n\s*done", run, re.S)
+        assert loop is not None and run.count("cp ") == 1
+        return [item.strip(" \\") for item in loop.group(1).split("\n") if item.strip(" \\")]
+
+    assert overlaid(rc) == overlaid(stable) == pytest_files(rc)
+    checkout = _step(rc_job, "Checkout release verification")["with"]["sparse-checkout"].split()
+    assert "scripts/release_dist_manifest.py" in checkout
+    assert all(path in checkout for path in pytest_files(rc))
+    # Not skippable and not advisory: it must run and pass for build-assets to succeed.
+    for step in (_step(rc_job, "Run release install and upgrade regressions"),
+                 _step(_job("publish.yml", "build"), "Run release install and upgrade regressions")):
+        assert "if" not in step and not step.get("continue-on-error", False)
+        assert step["run"].lstrip().startswith("set -euo pipefail\n") and "docker info" in step["run"]
+    names = [step.get("name") for step in rc_job["steps"]]
+    position = names.index("Run release install and upgrade regressions")
+    assert names.index("Build Python distributions") < position < names.index("Upload release artifacts")
+    # The RC's release job publishes only after this job succeeded.
+    assert "build-assets" in _job("release_ai.yml", "release")["needs"]

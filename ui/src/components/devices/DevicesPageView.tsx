@@ -105,7 +105,12 @@ export type DevicesPageViewProps = DevicesPageActions & {
   unrecognizedChange?: { hostname: string };
   /** 「解除绑定」 as the Devices page says it: running (it continues by itself), or just done, with
    *  the name it had and how long that stays the account's. */
-  unbind?: { state: 'unbinding' } | { state: 'done'; host?: string; releaseAt?: string; holdDays?: number };
+  unbind?: { state: 'unbinding' } | {
+    state: 'done'; host?: string; releaseAt?: string; holdDays?: number;
+    /** The name stays with the account the Avibe was (binding as a new computer, of another
+     *  account's Avibe), not "your account". */
+    originalAccount?: boolean;
+  };
   /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
    *  before it, no sentence points there. */
   rebindOffered?: boolean;
@@ -675,7 +680,15 @@ export function DevicesPageView({
         <Notice tone="plain">
           <div className="text-balance text-[14px] font-semibold">{t('devices.unbind.done')}</div>
           {unbind.host && (
-            <p className="mt-1"><KeptTail text={unbindNameKeptText(t, unbind.host, unbind.releaseAt ? longDay(unbind.releaseAt, i18n.language) : undefined, unbind.holdDays)} /></p>
+            <p className="mt-1">
+              <KeptTail
+                text={unbind.originalAccount
+                  ? (unbind.releaseAt
+                    ? t('devices.rebind.asNewCloud.loseName', { host: unbind.host, date: longDay(unbind.releaseAt, i18n.language) })
+                    : t('devices.rebind.asNewCloud.loseNameDays', { host: unbind.host, count: unbind.holdDays ?? 30 }))
+                  : unbindNameKeptText(t, unbind.host, unbind.releaseAt ? longDay(unbind.releaseAt, i18n.language) : undefined, unbind.holdDays)}
+              />
+            </p>
           )}
         </Notice>
       )}

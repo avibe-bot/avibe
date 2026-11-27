@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
+from urllib.parse import unquote_plus
 from modules.agents.catalog import (
     AGENT_BACKENDS,
     NATIVE_CLI_BACKENDS,
@@ -1110,8 +1111,7 @@ class AgentAuthService:
                 resolved_backend,
                 self._t(
                     "command.setup.loginInProgress",
-                    vendor=err.vendor,
-                    backend=resolved_backend,
+                    backend=resolved_backend.capitalize(),
                 ),
             )
             return
@@ -1183,8 +1183,8 @@ class AgentAuthService:
             return
 
         if flow.backend == "antigravity":
-            raw = (code or "").strip()
-            if not raw or "\n" in raw or "\r" in raw or not flow.awaiting_code:
+            raw = self._parse_antigravity_code(code)
+            if raw is None or not flow.awaiting_code:
                 await self._send_message(context, f"❌ {self._t('command.setup.notAwaitingCode')}")
                 return
             if not await self._write_antigravity_code(flow, raw):
@@ -1450,10 +1450,10 @@ class AgentAuthService:
         if backend == "claude":
             return "anthropic"
         if backend == "antigravity":
-            return "gemini"
+            return "google"
         return (provider or "opencode").strip().lower()
 
-    def _claim_shared_native_flow(
+    async def _claim_shared_native_flow(
         self,
         backend: str,
         *,
@@ -1462,13 +1462,22 @@ class AgentAuthService:
     ) -> None:
         """Claim the one shared native-login path before any provider spawn."""
         vendor = self._native_vendor_for_flow(backend, provider)
-        for flow in self._flows_by_id.values():
+        for flow in list(self._flows_by_id.values()):
             if (
                 getattr(flow, "native_cli", False)
                 and getattr(flow, "state", "starting") not in {"success", "failed", "cancelled"}
                 and flow.backend == backend
                 and (backend != "opencode" or flow.provider == provider)
             ):
+                if (
+                    isinstance(flow, WebAuthFlow)
+                    and flow.source_id in {None, owner_ref}
+                    and not flow.native_closing
+                    and not flow.cancel_requested
+                ):
+                    await finish_native_operation(self._terminate_web_flow(flow, final_state="cancelled"))
+                    self._flow_registry.drop(flow)
+                    continue
                 raise BackendLoginInProgressError(
                     vendor,
                     backend,
@@ -1540,23 +1549,19 @@ class AgentAuthService:
                 if existing is not None:
                     await self._terminate_flow(existing)
 
-            lease = self._acquire_native_lease(backend, source_id=owner_ref, new_source=new_source)
-            try:
-                provider = provider_id
-                if backend == "opencode" and context is not None:
-                    provider = await self._resolve_opencode_provider(context)
-                native_cli = backend != "opencode" or not (
-                    context is not None and self._supports_direct_opencode_api_key_setup(provider)
+            provider = provider_id
+            if backend == "opencode" and context is not None:
+                provider = await self._resolve_opencode_provider(context)
+            native_cli = backend != "opencode" or not (
+                context is not None and self._supports_direct_opencode_api_key_setup(provider)
+            )
+            if native_cli:
+                await self._claim_shared_native_flow(
+                    backend,
+                    provider=provider,
+                    owner_ref=owner_ref,
                 )
-                if native_cli:
-                    self._claim_shared_native_flow(
-                        backend,
-                        provider=provider,
-                        owner_ref=owner_ref,
-                    )
-            except BaseException:
-                lease.release()
-                raise
+            lease = self._acquire_native_lease(backend, source_id=owner_ref, new_source=new_source)
 
             flow_id = uuid.uuid4().hex[:12]
             if context is None:
@@ -1632,34 +1637,22 @@ class AgentAuthService:
                     if isinstance(flow, WebAuthFlow) and resolved_method == "oauth-business":
                         flow.terminal_command = "agy"
                         flow.instructions = self._t("command.setup.antigravityBusinessFallback", command="agy")
-                    if not force_reset and await self._try_reuse_antigravity_login(flow):
-                        if isinstance(flow, WebAuthFlow):
-                            await self._commit_web_login(flow)
-                            flow.state = "success"
-                        else:
-                            await self._persist_backend_auth_mode(backend, resolved_method)
-                            await self._refresh_backend_runtime(backend)
-                            await self._send_message(flow.context, f"✅ {self._t('command.setup.success', backend=backend)}")
-                        await finish_native_operation(self._cleanup_native_flow(flow))
-                        if isinstance(flow, AgentAuthFlow):
-                            self._flow_registry.drop(flow)
+                    flow.process, flow.pty_master_fd = await self._start_antigravity_login_process(
+                        auth_method=resolved_method,
+                        on_irreversible_start=on_irreversible_start,
+                    )
+                    if isinstance(flow, WebAuthFlow):
+                        flow.callback_kind = "code"
+                        flow.reader_task = asyncio.create_task(self._read_antigravity_output_web(flow))
+                        self._arm_flow_waiter(flow, self._wait_for_antigravity_completion_web(flow))
                     else:
-                        flow.process, flow.pty_master_fd = await self._start_antigravity_login_process(
-                            auth_method=resolved_method,
-                            on_irreversible_start=on_irreversible_start,
+                        reader = (
+                            self._read_pty_output(flow.process, flow.pty_master_fd, context, backend)
+                            if flow.pty_master_fd is not None
+                            else self._read_codex_output(flow.process, context, backend)
                         )
-                        if isinstance(flow, WebAuthFlow):
-                            flow.callback_kind = "code"
-                            flow.reader_task = asyncio.create_task(self._read_antigravity_output_web(flow))
-                            self._arm_flow_waiter(flow, self._wait_for_antigravity_completion_web(flow))
-                        else:
-                            reader = (
-                                self._read_pty_output(flow.process, flow.pty_master_fd, context, backend)
-                                if flow.pty_master_fd is not None
-                                else self._read_codex_output(flow.process, context, backend)
-                            )
-                            flow.reader_task = asyncio.create_task(reader)
-                            self._arm_flow_waiter(flow, self._wait_for_completion(flow))
+                        flow.reader_task = asyncio.create_task(reader)
+                        self._arm_flow_waiter(flow, self._wait_for_completion(flow))
                 else:
                     if context is not None and not native_cli:
                         flow.awaiting_code = True
@@ -1710,6 +1703,17 @@ class AgentAuthService:
             stderr=asyncio.subprocess.STDOUT,
         )
 
+    @staticmethod
+    def _parse_antigravity_code(code: str) -> str | None:
+        raw = (code or "").strip()
+        if not raw or "\n" in raw or "\r" in raw:
+            return None
+        match = re.search(r"(?:[?&]|\b)code=([^&#\s]*)", raw)
+        if match:
+            value = unquote_plus(match.group(1)).strip()
+            return value if value and "\n" not in value and "\r" not in value else None
+        return None if URL_RE.search(raw) else raw
+
     async def _write_antigravity_code(self, flow: AgentAuthFlow | WebAuthFlow, raw: str) -> bool:
         payload = f"{raw}\n".encode("utf-8")
         if flow.pty_master_fd is not None:
@@ -1728,58 +1732,30 @@ class AgentAuthService:
         configured = (getattr(self._resolve_backend_config("antigravity"), "auth_mode", None) or "").strip()
         return configured if configured in ANTIGRAVITY_OAUTH_METHODS else "oauth-personal"
 
-    async def _try_reuse_antigravity_login(self, flow: AgentAuthFlow | WebAuthFlow) -> bool:
-        """Reuse an existing OAuth login only when saved auth_mode already matches."""
-        cfg = self._resolve_backend_config("antigravity")
-        configured_mode = (getattr(cfg, "auth_mode", None) or "").strip()
-        requested_mode = (flow.auth_method or "").strip()
-        if requested_mode not in ANTIGRAVITY_OAUTH_METHODS or configured_mode != requested_mode:
-            return False
-        binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
-        probe = await probe_antigravity_passive_status(
-            binary,
-            config=cfg,
-            auth_mode=requested_mode,
-        )
-        return bool(probe.get("authenticated"))
-
     async def _start_antigravity_login_process(
         self,
         *,
         auth_method: str,
         on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
     ) -> tuple[asyncio.subprocess.Process, int | None]:
-        """Launch ``agy acp --login --disable-telemetry`` in a PTY (never with permission bypass)."""
+        """Keep agy in paste-code mode: a TTY makes it open a browser."""
         env = build_antigravity_auth_env(self._resolve_backend_config("antigravity"), auth_mode=auth_method)
         binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
         cmd = antigravity_acp_command(binary, login=True)
         restore = on_irreversible_start() if on_irreversible_start is not None else None
-        master_fd: int | None = None
-        slave_fd: int | None = None
         try:
-            if hasattr(os, "openpty"):
-                master_fd, slave_fd = os.openpty()
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, env=env
-                )
-            else:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    env=env,
-                )
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
         except Exception:
-            if master_fd is not None:
-                os.close(master_fd)
             if restore is not None:
                 restore()
             raise
-        finally:
-            if slave_fd is not None:
-                os.close(slave_fd)
-        return process, master_fd
+        return process, None
 
     async def _start_claude_control_flow(
         self,
@@ -2150,8 +2126,6 @@ class AgentAuthService:
             if flow.url and not flow.login_prompt_sent:
                 flow.login_prompt_sent = True
                 instructions = self._t("command.setup.antigravityInstructions", url=flow.url)
-                if flow.auth_method == "oauth-personal":
-                    instructions = f"{self._t('command.setup.antigravityPersonalNotice')}\n\n{instructions}"
                 await self._send_message(flow.context, instructions)
             return
 
@@ -3076,8 +3050,8 @@ class AgentAuthService:
         if flow.backend == "antigravity":
             if flow.state != "awaiting_code" or not flow.awaiting_code:
                 return {"ok": False, "error": "not_awaiting_code"}
-            raw = (code or "").strip()
-            if not raw or "\n" in raw or "\r" in raw:
+            raw = self._parse_antigravity_code(code)
+            if raw is None:
                 return {"ok": False, "error": "invalid_format"}
             try:
                 if not await self._write_antigravity_code(flow, raw):

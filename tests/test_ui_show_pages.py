@@ -99,69 +99,25 @@ def _active_org_cookie(config, email="member@example.com", subject="member-1", *
     )
 
 
-def test_show_runtime_entry_injection_adds_exact_manifest_and_platform_meta():
+def test_show_runtime_entry_injection_adds_only_native_install_metadata():
     content = b"""<!doctype html>
 <html><head><title>Custom</title></head><body><div id="root"></div></body></html>"""
-    config = ui_server._show_system_entry_config(
-        title="Q4 Roadmap",
-        base_path="/p/limited-link/",
-        icon_url="/p/limited-link/__show/icon?v=icon-v1",
-        language="en",
-    )
 
     injected = ui_server._inject_show_system_entry(
         content,
-        config,
+        title="Q4 Roadmap",
+        icon_url="/p/limited-link/__show/icon?v=icon-v1",
         base_path="/p/limited-link/",
     ).decode("utf-8")
 
     assert '<link rel="manifest" href="/p/limited-link/__show/manifest.webmanifest" crossorigin="use-credentials">' in injected
     assert '<link rel="apple-touch-icon" href="/p/limited-link/__show/icon?v=icon-v1">' in injected
     assert 'name="apple-mobile-web-app-title" content="Q4 Roadmap"' in injected
-    assert 'name="avibe-show-system-entry"' in injected
-    assert 'src="/p/limited-link/__show/system-entry.js"' in injected
-    assert "/p/limited-link/" in injected
+    # Safari's own Share/File menus are the install path; Avibe injects no prompt.
+    assert "avibe-show-system-entry" not in injected
+    assert "system-entry.js" not in injected
+    assert injected.count("<script") == 0
     assert "token" not in injected.lower()
-
-
-def test_show_runtime_entry_script_keeps_limited_page_copy_localized():
-    english = ui_server._show_system_entry_config(
-        title="Demo",
-        base_path="/p/demo/",
-        icon_url="/apple-touch-icon.png",
-        language="en",
-    )
-    chinese = ui_server._show_system_entry_config(
-        title="演示",
-        base_path="/p/demo/",
-        icon_url="/apple-touch-icon.png",
-        language="zh",
-    )
-
-    assert english["copy"]["cta"] == "Add to Home Screen or Dock"
-    assert chinese["copy"]["cta"] == "添加到主屏幕或程序坞"
-    assert english["copy"]["iosCta"] == "Add to Home Screen"
-    assert english["copy"]["macCta"] == "Add to Dock"
-    assert chinese["copy"]["iosCta"] == "添加到主屏幕"
-    assert chinese["copy"]["macCta"] == "添加到程序坞"
-    assert english["copy"]["cta"] != chinese["copy"]["cta"]
-
-
-def test_show_runtime_entry_script_is_small_dismissible_and_standalone_safe():
-    script = ui_server._SHOW_SYSTEM_ENTRY_SCRIPT_BODY
-
-    assert "display-mode: standalone" in script
-    assert "navigator.standalone" in script
-    assert "attachShadow({ mode: 'open' })" in script
-    assert "data-avibe-show-system-entry" in script
-    assert "window.localStorage" in script
-    assert "savePreference('dismissed')" in script
-    assert "root.remove()" in script
-    assert "data-avibe-show-system-entry-spacer" in script
-    assert "button.hidden = open" in script
-    assert "collapseButton" in script
-    assert "aria-labelledby" in script
-    assert "aria-live" in script
 
 
 class _FakeShowRuntimeManager:
@@ -1545,7 +1501,7 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
     try:
         client = app.test_client()
         # Metadata must not turn a missing guest identity into public access.
-        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js", "__show/icon"):
+        for installed_resource in ("__show/manifest.webmanifest", "__show/icon"):
             anonymous = client.get(
                 f"/p/{share_id}/{installed_resource}",
                 base_url="https://alex.avibe.bot",
@@ -1609,6 +1565,9 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         assert page.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
         assert b'"authenticated":false' in page.content
         assert b"__show/annotation.js" not in page.content
+        # Limited recipients get Safari's native install metadata, never an Avibe prompt.
+        assert f'href="/p/{share_id}/__show/manifest.webmanifest"'.encode() in page.content
+        assert b"system-entry" not in page.content
 
         api_response = client.post(
             f"/p/{share_id}/api/data",
@@ -1640,12 +1599,6 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         identity = json.loads(manifest.content)
         assert identity["id"] == identity["start_url"] == identity["scope"] == f"/p/{share_id}/"
         assert manifest.headers["Cache-Control"] == "private, no-store"
-        guidance = client.get(
-            f"/p/{share_id}/__show/system-entry.js",
-            base_url="https://alex.avibe.bot",
-            environ_base=_remote_peer(),
-        )
-        assert guidance.status_code == 200
 
         store = ShowPageStore()
         try:
@@ -1662,7 +1615,7 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         finally:
             store.close()
 
-        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js", "__show/icon"):
+        for installed_resource in ("__show/manifest.webmanifest", "__show/icon"):
             denied = client.get(
                 f"/p/{share_id}/{installed_resource}",
                 base_url="https://alex.avibe.bot",
@@ -4302,6 +4255,38 @@ def test_show_live_035_public_show_page_injects_auth_aware_annotation_config(
     assert '"writeToken"' not in body
     assert body.index('/src/main.tsx') < body.index(f'{base_path}__show/annotation.js')
     assert response.headers["Referrer-Policy"] == "same-origin"
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_document_keeps_native_install_metadata_without_injected_prompt(monkeypatch, tmp_path, surface):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    if surface == "private":
+        _create_show_page("ses123", "private")
+        base_path = "/show/ses123/"
+    else:
+        base_path = f"/p/{_create_show_page('ses123', 'public')}/"
+    manager = _FakeShowRuntimeManager(
+        body=b'<!doctype html><html><head></head><body><div id="root"></div></body></html>'
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            base_path,
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/html"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    body = response.content.decode("utf-8")
+    # Safari's Share/File menus install the page from this metadata alone.
+    assert f'<link rel="manifest" href="{base_path}__show/manifest.webmanifest" crossorigin="use-credentials">' in body
+    assert '<link rel="apple-touch-icon"' in body
+    assert '<meta name="apple-mobile-web-app-capable" content="yes">' in body
+    assert "avibe-show-system-entry" not in body
+    assert "system-entry.js" not in body
 
 
 @pytest.mark.parametrize("surface", ["private", "public"])

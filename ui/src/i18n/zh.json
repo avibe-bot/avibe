@@ -198,9 +198,27 @@
       "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
     },
+    "providerError": {
+      "accountConflict": "这个邮箱关联了多个账号。请换一种登录方式。",
+      "serverError": "登录服务未能完成请求。请重试，或换一种登录方式。",
+      "denied": "此次登录未获得授权。请重试，或换一种登录方式。",
+      "timedOut": "登录已超时，请重试。",
+      "failed": "未能完成登录。请重试，或换一种登录方式。"
+    },
     "providerCallback": {
-      "done": "可以关闭此页，回到 Avibe。",
-      "failed": "登录没有完成，请回到 Avibe 重试。"
+      "done": "登录完成，可以回到 Avibe。",
+      "failed": "未能完成登录。",
+      "verifyInApp": "请回到 Avibe 完成身份验证。",
+      "cancelled": "这次登录已取消。",
+      "timedOut": "这次登录已超时。",
+      "accountConflict": "这个邮箱关联了多个账号，无法通过此方式完成登录。",
+      "serverError": "登录服务未能完成请求。",
+      "denied": "此次登录未获得授权。",
+      "emailUnverified": "请先在登录服务中验证邮箱。",
+      "retry": "请回到 Avibe 重试，或换一种登录方式。",
+      "accountConflictNext": "请回到 Avibe，换一种登录方式。",
+      "details": "详细信息",
+      "openApp": "打开 Avibe"
     }
   },
   "installHint": {
@@ -332,7 +350,7 @@
       "forgotTitle": "忘记密码了？",
       "forgotSubtitle": "邮件登录始终可用。",
       "account": "账号",
-      "signInNowTitle": "现在登录",
+      "signInNowTitle": "用验证码登录",
       "signInNowBody": "验证码会发到这个邮箱，在这里输入就能登录。",
       "newPasswordTitle": "设置新密码",
       "newPasswordBody": "在 Safari 中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。",
@@ -1096,7 +1114,7 @@
       "codexDescription": "OpenAI Agent · 通过 ChatGPT 登录或 OPENAI_API_KEY",
       "antigravityTitle": "Antigravity Provider",
       "antigravitySubtitle": "通过 Google 账号、Gemini Enterprise、Gemini API Key 或 Agent Platform 连接 Antigravity。",
-      "antigravityDescription": "Google Antigravity Agent · Google 登录、Gemini API Key 或 Agent Platform",
+      "antigravityDescription": "Google Antigravity Agent · Google 账号、Gemini Enterprise、Gemini API Key 或 Agent Platform",
       "antigravityMethodGoogle": "Google 账号",
       "antigravityMethodEnterprise": "Gemini Enterprise",
       "antigravityMethodApiKey": "Gemini API Key",
@@ -1105,7 +1123,6 @@
       "antigravityMethodEnterpriseCompact": "企业版",
       "antigravityMethodApiKeyCompact": "API Key",
       "antigravityMethodAgentPlatformCompact": "Agent Platform",
-      "antigravityPersonalNotice": "用个人 Google 账号登录时，Google 允许你本人指挥 Antigravity 工作。Google 说明这种登录不包含无人值守的运行和任务队列，例如定时任务、Watch，以及由别的 Agent 转交的工作。需要自动化时，请改用 API key 或 Agent Platform 登录，这两种按用量计费。",
       "antigravityOauthPersonalTitle": "使用 Google 账号登录",
       "antigravityOauthPersonalSubtitle": "在浏览器中打开登录链接并批准访问，然后将返回的授权码粘贴到这里。",
       "antigravityOauthPersonalSignedIn": "Antigravity 已通过 Google 账号登录。",
@@ -1120,7 +1137,7 @@
       "antigravitySignInButton": "登录 Antigravity",
       "antigravityCallbackCodeLabel": "授权码",
       "antigravityCallbackCodePlaceholder": "粘贴浏览器返回的授权码",
-      "antigravityCallbackCodeHint": "在浏览器中完成登录后，将返回的授权码粘贴到这里。",
+      "antigravityCallbackCodeHint": "在浏览器中完成登录后，将返回的授权码粘贴到这里。也可以直接粘贴授权后浏览器地址栏里的完整链接。",
       "antigravityApiKeyLabel": "Gemini API Key",
       "antigravityApiKeyPlaceholder": "AIza...",
       "antigravityApiKeyHint": "用于调用 Gemini Developer API。",

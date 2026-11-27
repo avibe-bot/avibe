@@ -362,6 +362,7 @@ export function AccountApp() {
     if (recoveryProtection.current) return;
     presentDesktopClient('account', undefined, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
   };
+  const signOut = () => { setView('sign-out'); leave('sign_out'); };
   const instances = () => {
     if (recoveryProtection.current) return;
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
@@ -401,7 +402,7 @@ export function AccountApp() {
   const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null} thisComputer={thisComputer}
     busy={busy} pendingId={failedPending ? null : state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
     failure={activeSelection?.error ? { instanceId: activeSelection.id, message: explainError(activeSelection.error) } : null}
-    onAccount={openAccount} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
+    onSignOut={signOut} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
     onLocal={() => leave('return_local')} onCancel={() => leave('cancel')} onRefresh={() => void act({ type: 'refresh_instances' })}
     onConsent={(approve) => void act({ type: 'decide_consent', approve })} consentError={state.consent ? errorMessage : null} />;
   const failure = errorMessage && (popover || view === 'updates' || view === 'setup-complete'
@@ -478,7 +479,7 @@ export function AccountApp() {
   } else if (view === 'profile' || view === 'account') {
     content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
       busy={busy} errorMessage={errorMessage} onBack={instances}
-      onSignOut={() => { setView('sign-out'); leave('sign_out'); }}>
+      onSignOut={signOut}>
       {/* ui/design: desktop/bind-home/account-*. The Account page keeps only the account: this
           computer shows only when bound, as one read-only line with its domain. Binding lives in
           Settings › Devices (the claim view). */}
