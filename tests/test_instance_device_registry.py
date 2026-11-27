@@ -142,8 +142,8 @@ def test_conflicting_sessions_are_unattributed_and_old_epochs_cannot_rebind(inst
     assert path_for(first) == path
     now[0] += 60
     assert nominate(second) == 0 and rv.is_admitted(peer)
-    rv.observe_path(peer, old, 2, 'open', path)
-    rv.observe_path(peer, 0, 3, 'open', path)
+    assert rv.observe_path(peer, old, 2, 'open', path) == 'unknown'
+    assert rv.observe_path(peer, 0, 3, 'open', path) == 'unknown'
     assert path_for(first) is None and path_for(second) is None
     # The second session renews while the key is still admitted, after the
     # first session's original deadline. A fresh connection gets that renewal's
@@ -157,7 +157,7 @@ def test_conflicting_sessions_are_unattributed_and_old_epochs_cannot_rebind(inst
     assert not rv.is_admitted(peer)
     new = nominate(second)
     assert new and new != old
-    rv.observe_path(peer, old, 4, 'open', path)
+    assert rv.observe_path(peer, old, 4, 'open', path) == 'unknown'
     assert path_for(second) is None
     rv.observe_path(peer, new, 5, 'open', path)
     assert path_for(first) is None and path_for(second) == path

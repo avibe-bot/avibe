@@ -610,6 +610,7 @@ class DirectTransportSupervisor:
                 any(not isinstance(row, dict) or set(row) != set(fields) or
                     not all(uint(row[k]) for k in fields) for row in rows)):
             raise _ProtocolError("invalid_path_report")
+        client = "unknown"  # V1 has no attributed session.
         if self._device_reports:
             selected, scope, rtt = msg["selected"], msg["scope"], msg["rtt_ms"]
             ip = selected in ("ipv4", "ipv6")
@@ -620,7 +621,7 @@ class DirectTransportSupervisor:
                 "kind": ("lan" if scope == "local" else "punched") if ip else "relay",
                 "family": selected if ip else None, "rtt_ms": rtt,
             }
-            self._rendezvous.observe_path(msg["peer"], msg["epoch"], msg["ordinal"], msg["phase"], path)
+            client = self._rendezvous.observe_path(msg["peer"], msg["epoch"], msg["ordinal"], msg["phase"], path)
         now = asyncio.get_running_loop().time()
         if now >= self._report_window:
             self._report_window = now + 60
@@ -643,9 +644,9 @@ class DirectTransportSupervisor:
         # from a sidecar that does not say. Never the address.
         scope = msg.get("scope") if self._device_reports else None
         # Construct the logged values exclusively from the fixed schema above.
-        logger.info("direct path connection=%d phase=%s selected=%s scope=%s partial=%s suppressed=%d %s",
+        logger.info("direct path connection=%d phase=%s selected=%s scope=%s partial=%s suppressed=%d client=%s %s",
                     msg["ordinal"], msg["phase"], msg["selected"], scope or "none", msg["partial"],
-                    self._report_skipped,
+                    self._report_skipped, client,
                     " ".join(f"{family}.{k}={row[k]}" for family, row in
                              zip(("relay", "ipv4", "ipv6", "unknown"), rows) for k in fields))
         self._report_skipped = 0
