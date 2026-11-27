@@ -159,6 +159,7 @@ import { ChatPageSkeleton, TranscriptSkeleton } from './ChatTranscriptSkeleton';
 import { Skeleton } from '../ui/skeleton';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
 import {
+  clientMessageIdOf,
   clientMessageMetadata,
   newClientMessageId,
   STEERING_STATES,
@@ -167,6 +168,14 @@ import {
   usePendingSends,
 } from './usePendingSends';
 import type { ChatSnapshot } from '../../lib/chatSnapshots';
+import {
+  claimUnacknowledgedSends,
+  forgetUnacknowledgedSend,
+  rememberSend,
+  settleSend,
+  unacknowledgedSends,
+  type UnacknowledgedSend,
+} from '../../lib/unacknowledgedSends';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -310,6 +319,12 @@ const sessionUnavailable = (error: unknown): boolean => {
 
 // One older page: ``loadOlderMessages`` asks for this many rows.
 const OLDER_PAGE_SIZE = 50;
+// Restoring an unanswered send (lib/unacknowledgedSends): how far older history is
+// read for one the instance may hold, and how soon a refused restore is tried again.
+const RESTORE_MAX_OLDER_PAGES = 10;
+const RESTORE_CLOCK_SKEW_MS = 15 * 60_000;
+const RESTORE_RETRY_MS = 1_000;
+const RESTORE_RETRY_MAX_MS = 60_000;
 // Wheel events have no gesture-end event; an idle gap ends a momentum burst.
 const PAGING_WHEEL_IDLE_MS = 200;
 
@@ -354,6 +369,7 @@ export const ChatPage: React.FC = () => {
   const {
     capabilities,
     readerPrincipal,
+    provisional: readerProvisional,
   } = useInstanceAuthorization();
   // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
   // Bot, and the Session cannot be archived or renamed. The id namespace says so
@@ -1827,6 +1843,176 @@ export const ChatPage: React.FC = () => {
     };
   }, [sessionId, api]);
 
+  // Sends an earlier page never saw answered (lib/unacknowledgedSends). Once this
+  // chat's first live read shows what the instance holds, a message it received
+  // (its client id on a transcript or queue row) is left alone, and one it did not
+  // goes back into the composer as a draft, never sent again by itself. Should the
+  // conversation show a restored one after all (the instance took that send after
+  // this read), the composer gives it back up unless the reader has changed it.
+  type RestorePass = {
+    sessionId: string;
+    /** Restored here, until the conversation shows them or the page moves on. */
+    sends: Map<string, UnacknowledgedSend>;
+    running: boolean;
+    /** The composer refused one (busy sending, voice owns the draft), or the page
+     *  moved on meanwhile: try again shortly, or on the next change. */
+    retry: boolean;
+    /** Sends already looked for through older history and not found there: a
+     *  retry reads only the instance's latest rows and queue for them. */
+    unheld: Set<string>;
+    /** Restored sends the live stream has brought since, drawn or not (an older stretch on screen draws none). */
+    streamed: Set<string>;
+    /** The one scheduled retry, and how many reads in a row have failed (its backoff). */
+    timer: number | null;
+    failures: number;
+  };
+  const restorePassRef = useRef<RestorePass | null>(null);
+  const [restoreRetry, setRestoreRetry] = useState(0);
+  // What the transcript and the queue last showed, by client id: a pass reads it
+  // after its asynchronous checks, and every later change runs this effect again.
+  const heldClientIdsRef = useRef<{ sessionId: string; ids: Set<string> } | null>(null);
+  // The reader as the page last committed it, for a pass that resumes after its check.
+  const restoreReaderRef = useRef({ principal: readerPrincipal ?? null, provisional: readerProvisional });
+  useEffect(() => {
+    restoreReaderRef.current = { principal: readerPrincipal ?? null, provisional: readerProvisional };
+    if (!sessionId || hydratedTranscriptSessionId !== sessionId || !writable) return;
+    const held = new Set<string>();
+    for (const row of [...messages, ...queue]) {
+      const clientId = clientMessageIdOf(row);
+      if (clientId) held.add(clientId);
+    }
+    heldClientIdsRef.current = { sessionId, ids: held };
+    if (!composerRef.current) return;
+    let pass = restorePassRef.current;
+    if (pass?.sessionId === sessionId) {
+      for (const clientId of pass.streamed) held.add(clientId);
+      for (const [clientId, send] of pass.sends) {
+        if (!held.has(clientId)) continue;
+        // Voice owning the draft, say: look again once it is free.
+        if (!composerRef.current.canRestoreUnsent()) {
+          const waiting = pass;
+          if (waiting.timer === null) {
+            waiting.timer = window.setTimeout(() => {
+              waiting.timer = null;
+              setRestoreRetry((n) => n + 1);
+            }, RESTORE_RETRY_MS);
+          }
+          continue;
+        }
+        pass.sends.delete(clientId);
+        pass.streamed.delete(clientId);
+        composerRef.current.withdrawUnsent(send);
+      }
+      if (!pass.retry || pass.running) return;
+    }
+    // Records are kept per reader, and only a reader the instance has confirmed
+    // may get one back: a replayed boot session may name the last one.
+    const principal = readerPrincipal ?? null;
+    if (!principal || readerProvisional) return;
+    if (pass?.sessionId !== sessionId) {
+      if (pass?.timer != null) window.clearTimeout(pass.timer);
+      pass = { sessionId, sends: new Map(), streamed: new Set(), running: false, retry: false, unheld: new Set(), timer: null, failures: 0 };
+      restorePassRef.current = pass;
+    }
+    const current = pass;
+    current.running = true;
+    current.retry = false;
+    // The page may have moved to another chat or reader during a check.
+    const stale = () => {
+      const reader = restoreReaderRef.current;
+      return restorePassRef.current !== current || !composerRef.current
+        || heldClientIdsRef.current?.sessionId !== sessionId || sessionIdRef.current !== sessionId
+        || reader.principal !== principal || reader.provisional;
+    };
+    // One timer per pass; after failed reads it waits longer each time.
+    const tryAgain = () => {
+      if (restorePassRef.current !== current) return;
+      current.retry = true;
+      if (current.timer !== null) return;
+      const delay = Math.min(RESTORE_RETRY_MS * 2 ** current.failures, RESTORE_RETRY_MAX_MS);
+      current.timer = window.setTimeout(() => {
+        current.timer = null;
+        setRestoreRetry((n) => n + 1);
+      }, delay);
+    };
+    void (async () => {
+      try {
+        const unsent = (await unacknowledgedSends(sessionId)).filter((send) => {
+          if (send.principal === principal) return true;
+          // Another reader's never comes back.
+          forgetUnacknowledgedSend(sessionId, send.clientId);
+          return false;
+        });
+        if (unsent.length === 0) return;
+        if (stale()) return tryAgain();
+        // While the composer cannot take a message (voice owns the draft), wait for
+        // it here, without asking the instance anything.
+        if (!composerRef.current!.canRestoreUnsent()) return tryAgain();
+        // Whether the instance holds a send is read from the instance, not from the
+        // window on screen (a deep link may show an older stretch): its latest rows
+        // and queue, every pass, then older pages back to a little before the oldest
+        // send (the device's clock may differ from the instance's), once per send.
+        const shown = new Set(heldClientIdsRef.current!.ids);
+        const unmatched = unsent.filter((send) => !shown.has(send.clientId));
+        const unread = unmatched.filter((send) => !current.unheld.has(send.clientId));
+        if (unmatched.length > 0) {
+          const note = (rows: WorkbenchMessage[]) => {
+            for (const row of rows) {
+              const clientId = clientMessageIdOf(row);
+              if (clientId) shown.add(clientId);
+            }
+          };
+          const [tail, queued] = await Promise.all([
+            api.listSessionMessages(sessionId, { tail: true, limit: OLDER_PAGE_SIZE, cache: false }),
+            api.listSessionQueue(sessionId, { cache: false }),
+          ]);
+          if (stale()) return tryAgain();
+          note(tail.messages);
+          note(queued.queued ?? []);
+          const since = Math.min(...unread.map((send) => send.sentAt)) - RESTORE_CLOCK_SKEW_MS;
+          let cursor = unread.length > 0 ? tail.next_before_id ?? null : null;
+          let oldest = tail.messages[0];
+          for (let page = 0; cursor && page < RESTORE_MAX_OLDER_PAGES; page += 1) {
+            if (unread.every((send) => shown.has(send.clientId))) break;
+            if (!oldest || Date.parse(oldest.created_at) < since) break;
+            const older = await api.listSessionMessages(sessionId, { beforeId: cursor, limit: OLDER_PAGE_SIZE, cache: false });
+            if (stale()) return tryAgain();
+            note(older.messages);
+            cursor = older.next_before_id ?? null;
+            oldest = older.messages[0];
+          }
+          current.failures = 0;
+          for (const send of unread) if (!shown.has(send.clientId)) current.unheld.add(send.clientId);
+        }
+        // Given back by one page only: other tabs may be deciding on the same records.
+        const checked = new Map(unsent.map((send) => [send.clientId, send]));
+        await claimUnacknowledgedSends(sessionId, (stored) => {
+          const send = checked.get(stored.clientId);
+          if (!send) return false;
+          for (const id of heldClientIdsRef.current?.ids ?? []) shown.add(id);
+          // One the instance holds is already in the conversation.
+          if (shown.has(send.clientId)) return true;
+          if (stale()) {
+            tryAgain();
+            return false;
+          }
+          if (!composerRef.current!.restoreUnsent(stored)) {
+            tryAgain();
+            return false;
+          }
+          current.sends.set(stored.clientId, stored);
+          return true;
+        });
+      } catch {
+        // The instance could not be read: whether it holds the send is not known yet.
+        current.failures += 1;
+        tryAgain();
+      } finally {
+        current.running = false;
+      }
+    })();
+  }, [sessionId, hydratedTranscriptSessionId, writable, messages, queue, readerPrincipal, readerProvisional, restoreRetry, api]);
+
   // The fire-and-forget turn survives browser disconnects, so a freshly loaded /
   // reconnected page asks the controller whether a turn is still in flight and
   // restores the working/Stop state to match (Codex P2). Authoritative in BOTH
@@ -2216,6 +2402,14 @@ export const ChatPage: React.FC = () => {
           return;
         }
         if (!isTranscriptMessage(msg)) return;
+        // A send this page gave back as a draft is recognised wherever the reader
+        // is in the transcript, so the draft can be taken back.
+        const streamedClientId = clientMessageIdOf(msg);
+        const restoring = restorePassRef.current;
+        if (streamedClientId && restoring?.sessionId === msg.session_id && restoring.sends.has(streamedClientId)) {
+          restoring.streamed.add(streamedClientId);
+          setRestoreRetry((n) => n + 1);
+        }
         if (historicalWindowRef.current) return;
         // Reader scrolled up in an already-capped window: don't grow the DOM with a
         // live row they aren't looking at — detach the live tail so jump-to-latest
@@ -2383,6 +2577,7 @@ export const ChatPage: React.FC = () => {
       attachments?: ComposerAttachment[],
       metadata?: Record<string, unknown>,
       references?: MentionReference[],
+      { fromComposer = false }: { fromComposer?: boolean } = {},
     ) => {
       if (!writable) return false;
       // NB: no ``working`` guard — sending WHILE a turn runs is the queue
@@ -2423,6 +2618,28 @@ export const ChatPage: React.FC = () => {
       const clientId = newClientMessageId();
       const sentMetadata = { ...metadata, ...clientMessageMetadata(clientId) };
       const sentAt = new Date().toISOString();
+      // The composer emptied in this same task: until the answer settles this send,
+      // its words stay on the device, so a page torn down meanwhile can give them
+      // back (lib/unacknowledgedSends).
+      // A spoken message is kept by its voice take until it lands (lib/voiceTakeStore).
+      const keepUntilAnswered = fromComposer && metadata?.input !== 'voice';
+      if (keepUntilAnswered) {
+        rememberSend({
+          sessionId,
+          clientId,
+          text,
+          attachments: ready.map((a) => ({
+            token: a.token,
+            name: a.name,
+            mime: a.mime,
+            size: a.size,
+            kind: a.kind,
+            url: a.url,
+            ...(a.width !== undefined ? { width: a.width } : {}),
+            ...(a.height !== undefined ? { height: a.height } : {}),
+          })),
+        });
+      }
       // The row is drawn once, where the send goes (owner, 2026-11-12): it must
       // not appear in one place and then jump to the other.
       //  * A quick reply keeps its place under the question it answers.
@@ -2623,6 +2840,8 @@ export const ChatPage: React.FC = () => {
         // Every outcome ends the pending row, in the same render as the row that
         // replaces it (or the error and restored draft that withdraw it).
         if (!settledLater) settlePendingSend(clientId);
+        // Answered either way: the instance holds it, or the composer gets it back.
+        if (keepUntilAnswered) settleSend(sessionId, clientId);
       }
     },
     [
@@ -3739,7 +3958,7 @@ export const ChatPage: React.FC = () => {
           key={sessionId}
           composerRef={composerRef}
           readVoiceContext={readVoiceContext}
-          onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references)}
+          onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references, { fromComposer: true })}
           onStop={stopMessage}
           busy={working}
           sessionId={sessionId ?? ''}

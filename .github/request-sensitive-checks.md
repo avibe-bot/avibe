@@ -1,1 +1,1 @@
-Run the browser lanes: this PR fixes the project-order, home-media and session-dot fixtures (ui/e2e/*/fixture.tsx) that only they execute, and master's red lanes 2 and 3 skipped the suites after them.
+Run ui-browser-checks and ios-shell: this PR changes what the chat composer keeps when the page is torn down before a send is answered (the iPhone App case); the new browser spec and the App shell exercise it.
