@@ -189,23 +189,39 @@ def enumerate_tests(common, target, temp):
             ]
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
             print(proc.stdout, end="", flush=True)
-            diagnostic = proc.stdout
-            try:
-                report = json.loads(catalog.read_text()) if catalog.is_file() else None
-                if isinstance(report, dict) and isinstance(report.get("errors"), list):
-                    diagnostic += "\n" + json.dumps(report["errors"], ensure_ascii=False)
+            # A catalog with entries must stand on its own. Never turn an
+            # identity/schema/configuration failure into an infrastructure retry.
+            report = json.loads(catalog.read_text()) if catalog.is_file() else None
+            errors = report.get("errors") if isinstance(report, dict) else None
+            if errors:
+                print(
+                    f"{target} enumeration attempt {attempt}: catalog errors: {json.dumps(errors)[:1200]}", flush=True
+                )
+            if catalog.is_file() and not (isinstance(report, dict) and isinstance(errors, list)):
+                raise ValueError(f"{target} enumeration attempt {attempt}: malformed catalog")
+            values = report.get("values", []) if report is not None else []
+            if values != []:
+                result = enumeration(report, target)
                 proc.check_returncode()
-                if not isinstance(report, dict):
-                    raise ValueError("Missing or invalid XCTest enumeration catalog")
-                return enumeration(report, target)
-            except (ValueError, subprocess.CalledProcessError):
-                signature = ENUM_HOST_DEATH.search(diagnostic)
-                if attempt != 1 or not signature:
-                    raise
-                note = f"{target}: enumeration host failure ({signature[0]}); retrying enumeration once before tests."
-                print(note, flush=True)
-                with (temp / "native-enumeration-retry.txt").open("a") as evidence:
-                    print(note, file=evidence)
+                return result
+
+            # No catalog, or explicitly no values: only known discovery errors
+            # are compatible with a host crash. A separate error vetoes recovery.
+            diagnostic = proc.stdout
+            for error in errors or []:
+                if not isinstance(error, str) or not (
+                    ENUM_HOST_DEATH.fullmatch(error.strip().rstrip(".")) or error == "Unable to enumerate"
+                ):
+                    raise ValueError(f"{target} enumeration attempt {attempt}: unclassified catalog error")
+                diagnostic += "\n" + error
+            signature = ENUM_HOST_DEATH.search(diagnostic)
+            if attempt == 2 or not signature:
+                proc.check_returncode()
+                raise ValueError(f"{target} enumeration attempt {attempt}: no valid catalog")
+            note = f'{target}: enumeration host failure ({signature[0]}); retrying enumeration once before tests.'
+            print(note, flush=True)
+            with (temp / 'native-enumeration-retry.txt').open('a') as evidence:
+                print(note, file=evidence)
 
 
 def selection(target, sources, enabled, disabled):

@@ -201,9 +201,13 @@ def test_unresolved_extension_cannot_hide_behind_known_class(tmp_path, swift_par
         ("unrelated-mach", 1, False),
         ("bad-identity", 1, False),
         ("nonzero", 1, False),
+        ("wrong-bundle-with-mach", 1, False),
+        ("scheme-with-mach", 1, False),
+        ("mixed-errors", 1, False),
+        ("scheme-second", 2, False),
     ],
 )
-def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypatch, mode, calls, passes):
+def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypatch, capsys, mode, calls, passes):
     catalog = {"errors": [], "values": [{"enabledTests": [{"identifier": PHONE + "()"}], "disabledTests": []}]}
     mach = "IDELaunchReport: Launching AvibeTests Finished with error: Mach error -308 - (ipc/mig) server died"
     seen = []
@@ -223,7 +227,7 @@ def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypat
         assert path not in seen and not path.exists()
         seen.append(path)
         rc, output, data = 0, "", catalog
-        if mode == "twice" or (len(seen) == 1 and mode in ("mach", "missing-second")):
+        if mode == "twice" or (len(seen) == 1 and mode in ("mach", "missing-second", "scheme-second")):
             data, output = {"errors": ["Unable to enumerate"], "values": []}, mach
         elif mode == "runner-exit" and len(seen) == 1:
             data, rc = {"errors": ["Test runner exited unexpectedly"], "values": []}, 65
@@ -236,6 +240,19 @@ def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypat
                 "errors": [],
                 "values": [{"enabledTests": [{"identifier": "lost connection to test runner"}], "disabledTests": []}],
             }
+        elif mode == "wrong-bundle-with-mach":
+            data, output = (
+                {
+                    "errors": [],
+                    "values": [{"enabledTests": [{"identifier": "OtherTests/Phone/testX()"}], "disabledTests": []}],
+                },
+                mach,
+            )
+        elif mode in ("scheme-with-mach", "scheme-second", "mixed-errors"):
+            reasons = ["Scheme does not support the test action"]
+            if mode == "mixed-errors":
+                reasons.insert(0, "Test host crashed")
+            data, output = {"errors": reasons, "values": []}, ("" if mode == "scheme-second" else mach)
         elif mode == "nonzero":
             rc = 65
         if data is not None:
@@ -249,6 +266,10 @@ def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypat
         with pytest.raises((ValueError, subprocess.CalledProcessError)):
             enumerate_tests(["xcodebuild"], TARGET, tmp_path)
     assert len(seen) == calls
+    if mode in ("scheme-with-mach", "scheme-second", "mixed-errors"):
+        log = capsys.readouterr().out
+        assert f"{TARGET} enumeration attempt {calls}: catalog errors:" in log
+        assert "Scheme does not support the test action" in log
     assert (tmp_path / "native-enumeration-retry.txt").exists() == (calls == 2)
 
 
