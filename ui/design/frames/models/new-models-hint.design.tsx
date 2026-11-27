@@ -1,4 +1,5 @@
-// New models you can add, offered only where the user already chooses a model (owner, 2026-11-27).
+// New models you can add, offered only where the user already chooses a model (owner, 2026-11-27; frames
+// approved 2026-11-27 22:21: one new model named in the row with 「添加」, and 「添加」 also switches the Session).
 //
 // A model is offered when the user's own Source lists it, it is that vendor's own chat model, and the
 // Vibey menu does not hold it yet. Vibey's Session model menu then ends its list with one quiet row:
@@ -72,9 +73,9 @@ const states: Record<string, MenuState & { title: string; hover?: string; click?
 const menuFrames: FrameSpec[] = Object.entries(states).flatMap(([name, state]) => {
   const render = () => <ModelMenuDraft models={state.models} current={state.current} effort="high" hint={state.hint} />;
   return [
-    { name, title: `Vibey 模型菜单 · ${state.title}`, width: 1000, height: 760, status: 'proposed' as const, hover: state.hover, click: state.click, render },
+    { name, title: `Vibey 模型菜单 · ${state.title}`, width: 1000, height: 760, status: 'approved' as const, hover: state.hover, click: state.click, render },
     // A phone has no hover: × is a plain control there, so the close state is the row as drawn.
-    ...(state.hover ? [] : [{ name: `${name}-phone`, title: `Vibey 模型菜单 · ${state.title} · 手机`, width: 390, height: 844, status: 'proposed' as const, click: state.click, render }]),
+    ...(state.hover ? [] : [{ name: `${name}-phone`, title: `Vibey 模型菜单 · ${state.title} · 手机`, width: 390, height: 844, status: 'approved' as const, click: state.click, render }]),
   ];
 });
 
@@ -98,8 +99,8 @@ const settingsRender = () => <AddModelsDraft fresh={fresh} providers={providers}
 
 const designFrames = frames([
   ...menuFrames,
-  { name: 'settings-add', title: '设置 › 模型 › 添加 Vibey 模型：新模型排在最前', width: 1000, height: 820, status: 'proposed', render: settingsRender },
-  { name: 'settings-add-phone', title: '设置 › 模型 › 添加 Vibey 模型：新模型排在最前 · 手机', width: 390, height: 844, status: 'proposed', render: settingsRender },
+  { name: 'settings-add', title: '设置 › 模型 › 添加 Vibey 模型：新模型排在最前', width: 1000, height: 820, status: 'approved', render: settingsRender },
+  { name: 'settings-add-phone', title: '设置 › 模型 › 添加 Vibey 模型：新模型排在最前 · 手机', width: 390, height: 844, status: 'approved', render: settingsRender },
 ]);
 
 export default designFrames;
