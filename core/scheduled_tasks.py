@@ -120,6 +120,7 @@ from storage.background import (
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
+    TASK_PAUSED_AFTER_CONSUMPTION,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
@@ -133,6 +134,7 @@ from storage.background import (
     notice_write_expectation,
     owed_notice_eligible,
     require_task_resumable,
+    task_resume_block,
     resolve_run_at,
     task_schedule_generation,
 )
@@ -1817,6 +1819,8 @@ class ScheduledTaskStore:
             )
         expect = self._read_state(task)
         task.enabled = enabled
+        if not enabled and task.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            task.metadata[TASK_PAUSED_AFTER_CONSUMPTION] = "paused"
         task.updated_at = _utc_now_iso()
         if not self._write_task(task, expect):
             # A pause/resume that lost to a teardown must not be reported as applied:
@@ -1890,6 +1894,12 @@ class ScheduledTaskStore:
         # payload still belongs to the caller's original read, not this newer row.
         expect = expected_state or self._read_state(task)
         previous_schedule = (task.schedule_type, task.run_at, task.timezone)
+        consumed_only = (
+            task.schedule_type == "at" and not task.enabled and task.retired_at
+            and task.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED
+            and not task.metadata.get(TASK_PAUSED_AFTER_CONSUMPTION)
+            and not task_resume_block(task.metadata, task.session_id)
+        )
         task.name = name
         task.session_key = session_key
         task.session_id = session_id
@@ -1908,7 +1918,12 @@ class ScheduledTaskStore:
         task.timezone = timezone_name
         # Changing a one-shot schedule creates a new lifecycle. The previous
         # terminal fact remains in Run history but cannot own the new instant.
-        if (schedule_type, run_at, timezone_name) != previous_schedule:
+        schedule_changed = (schedule_type, run_at, timezone_name) != previous_schedule
+        if schedule_changed:
+            if consumed_only and (schedule_type, run_at) != previous_schedule[:2] and compute_next_run_at(
+                enabled=True, schedule_type=schedule_type, cron=cron, run_at=run_at, timezone_name=timezone_name,
+            ):
+                task.enabled = True
             task.retired_at = None
             task.retirement_reason = None
             task.last_run_id = None
@@ -1922,6 +1937,8 @@ class ScheduledTaskStore:
             metadata if metadata is not None else task.metadata,
             user_context,
         )
+        if schedule_changed:
+            task.metadata.pop(TASK_PAUSED_AFTER_CONSUMPTION, None)
         task.updated_at = _utc_now_iso()
         if not self._write_task(
             task,
@@ -2231,7 +2248,7 @@ class ScheduledTaskStore:
         # the user replaces and resumes that schedule must not disable the new
         # lifecycle. The legacy file backend has no atomic enqueue boundary, so
         # it retains its result-time transition for compatibility.
-        if disable_one_shot and task.schedule_type == "at" and self._sqlite is None:
+        if disable_one_shot and task.enabled and task.schedule_type == "at" and self._sqlite is None:
             task.enabled = False
             if task.retired_at is None:
                 task.retired_at = _utc_now_iso()
@@ -2262,6 +2279,8 @@ class ScheduledTaskStore:
             return False
         expect = self._read_state(task)
         task.enabled = False
+        if task.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            task.metadata[TASK_PAUSED_AFTER_CONSUMPTION] = "paused"
         task.last_run_at = _utc_now_iso()
         task.last_error = error
         task.updated_at = _utc_now_iso()

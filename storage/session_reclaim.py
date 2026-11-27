@@ -320,6 +320,8 @@ def reclaim_bound_definitions(
     from storage.background import (
         ORPHANED_TASK_OWNER_METADATA_KEY,
         TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        TASK_PAUSED_AFTER_CONSUMPTION,
+        TASK_RETIREMENT_SCHEDULE_CONSUMED,
         definition_owner_session_id,
         scheduled_definition_reclaimable_by_session_expression,
     )
@@ -341,6 +343,7 @@ def reclaim_bound_definitions(
                 run_definitions.c.id,
                 run_definitions.c.definition_type,
                 run_definitions.c.enabled,
+                run_definitions.c.retirement_reason,
                 run_definitions.c.session_id,
                 run_definitions.c.metadata_json,
             )
@@ -381,6 +384,9 @@ def reclaim_bound_definitions(
                 "reason_code": TASK_OWNER_UNAVAILABLE_REASON_CODE,
                 "owner_session_id": sid,
             }
+            metadata_changed = True
+        if mode == RECLAIM_PAUSE and row["retirement_reason"] == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            metadata[TASK_PAUSED_AFTER_CONSUMPTION] = "paused"
             metadata_changed = True
         if metadata_changed:
             values["metadata_json"] = _dump_json(metadata)

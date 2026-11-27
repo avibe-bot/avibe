@@ -143,6 +143,56 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
     assert saved.retirement_reason == "schedule_missed"
 
 
+@pytest.mark.parametrize(("state", "flag", "value", "armed"), [
+    ("fired", "--at", "2090-01-01T00:00:00Z", True),
+    ("fired", "--cron", "0 9 * * *", True),
+    ("paused", "--at", "2090-01-01T00:00:00Z", False),
+    ("fired_then_paused", "--at", "2090-01-01T00:00:00Z", False),
+    ("fired_then_ui_paused", "--at", "2090-01-01T00:00:00Z", False),
+    ("cron", "--cron", "0 9 * * *", True),
+    ("paused_cron", "--cron", "0 9 * * *", False),
+    ("fired", "--name", "renamed", False),
+    ("fired", "--at", "2000-01-01T00:00:00Z", False),
+])
+def test_task_update_arm_state(state, flag, value, armed, capsys):
+    store = scheduled_tasks.ScheduledTaskStore()
+    recurring = state.endswith("cron")
+    task = store.add_task(session_key="", prompt="", shell_command="true", timezone_name="UTC",
+                          schedule_type="cron" if recurring else "at", cron="0 * * * *" if recurring else None,
+                          run_at=None if recurring else "2001-01-01T00:00:00+00:00")
+    if state.startswith("fired"):
+        assert scheduled_tasks.TaskExecutionStore().enqueue_task_run(
+            task.id, source_kind="scheduler", task=task, expected_run_at=task.run_at,
+            expected_timezone=task.timezone, expected_job_id="old-generation",
+        )
+        store.load()
+    if state.endswith("ui_paused"):
+        assert store.sqlite_backend.set_definition_enabled(task.id, False, definition_type="scheduled")
+    elif "paused" in state:
+        store.set_enabled(task.id, False)
+    args = cli.build_parser().parse_args(["task", "update", task.id, flag, value])
+    if value.startswith("2000-"):
+        status, error = _capture_stderr_json(cli.cmd_task_update, args)
+        assert status == 1 and error["code"] == "invalid_run_at"
+        assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).run_at == task.run_at
+        return
+    assert cli.cmd_task_update(args) == 0
+    row = json.loads(capsys.readouterr().out)["definition"]
+    assert row["enabled"] is armed
+    assert (row["next_run_at"] is not None) is armed
+    assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).enabled is armed
+    if flag == "--at" and armed:
+        assert row["next_run_at"] == "2090-01-01T00:00:00+00:00"
+    if "paused" in state:
+        assert row["hint"] == f"paused; run `vibe task resume {task.id}` to arm it"
+        assert cli.cmd_task_show(task.id) == 0
+        shown = json.loads(capsys.readouterr().out)["definition"]
+        assert shown["enabled"] is False and shown["next_run_at"] is None
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
+        listed = next(item for item in json.loads(capsys.readouterr().out)["definitions"] if item["id"] == task.id)
+        assert listed["enabled"] is False and listed["next_run_at"] is None
+
+
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = vibe_agents.VibeAgentStore(db_path)
@@ -1150,7 +1200,8 @@ def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> N
     assert rows[unnamed.id]["message_preview"] == "Share the nightly summary."
     assert rows[paused.id]["lifecycle_state"] == "paused"
     assert rows[paused.id]["last_error"] == "delivery failed"
-    assert "next_run_at" not in rows[paused.id]
+    assert rows[paused.id]["enabled"] is False
+    assert rows[paused.id]["next_run_at"] is None
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:

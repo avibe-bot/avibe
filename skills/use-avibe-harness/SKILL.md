@@ -47,6 +47,7 @@ Dispatch inputs name how to report. A silent dispatched Turn gets one read recei
 Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions; it does not change delivery. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
 ### Tasks and Watches
+To reschedule a fired one-shot, use `vibe task update <id> --at <future>` or `--cron <expression>`. Check `enabled` and `next_run_at`: an explicit pause survives the edit.
 Tasks and Watches default to this Session. Use named cron weekdays (`mon-fri`), not numbers. Recurring commands report the second matching failure once to `--session-id` or the creating Session; without one, they send a notice. Success resets the count. One-shots report immediately. `--on-failure agent` or `none` reports every failure.
 
 Watch waiter contract: exit `0` only for one new reportable event, a retry code (default `75`) while still waiting, and `64` with `avibe-watch: no-event` on stderr for a quiet cycle with no Agent Run, which retires a once Watch and re-arms a forever one. A forever Watch needs a durable cursor, state transition, or cooldown so a condition that persists is not reported again; Avibe pauses a Watch that reports six events within 60 seconds.

@@ -1321,6 +1321,7 @@ def _task_update_examples_text() -> str:
         """\
         Unspecified fields keep their values. A message task cannot become a command task, or
           the reverse, and --on-failure cannot change: remove the task and add a new one.
+        A new future --at or --cron re-arms a consumed one-shot. Paused tasks stay paused.
         Write cron weekdays as names (mon ... sun); numbers are rejected.
 
         Examples:
@@ -2823,8 +2824,12 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
     """
 
     kind = _task_kind(task)
+    disarmed = (
+        {"enabled": False, "next_run_at": None}
+        if task.get("enabled") is False and task.get("lifecycle_state") != "removed" else {}
+    )
     if not brief:
-        return _definition_detail_payload(task, kind=kind, on_failure=_task_on_failure(task))
+        return _definition_detail_payload(task, kind=kind, on_failure=_task_on_failure(task)) | disarmed
     name = task.get("name")
     # An unnamed task is labelled by what it does.
     preview = {}
@@ -2857,7 +2862,7 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
             **({} if task.get("lifecycle_state") == "removed" else _definition_health_fields(task)),
             "resume_blocked": task.get("resume_blocked"),
         }
-    )
+    ) | disarmed
 
 
 def _task_fallback_projection(task) -> dict:
@@ -2979,6 +2984,14 @@ def _task_mutation_payload(task, reader: SQLiteBackgroundTaskStore | None = None
     if projected is None:
         projected = _task_fallback_projection(task)
     return _task_projection_payload(projected)
+
+
+def _task_update_payload(task, reader) -> dict:
+    payload = _task_mutation_payload(task, reader)
+    payload.setdefault("next_run_at", None)
+    if not payload["enabled"] and not payload.get("resume_blocked") and not payload.get("retired_at"):
+        payload["hint"] = f"paused; run `vibe task resume {task.id}` to arm it"
+    return payload
 
 
 def _task_request_store(*, read_only: bool = False) -> TaskExecutionStore:
@@ -5096,6 +5109,8 @@ def _resolve_definition_schedule_update(
                 help_command=help_command,
                 details={"at": args.at, "timezone": timezone_name},
             ) from exc
+        if datetime.fromisoformat(run_at) <= datetime.now(timezone):
+            raise TaskCliError("--at must be in the future", code="invalid_run_at", help_command=help_command)
         return "at", None, run_at, timezone_name
     return task.schedule_type, task.cron, task.run_at, timezone_name
 
@@ -5219,7 +5234,7 @@ def _task_update_pure_command(args, store, task, invocation: _ServiceInvocation,
         update_command_fields=True,
         metadata=metadata,
     )
-    return _definition_payload(_task_mutation_payload(updated, invocation.stores.definition_reader))
+    return _definition_payload(_task_update_payload(updated, invocation.stores.definition_reader))
 
 
 def cmd_task_update(args):
@@ -5695,7 +5710,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_mutation_payload(updated, stores.definition_reader)
+        task_payload = _task_update_payload(updated, stores.definition_reader)
         return _definition_payload(task_payload, warnings=warnings)
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
