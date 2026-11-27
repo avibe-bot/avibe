@@ -73,22 +73,12 @@ def test_catalog_row_outranks_user_and_drops_its_client_presets() -> None:
 
 @pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
 def test_codex_only_ultra_does_not_become_an_api_reasoning_tier(
-    monkeypatch: pytest.MonkeyPatch,
     protocol: str,
 ) -> None:
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache",
-        lambda: [{
-            "id": "gpt-6.1-sol",
-            "visibility": "list",
-            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
-        }],
-    )
     native = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
-    api = resolve_reasoning_tiers(protocol=protocol, model_id="gpt-6.1-sol")
+    api = resolve_reasoning_tiers(protocol=protocol, model_id="gpt-6.2-sol")
 
-    assert [option["value"] for option in native["reasoning_options"]["gpt-6.1-sol"]] == [
+    assert [option["value"] for option in native["reasoning_options"]["gpt-6.2-sol"]] == [
         "__default__", "low", "medium", "high", "xhigh", "max", "ultra",
     ]
     assert api.efforts == ("low", "medium", "high", "xhigh", "max")

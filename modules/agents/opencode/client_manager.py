@@ -137,6 +137,13 @@ def _user_config_digest(path: Path) -> Optional[str]:
     return _digest(payload)
 
 
+def _stable_auth_entry(entry):
+    """Ignore only the fields rewritten by a token refresh, not the account."""
+    if isinstance(entry, dict) and entry.get("type") == "oauth":
+        return {key: value for key, value in entry.items() if key not in _VOLATILE_OAUTH_FIELDS}
+    return entry
+
+
 def _credential_digest(path: Path) -> Optional[str]:
     raw = _file_bytes(path)
     if raw is None:
@@ -147,15 +154,7 @@ def _credential_digest(path: Path) -> Optional[str]:
         return hashlib.sha256(raw).hexdigest()
     if not isinstance(entries, dict):
         return hashlib.sha256(raw).hexdigest()
-    normalized = {
-        provider_id: (
-            {key: value for key, value in entry.items() if key not in _VOLATILE_OAUTH_FIELDS}
-            if isinstance(entry, dict) and entry.get("type") == "oauth"
-            else entry
-        )
-        for provider_id, entry in entries.items()
-    }
-    return _digest(normalized)
+    return _digest({provider_id: _stable_auth_entry(entry) for provider_id, entry in entries.items()})
 
 
 @dataclass(frozen=True, eq=False)

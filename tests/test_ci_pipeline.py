@@ -969,7 +969,7 @@ _BROWSER_COMMANDS = (
     "run test:badge-triggers",
     "run test:address-retired",
     "run test:workbench-general-build -- composer-mention-picker.spec.ts inbox-skeleton-loading.spec.ts",
-    "run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts",
+    "run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts unacknowledged-send.spec.ts",
     "run test:safe-browser",
     "run test:show-system-entry",
     "run test:pet-mini",

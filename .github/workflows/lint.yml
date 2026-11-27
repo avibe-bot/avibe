@@ -398,7 +398,7 @@ jobs:
           - lane: 4
             suites: |
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
-              npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts
+              npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts unacknowledged-send.spec.ts
               npm run test:badge-triggers
               # What a real browser does with a retired address's answer (Chromium and WebKit).
               npm run test:address-retired

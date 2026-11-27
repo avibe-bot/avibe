@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => ({
     can_use_vault_secrets: false,
   },
   composerMounts: 0,
+  readerPrincipal: null as string | null,
   sessionActionsWritable: [] as boolean[],
   routePicker: null as null | { onChange: (changes: Record<string, unknown>) => void },
   events: null as null | {
@@ -60,6 +61,10 @@ const mocks = vi.hoisted(() => ({
     onConnected: () => void;
   },
   composer: null as ComposerProps | null,
+  // What the composer's handle does when the page gives back an unanswered send.
+  restoreUnsent: vi.fn((_unsent: unknown) => true),
+  canRestoreUnsent: vi.fn(() => true),
+  withdrawUnsent: vi.fn((_unsent: unknown) => true),
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
 }));
 
@@ -84,7 +89,7 @@ vi.mock('../../context/WorkbenchInboxContext', () => ({
 }));
 
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({ capabilities: mocks.capabilities }),
+  useInstanceAuthorization: () => ({ capabilities: mocks.capabilities, readerPrincipal: mocks.readerPrincipal }),
 }));
 
 vi.mock('../../context/ComposerBridgeContext', () => ({
@@ -162,10 +167,15 @@ vi.mock('./useShowPageAnnotation', () => ({
 // records how often it mounted, which draft it was handed, and renders the
 // actions row (the route picker) the page gives it.
 vi.mock('./Composer', async () => {
-  const { useState } = await import('react');
+  const { useImperativeHandle, useState } = await import('react');
   return {
-    Composer: (props: ComposerProps) => {
+    Composer: (props: ComposerProps & { ref?: React.Ref<unknown> }) => {
       mocks.composer = props;
+      useImperativeHandle(props.ref, () => ({
+        restoreUnsent: (unsent: unknown) => mocks.restoreUnsent(unsent),
+        canRestoreUnsent: () => mocks.canRestoreUnsent(),
+        withdrawUnsent: (unsent: unknown) => mocks.withdrawUnsent(unsent),
+      }));
       const [instance] = useState(() => {
         mocks.composerMounts += 1;
         return mocks.composerMounts;
@@ -332,6 +342,10 @@ beforeEach(() => {
   mocks.composer = null;
   vi.clearAllMocks();
   setLocalSnapshotPrincipal('local');
+  mocks.readerPrincipal = null;
+  mocks.restoreUnsent.mockReset().mockReturnValue(true);
+  mocks.canRestoreUnsent.mockReset().mockReturnValue(true);
+  mocks.withdrawUnsent.mockReset().mockReturnValue(true);
   mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
     mocks.events = events;
@@ -374,6 +388,104 @@ afterEach(async () => {
 });
 
 describe('ChatPage optimistic send', () => {
+  const storeUnsent = () => window.localStorage.setItem(`avibe.unacknowledged-send.v1.${SESSION}:c-1`, JSON.stringify({
+    version: 1, sessionId: SESSION, clientId: 'c-1', principal: 'local', text: 'never answered', attachments: [], sentAt: Date.now(),
+  }));
+  const unsentKept = () => Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'));
+
+  it('waits for a busy composer without asking the instance, then gives the send back', async () => {
+    // Voice capture owning the draft, say: nothing else in the chat may change
+    // once it ends, so the page checks again on its own, and only asks the
+    // instance once the composer can take the message.
+    storeUnsent();
+    mocks.canRestoreUnsent.mockReturnValueOnce(false).mockReturnValueOnce(false);
+    mocks.readerPrincipal = 'local';
+    // The chat has older history; the send is not in it.
+    const reads: unknown[] = [];
+    const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
+    mocks.api.listSessionMessages.mockImplementation(async (_id: string, params: { tail?: boolean }) => {
+      reads.push(params);
+      return params.tail
+        ? { messages: [latest], next_after_id: null, next_before_id: 'm1' }
+        : { messages: [], next_after_id: null, next_before_id: null };
+    });
+    mount();
+    await act(async () => live.resolve({ ...bootstrap([latest]), next_before_id: 'm1' }));
+
+    await waitFor(() => expect(mocks.canRestoreUnsent).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(reads).toEqual([]);
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(mocks.restoreUnsent).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'never answered' }));
+    expect(reads).toEqual([expect.objectContaining({ tail: true }), expect.objectContaining({ beforeId: 'm1' })]);
+    expect(unsentKept()).toEqual([]);
+  });
+
+  it('asks the instance again before a refused restore is retried', async () => {
+    // Refused once; meanwhile the instance took the original send, which a chat
+    // shown on an older stretch would never draw.
+    storeUnsent();
+    mocks.restoreUnsent.mockReturnValueOnce(false);
+    mocks.readerPrincipal = 'local';
+    let taken = false;
+    const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
+    mocks.api.listSessionMessages.mockImplementation(async () => ({
+      messages: taken ? [latest, message('m2', 'never answered', { type: 'user', metadata: { client_message_id: 'c-1' } })] : [latest],
+      next_after_id: null,
+      next_before_id: null,
+    }));
+    mount();
+    await act(async () => live.resolve(bootstrap([latest])));
+
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
+    taken = true;
+    await waitFor(() => expect(unsentKept()).toEqual([]), { timeout: 3000 });
+    expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes a restored send back once the busy composer is free, when the conversation shows it', async () => {
+    storeUnsent();
+    mocks.readerPrincipal = 'local';
+    const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
+    mocks.api.listSessionMessages.mockResolvedValue({ messages: [latest], next_after_id: null, next_before_id: null });
+    mount();
+    await act(async () => live.resolve(bootstrap([latest])));
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
+
+    // Dictating when the instance's copy arrives: the box is not taken from now.
+    mocks.canRestoreUnsent.mockReturnValue(false);
+    act(() => mocks.events!.onMessageNew(message('m2', 'never answered', {
+      type: 'user', author: 'user', source: 'user', metadata: { client_message_id: 'c-1' },
+    })));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(mocks.withdrawUnsent).not.toHaveBeenCalled();
+    mocks.canRestoreUnsent.mockReturnValue(true);
+    await waitFor(() => expect(mocks.withdrawUnsent).toHaveBeenCalledWith(expect.objectContaining({ text: 'never answered' })), { timeout: 3000 });
+  });
+
+  it('keeps a typed send on the device until it is answered, and leaves a spoken one to its voice take', async () => {
+    // lib/unacknowledgedSends: a typed message lives only there once the composer
+    // empties. A spoken one is kept by its voice take (lib/voiceTakeStore) until
+    // it lands; a second copy would come back beside it and could be sent twice.
+    await openChat();
+    const kept = () => Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'));
+
+    let spoken!: Promise<boolean | void>;
+    act(() => {
+      spoken = Promise.resolve(mocks.composer!.onSend('spoken words', [], undefined, { input: 'voice' }));
+    });
+    expect(posts).toHaveLength(1);
+    expect(kept()).toEqual([]);
+
+    const { post, result } = send('typed words');
+    expect(kept()).toHaveLength(1);
+    await act(async () => {
+      post.reply.resolve(new Response(JSON.stringify(serverRow(post, 'd2')), { status: 201 }));
+      posts[0].reply.resolve(new Response(JSON.stringify(serverRow(posts[0], 'd1')), { status: 201 }));
+      await Promise.all([result, spoken]);
+    });
+    expect(kept()).toEqual([]);
+  });
+
   it('shows the sent message at once, as sending, before the server answers', async () => {
     await openChat();
 

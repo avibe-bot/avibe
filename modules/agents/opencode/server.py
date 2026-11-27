@@ -302,7 +302,7 @@ def _is_opencode_serve_cmd(command: str, port: int) -> bool:
     return "opencode" in command and " serve" in command and f"--port={port}" in command
 
 
-def _pid_listens_on(pid: int, port: int) -> bool:
+def _pid_listens_on(pid: int, port: int, *, include_children: bool = True) -> bool:
     """Whether ``pid``, or a process it started, holds the listening socket on ``port``.
 
     A launcher such as an npm shim or a Windows ``.cmd`` wrapper starts the
@@ -311,7 +311,7 @@ def _pid_listens_on(pid: int, port: int) -> bool:
 
     try:
         root = psutil.Process(pid)
-        processes = [root, *root.children(recursive=True)]
+        processes = [root, *root.children(recursive=True)] if include_children else [root]
     except psutil.Error:
         return False
     for process in processes:
@@ -1163,6 +1163,69 @@ class OpenCodeServerClient:
                     f"Failed to remove OpenCode auth for {provider_id}: {resp.status} {error_text}"
                 )
 
+    async def direct_picker_get(self, endpoint: str, directory: str) -> dict:
+        """Read a complete native document. Unlike UI helpers, fail rather than project or fall back."""
+        if self._active_model_hub_provider_ids() or endpoint not in (
+            "/path",
+            "/config",
+            "/provider",
+            "/config/providers",
+        ):
+            raise ValueError("not a direct picker read")
+        async with self._request_scope():
+            session = await self._get_http_session()
+            async with session.get(
+                f"{self.base_url}{endpoint}",
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
+                allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    raise ValueError("incomplete OpenCode picker response")
+                raw = bytearray()
+                async for block in response.content.iter_chunked(65536):
+                    raw.extend(block)
+                    if len(raw) > 8 * 1024 * 1024:
+                        raise ValueError("provider list too large")
+        answer = json.loads(raw)
+        if not isinstance(answer, dict):
+            raise ValueError("invalid OpenCode picker response")
+        return answer
+
+    async def direct_picker_providers(self, directory: str) -> list[dict]:
+        # /provider identifies connections; its registry entries need not be
+        # the full model metadata for the authenticated, directory-scoped provider.
+        connections = await self.direct_picker_get("/provider", directory)
+        connected = connections.get("connected")
+        if not isinstance(connected, list) or not all(
+            isinstance(key, str) and key.strip() == key and key and "/" not in key for key in connected
+        ):
+            raise ValueError("invalid connected provider list")
+        if len(set(connected)) != len(connected):
+            raise ValueError("duplicate connected provider")
+        registry = connections.get("all")
+        if isinstance(registry, dict):
+            if any(not isinstance(entry, dict) or entry.get("id") != pid for pid, entry in registry.items()):
+                raise ValueError("invalid provider registry")
+            registry = list(registry.values())
+        if not isinstance(registry, list) or not all(
+            isinstance(entry, dict) and isinstance(entry.get("id"), str) for entry in registry
+        ):
+            raise ValueError("invalid provider registry")
+        registered = {entry["id"] for entry in registry}
+        if len(registered) != len(registry) or not registered.issuperset(connected):
+            raise ValueError("incomplete provider registry")
+        catalog = (await self.direct_picker_get("/config/providers", directory)).get("providers")
+        if not isinstance(catalog, list):
+            raise ValueError("invalid provider catalog")
+        by_id = {}
+        for provider in catalog:
+            if not isinstance(provider, dict) or not isinstance(pid := provider.get("id"), str) or pid in by_id:
+                raise ValueError("invalid provider catalog entry")
+            by_id[pid] = provider
+        if set(by_id) != set(connected) or any(not isinstance(by_id[pid].get("models"), dict) for pid in connected):
+            raise ValueError("incomplete connected provider catalog")
+        return [by_id[pid] for pid in connected]
+
     async def get_providers(self) -> Dict[str, Any]:
         """Fetch the user-visible provider catalog from the OpenCode server.
 
@@ -1600,7 +1663,23 @@ class OpenCodeGeneration(OpenCodeServerClient):
         # Sessions whose work a forced stop of this process already settled.
         self.interrupted_sessions: set[str] = set()
         self._process = process
+        # Only this process's launcher may attest the child environment. An
+        # adopted record (including older ones) has no such evidence.
+        self.picker_launch_proof: str | None = None
+        self._picker_ready_directories: dict[str, None] = {}
 
+    async def ensure_directory_ready(self, directory: str) -> None:
+        await super().ensure_directory_ready(directory)
+        # Only normal work bootstraps a directory (which can install plugins).
+        # The background picker is not a reason to initialize a cold workspace.
+        directory = os.path.abspath(directory)
+        self._picker_ready_directories.pop(directory, None)
+        self._picker_ready_directories[directory] = None
+        if len(self._picker_ready_directories) > 8:
+            self._picker_ready_directories.pop(next(iter(self._picker_ready_directories)))
+
+    def has_served_directory(self, directory: str) -> bool:
+        return directory in self._picker_ready_directories
     @property
     def record_path(self) -> Path:
         return generation_records_dir() / f"{self.generation_id}.json"
@@ -1730,6 +1809,19 @@ class OpenCodeGeneration(OpenCodeServerClient):
         # never signalled, and nothing waits for it to exit.
         return self.process_identity().names_live_process() is True
 
+    def serves_picker(self) -> bool:
+        # An HTTP health answer can come from a replacement listener. Check
+        # the same child handle and socket ownership used at readiness.
+        if self._process is None or not self.process_alive():
+            return False
+        try:
+            # Unlike a normal turn, inventory publication needs the effective
+            # executable and its inherited profile. A shim's child is unknown.
+            return (os.path.realpath(psutil.Process(self.pid).exe()) == os.path.realpath(self.binary)
+                    and _pid_listens_on(self.pid, self.port, include_children=False))
+        except (psutil.Error, OSError):
+            return False
+
     def observed_exit_pid(self) -> int | None:
         """This process's pid once it has exited, never a pid reused since."""
         return None if self.process_alive() else self.pid
@@ -1759,8 +1851,10 @@ def apply_resource_governance(resource_governor: Any | None, pid: int | None) ->
         apply_to_pid(pid, label="opencode serve")
 
 
-async def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) -> dict[str, str]:
-    env = os.environ.copy()
+async def _launch_environment(
+    spec: OpenCodeLaunchSpec, overlay_path: Optional[Path], inherited: dict[str, str],
+) -> dict[str, str]:
+    env = inherited.copy()
     env[DESKTOP_ROLE_ENV] = DESKTOP_OPENCODE_ROLE
     env["OPENCODE_ENABLE_EXA"] = "1"
     env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
@@ -1836,7 +1930,10 @@ async def start_generation(
         overlay_path = generation_records_dir() / f"{generation_id}.overlay.json"
         overlay_path.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(overlay_path, spec.overlay_file_content or spec.overlay_inline_content.encode())
-    env = await _launch_environment(spec, overlay_path)
+    from .picker_inventory import launch_proof
+
+    inherited = os.environ.copy()
+    env = await _launch_environment(spec, overlay_path, inherited)
     exited_pid: int | None = None
     exit_code: int | None = None
     # A process that survives its stop keeps its record and overlay; its
@@ -1847,6 +1944,9 @@ async def start_generation(
             port = _choose_port(DEFAULT_OPENCODE_HOST)
             cmd = [spec.binary, "serve", f"--hostname={DEFAULT_OPENCODE_HOST}", f"--port={port}"]
             logger.info("Starting OpenCode generation %s: %s", generation_id, " ".join(cmd))
+            picker_proof = None
+            if spec.overlay_hash is None and spec.overlay_inline_content is None and os.path.isabs(spec.binary):
+                picker_proof = await asyncio.to_thread(launch_proof, spec.binary, inherited)
             try:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -1900,6 +2000,7 @@ async def start_generation(
                     survivor = generation
                 raise
             if outcome == "ready":
+                generation.picker_launch_proof = picker_proof
                 logger.info("OpenCode generation %s serves at %s", generation_id, generation.base_url)
                 return generation
             await generation.close_http_session()
