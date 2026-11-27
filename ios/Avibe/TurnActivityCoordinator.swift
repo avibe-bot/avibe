@@ -459,7 +459,10 @@ final class TurnActivityCoordinator {
         let started = now()
         do {
             let response = try await requestOnce(target, method, path, body)
-            if response.status != 0 || now().timeIntervalSince(started) >= Self.lostConnectionWithin { return response }
+            // A redirect arrives with status 0 too (it is not followed),
+            // and it is an answer.
+            if response.status != 0 || response.redirected
+                || now().timeIntervalSince(started) >= Self.lostConnectionWithin { return response }
         } catch VoiceCaptureInstanceClient.Failure.offline where now().timeIntervalSince(started) < Self.lostConnectionWithin {
             // Made again below.
         }

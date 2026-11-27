@@ -452,6 +452,21 @@ final class TurnActivityTests: XCTestCase {
         await owner.endAll(reason: "logout")
     }
 
+    /// A redirect (to sign-in, say) is not followed and so carries no
+    /// status either, but it is the instance's answer: not made again.
+    func testARedirectAtOnceIsAnAnswerAndIsNotMadeAgain() async throws {
+        var puts = 0
+        let owner = coordinator(response: { _, method, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            guard method == "PUT" else { return .init(status: 200, json: nil, redirected: false) }
+            puts += 1
+            return .init(status: 0, json: nil, redirected: true)
+        })
+        await start(owner)
+        XCTAssertEqual(puts, 1)
+        await owner.endAll(reason: "logout")
+    }
+
     /// A request that waited out its deadline is not made again: the
     /// instance is not answering, and a second wait helps nobody.
     func testARequestThatRanOutOfTimeWithNoAnswerIsNotMadeAgain() async throws {
