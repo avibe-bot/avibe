@@ -23,7 +23,10 @@ across both and must not weaken any admission or resource authorization.
 - The existing authenticated/local `GET /api/session` JSON adds
   `event_stream_transport: "websocket-sse-v1"`. An old successful session payload
   without this field means SSE-only. A failed session probe or a remote session
-  that is unauthenticated/unavailable is not permission to fall back.
+  that is unauthenticated/unavailable is not permission to fall back. An unknown
+  nonempty capability is an error, never legacy SSE. Future Runtime versions
+  must keep advertising this supported v1 value to these clients, or negotiate
+  additional transports through a separate backwards-compatible field.
 - The Runtime-injected Show configuration adds
   `eventStreamTransport: "websocket-sse-v1"`. The SDK accepts this optional field
   in its runtime/client options. An absent field means the old Runtime and SSE.
@@ -46,8 +49,15 @@ across both and must not weaken any admission or resource authorization.
   remain owned by those generators. Disconnect cancels the generator and frees
   its broker subscription. Client messages are not an event-publishing API.
 - SDK callers retain the EventSource-shaped subscription contract (listeners,
-  open/error, readyState, close). Reconnection uses bounded backoff and the last
-  SSE ID as `after_id`. Closing/disposing prevents retries and late events.
+  open/error, readyState, close). Explicit authorization/access rejection is
+  terminal; network errors reconnect with bounded backoff and the last SSE ID
+  as `after_id`. For standard Show event routes, a failed handshake can be
+  classified by one read-only GET of the same route without `stream=1`: 4xx
+  rejection closes the source, while network errors/5xx remain retryable.
+  The probe never opens an SSE stream or downgrades transport. Opaque browser
+  errors alone cannot prove rejection. Custom routes must not be probed as
+  non-streaming without a contract that they return a finite response.
+  Closing/disposing cancels probes/retries and prevents late events.
   Web UI keeps its existing reconnect/heartbeat/catch-up owner; closing a source
   cancels negotiation/socket/reconnect work. All state is document/source scoped.
 - Old client + new Runtime uses unchanged SSE. New client + old Runtime uses
@@ -138,3 +148,21 @@ visible iframe does not restore PDF/image entries until reopening. This
 predates RC2 (#3936, inherited by desktop #4037). WS shortens the loading race
 but does not eliminate it. Main was notified; the separate UI fix is outside
 this PR. Owner evidence: `show-share-followup.md` and the diagnostic test copy.
+
+### Independent security review disposition
+
+Main's different-model-family review found no blocking admission/filtering or
+Origin weakness. Runtime close now has one owner after both stream workers
+stop. A deterministic test reproduces the former RuntimeError when stream EOF
+and a client frame race, and verifies a single close plus generator release.
+
+Workbench retains its pre-existing ApiContext reconnect policy: source.onerror
+closes the active source, schedules the shared bounded-backoff loop, and probes
+`/api/session` for shared authentication recovery. This is the same policy for
+old EventSource and WS; the adapter does not add a retry owner. SDK subscriptions
+instead own their EventSource-like lifecycle and use the rejection-terminal
+contract above. No `/api/events` GET is used as a non-streaming probe.
+
+The independent review also identified an existing anonymous public-share
+revocation gap in the shared SSE generator. Main assigned it separately; this
+transport PR does not claim to fix it or weaken the existing behavior.

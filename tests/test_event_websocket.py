@@ -9,6 +9,72 @@ from vibe.event_websocket import stream_event_response
 from vibe.ui_compat import TEST_REMOTE_ADDR_HEADER
 
 
+@pytest.mark.asyncio
+async def test_stream_end_and_client_message_have_one_close_owner():
+    close_started = asyncio.Event()
+    connected = False
+    sent = []
+    released = []
+
+    async def receive():
+        nonlocal connected
+        if not connected:
+            connected = True
+            return {"type": "websocket.connect"}
+        await close_started.wait()
+        return {"type": "websocket.receive", "text": "unexpected publish"}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "websocket.close":
+            close_started.set()
+            # Let a pending receive finish while the close is in flight.
+            await asyncio.sleep(0)
+
+    async def frames():
+        try:
+            yield ": connected\n\n"
+        finally:
+            released.append(True)
+
+    async def response():
+        return StreamingResponse(frames(), media_type="text/event-stream")
+
+    socket = WebSocket({"type": "websocket", "path": "/events"}, receive, send)
+    await stream_event_response(socket, response)
+    assert [message for message in sent if message["type"] == "websocket.close"] == [
+        {"type": "websocket.close", "code": 1000, "reason": ""},
+    ]
+    assert released == [True]
+
+
+@pytest.mark.asyncio
+async def test_send_disconnect_does_not_close_an_already_disconnected_socket():
+    incoming = asyncio.Queue()
+    incoming.put_nowait({"type": "websocket.connect"})
+    sent = []
+    released = []
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "websocket.send":
+            raise OSError("peer disconnected")
+
+    async def frames():
+        try:
+            yield ": connected\n\n"
+        finally:
+            released.append(True)
+
+    async def response():
+        return StreamingResponse(frames(), media_type="text/event-stream")
+
+    socket = WebSocket({"type": "websocket", "path": "/events"}, incoming.get, send)
+    await stream_event_response(socket, response)
+    assert [message["type"] for message in sent] == ["websocket.accept", "websocket.send"]
+    assert released == [True]
+
+
 def test_socket_delivers_same_generator_frames_and_releases_it_on_close():
     app = FastAPI()
     released = []
