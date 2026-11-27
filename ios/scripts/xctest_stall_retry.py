@@ -64,7 +64,7 @@ _BOOTSTRAP = re.compile(
 # fixture's bootstrap wait. Any other first failure (an assertion, a thrown
 # error) stands whatever the log shows around it.
 _ERROR = ": error: -["
-_ERROR_OF = re.compile(r": error: -\[\w+\.(?P<cls>\w+) (?P<method>\w+)\]")
+_ERROR_OF = re.compile(r": error: -\[(?P<target>\w+)\.(?P<cls>\w+) (?P<method>\w+)\]")
 _WAIT_RAN_OUT = re.compile(
     r"Asynchronous wait failed: Exceeded timeout|The condition did not become true within"
 )
@@ -75,6 +75,14 @@ _FIXTURE_WAIT = re.compile(
     r"stage=bootstrap settled, elapsed=(?P<seconds>\d+(?:\.\d+)?) seconds"
 )
 _RUN_ENDED = "Test Suite 'All tests' failed"
+# PRs use test-without-building. Only XCTest's outer suite record followed by
+# xcodebuild's own verdict completes a selected run. Raw tee output has no
+# prefix; downloaded Actions logs prefix each line with an RFC3339 timestamp.
+_ACTIONS_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ")
+_SELECTED_END = re.compile(r"Test Suite 'Selected tests' failed at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+\.")
+_EXECUTE_FAILED = "** TEST EXECUTE FAILED **"
+_DRIVER_ERROR = re.compile(r"^\s*(?:xcodebuild:\s*)?(?:fatal\s+)?error:", re.I)
+_FILE_ERROR = re.compile(r":\d+(?::\d+)?:\s*(?:fatal\s+)?error:", re.I)
 ARTIFACT = "ios-simulator-stall"
 _RESTARTED = "Restarting after unexpected exit, crash, or test timeout"
 
@@ -120,22 +128,43 @@ def _wait_ran_out(error: str | None) -> bool:
     return bool(fixture) and float(fixture["seconds"]) >= BOOTSTRAP_STALL_SECONDS
 
 
-def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str | None]:
+def stalled_failures(lines: list[str], max_tests: int, *, selected: bool = False) -> tuple[list[_Case], str | None]:
     """Return the failed tests and ``None``, or ``[]`` and why they stand."""
     current: _Case | None = None
     failed: list[_Case] = []
     erred: set[str] = set()
     ended = False
+    driver_ended = False
     for line in lines:
         error_of = _ERROR_OF.search(line)
+        if selected:
+            record = _ACTIONS_STAMP.sub("", line).strip()
+            # A diagnostic belongs to the currently running method, not to a
+            # name found somewhere in the finished bundle. Check even after
+            # the first timeout: later in-window fallout is allowed, but a
+            # late or cross-bundle assertion is an independent failure.
+            if error_of and (current is None or error_of.groups() != (current.target, current.cls, current.method)):
+                return [], "XCTest error outside its own method execution"
+            if _DRIVER_ERROR.match(record) or (not error_of and _FILE_ERROR.search(record)):
+                return [], f"independent xcodebuild error: {record}"
+            if _SELECTED_END.fullmatch(record):
+                if ended or not failed or current is not None:
+                    return [], "unexpected selected suite completion"
+                ended = True
+            elif record == _EXECUTE_FAILED:
+                if not ended or driver_ended:
+                    return [], "unexpected xcodebuild completion"
+                driver_ended = True
         if error_of:
             erred.add(f"{error_of['cls']}.{error_of['method']}")
         if _RESTARTED in line:
             return [], "a test process crashed or timed out and was restarted"
-        if _RUN_ENDED in line:
+        if not selected and _RUN_ENDED in line:
             ended = True
         case = _CASE.search(line)
         if case:
+            if selected and ended:
+                return [], "test activity after the selected suite ended"
             if case["event"] == "started":
                 # The test host's own log can split the previous test's end
                 # line, so a start also ends that test. Should that test have
@@ -143,7 +172,7 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
                 current = _Case(case["target"], case["cls"], case["method"])
             elif case["event"] == "failed":
                 name = f"{case['cls']}.{case['method']}"
-                if current is None or current.name != name:
+                if current is None or current.name != name or (selected and current.target != case["target"]):
                     return [], f"{name} failed outside its own lines"
                 failed.append(current)
                 current = None
@@ -159,7 +188,7 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
                 current.evidence.append(line.strip())
                 if stall not in current.stalls:
                     current.stalls.append(stall)
-    if not ended:
+    if not ended or (selected and not driver_ended):
         return [], "the run did not complete"
     if not failed:
         return [], "no test failed: the run failed for another reason"
@@ -183,6 +212,12 @@ def _rerun(args: argparse.Namespace) -> int:
     if reason:
         print(f"Not rerun: {reason}.", file=sys.stderr)
         return 1
+    record_rerun(failed, args.evidence)
+    args.out.write_text("".join(f"{case.only_testing}\n" for case in failed), encoding="utf-8")
+    return 0
+
+
+def record_rerun(failed: list[_Case], evidence: Path) -> None:
     record = [f"run attempt: {os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')}"]
     for case in failed:
         print(
@@ -194,16 +229,15 @@ def _rerun(args: argparse.Namespace) -> int:
         for line in case.evidence:
             print(f"  {line}")
             record.append(f"  {line}")
-    args.out.write_text("".join(f"{case.only_testing}\n" for case in failed), encoding="utf-8")
-    # Uploaded as the `ios-simulator-stall` artifact, which `count` counts.
-    args.evidence.write_text("\n".join(record) + "\n", encoding="utf-8")
+    # Both PR schemes share this run's single weekly artifact.
+    with evidence.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(record) + "\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write("### Simulator stall: rerun once\n\n")
             handle.writelines(f"- `{case.name}`: {'; '.join(case.stalls)}\n" for case in failed)
             handle.write(f"\nWeekly count: `python3 ios/scripts/{Path(__file__).name} count`\n")
-    return 0
 
 
 def weekly_counts(created: list[str], weeks: int, today: date) -> list[tuple[date, int]]:

@@ -1594,20 +1594,27 @@ final class DirectRendezvousWebViewSource {
             // And the account of which leg carried the pages' connections:
             // the minutes that are over, until a request is answered.
             // Only this instance's, under this account's store.
-            let use = DirectPathUse.shared.pending(
-                for: DirectPathUse.Scope(store: selection.storeIdentifier, host: selection.host)
-            )
+            let scope = DirectPathUse.Scope(store: selection.storeIdentifier, host: selection.host)
+            let use = DirectPathUse.shared.pending(for: scope)
+            // And the hand-overs its page asked for, one record each.
+            let handovers = DirectPathUse.shared.pendingHandovers(for: scope)
+            // And this App's measured cold starts, the same way.
+            let starts = ColdStartTimings.shared.pending
             let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,
                 clientEndpointID: clientEndpointID,
                 listenerFaults: faults,
                 slowStoreRemovalsMs: removals.map(\.milliseconds),
-                pathUse: use
+                pathUse: use,
+                startup: starts.map(\.json),
+                handovers: handovers.json
             )
             self?.faultReport.answered(faults)
             SlowStoreRemovals.shared.answered(removals)
+            ColdStartTimings.shared.answered(starts)
             DirectPathUse.shared.answered(use)
+            DirectPathUse.shared.answered(handovers)
             return answer
         }
     }

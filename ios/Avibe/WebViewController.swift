@@ -523,7 +523,8 @@ final class WebViewFactory {
         outerScrollLockControllers[ObjectIdentifier(webView)] =
             OuterScrollLockController(webView: webView)
         FormAccessoryBar.hide(in: webView)
-        DirectWebViewRegistry.shared.register(webView)
+        // A configuration is given for a window a page opens, and only then.
+        DirectWebViewRegistry.shared.register(webView, as: configuration == nil ? .runtime : .child)
         return webView
     }
 

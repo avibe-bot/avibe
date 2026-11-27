@@ -71,9 +71,14 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.transport.selections.count, 0)
     }
 
+    /// The first open does not wait for a slow first bind, and is not shut
+    /// out of the direct path by it. The host gets its route when the bind
+    /// is confirmed (WebKit uses it from its next new connection:
+    /// docs/plans/remote-direct-ios.md section 2), the miss is on record,
+    /// and the documents hear `direct` only once a connection of the host
+    /// has reached the listener.
     @MainActor
-    func testAListenerThatIsNotReadyInTimeExcludesTheHostForThatStore() async throws {
-        let listening = try listeningSockets()
+    func testAHostLoadedBeforeTheFirstBindWasConfirmedGetsItsRouteWhenItIs() async throws {
         let routeWrites = try ProxyConfigurationWrites.count()
         // No time at all for the listener: the first open cannot wait.
         let harness = try Harness(
@@ -81,25 +86,107 @@ final class DirectPathControllerTests: XCTestCase {
             test: self
         )
         try await harness.signIn()
+        let store = harness.websiteDataStore.identifier
 
         try await harness.select("instance-1")
 
-        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        XCTAssertTrue(
-            harness.controller.routeOwner.isExcluded(one, store: harness.websiteDataStore.identifier)
-        )
-        XCTAssertEqual(harness.transport.selections.count, 0)
-        // With no route written, no listener is left behind. Retired first:
-        // whatever its bind reports afterwards is not a failure.
-        try await eventually { try newListeners(since: listening).isEmpty }
-        XCTAssertEqual(harness.controller.listenerFailures, [])
+        // The open went ahead, and the host is not shut out.
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+        XCTAssertFalse(harness.controller.routeOwner.isExcluded(one, store: store))
+
+        // The bind is confirmed: the route, the selection, and the record.
+        try await eventually { harness.transport.selections.count == 1 }
+        XCTAssertTrue(harness.controller.routeOwner.routes(one, store: store))
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 1)
+        XCTAssertTrue(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+        let record = harness.controller.listenerFailures
+        XCTAssertEqual(record.map(\.step), [.late])
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(record.first?.code), 0)
         XCTAssertNil(harness.controller.listenerRecovery)
+        XCTAssertEqual(harness.status("instance-1").listenerFaults.map(\.step), [.late])
 
-        // The host loaded without a route on this store, so it never gets
-        // one there: WebKit would keep its existing connections.
-        try await harness.select("instance-2")
-        try await harness.select("instance-1")
+        // The transport is usable. Nothing of the page passes through the
+        // listener yet, so its documents still hear `tunnel`.
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        XCTAssertNil(harness.status("instance-1").path)
+        XCTAssertFalse(harness.preferences.contains(.direct))
+        let sequence = harness.status("instance-1").sequence
+
+        // WebKit brings a connection of the host to the listener: it is
+        // planned as any other, and the documents are told once.
+        let authority = try XCTUnwrap(DirectAuthority(host: one))
+        XCTAssertNotNil(harness.controller.plan(for: authority)?.openDirect)
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
+        XCTAssertEqual(harness.status("instance-1").sequence, sequence + 1)
+        XCTAssertEqual(harness.preferences.last, .direct)
+        _ = harness.controller.plan(for: authority)
+        XCTAssertEqual(harness.status("instance-1").sequence, sequence + 1)
+    }
+
+    /// A host that is left before the first bind is confirmed gets no route
+    /// on that store, then or later, and the listener nothing waits for is
+    /// not kept. The next host's open starts another.
+    @MainActor
+    func testAHostLeftBeforeTheFirstBindWasConfirmedGetsNoRoute() async throws {
+        let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
+        let harness = try Harness(
+            timing: DirectPathTiming(listenerWaitSeconds: 0, rebindSeconds: 10),
+            test: self
+        )
+        try await harness.signIn()
+        let store = harness.websiteDataStore.identifier
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let first = try XCTUnwrap(harness.lastOpened)
+
+        await harness.controller.prepareRoute(for: first) { harness.coordinator.isCurrentRuntime(first) }
+        // The precondition of this test: the bind is still under way.
+        XCTAssertEqual(harness.controller.listenerState, .binding)
+        harness.controller.runtimeDidStop()
+
+        XCTAssertTrue(harness.controller.routeOwner.isExcluded(one, store: store))
+        XCTAssertEqual(harness.controller.listenerState, .none)
+        try await eventually { try newListeners(since: listening).isEmpty }
+        // Retired before it was confirmed: neither a failure nor a late bind.
+        XCTAssertEqual(harness.controller.listenerFailures, [])
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(harness.transport.selections.count, 0)
+
+        // Another host is not affected, and the first one stays without.
+        try await harness.select("instance-2")
+        try await eventually { harness.controller.routeOwner.routes(self.two, store: store) }
+        try await harness.select("instance-1")
+        XCTAssertFalse(harness.controller.routeOwner.routes(one, store: store))
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 1)
+    }
+
+    /// A first bind that fails after the open went ahead leaves what it
+    /// left before: no route for that host on that store, no listener, and
+    /// its own failure on record, not a late bind.
+    @MainActor
+    func testAFirstBindThatFailsAfterTheOpenWentAheadLeavesTheHostWithoutARoute() async throws {
+        let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
+        // No wait, and no time for the ownership check: never confirmed.
+        let harness = try Harness(
+            timing: DirectPathTiming(listenerWaitSeconds: 0, rebindSeconds: 0),
+            test: self
+        )
+        try await harness.signIn()
+        let store = harness.websiteDataStore.identifier
+
+        try await harness.select("instance-1")
+
+        try await eventually { harness.controller.routeOwner.isExcluded(self.one, store: store) }
+        try await eventually { try newListeners(since: listening).isEmpty }
+        XCTAssertEqual(harness.controller.listenerState, .none)
+        XCTAssertFalse(harness.controller.listenerFailures.contains { $0.step == .late })
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(harness.transport.selections.count, 0)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
     }
 
     @MainActor
@@ -2982,8 +3069,19 @@ extension DirectPathControllerTests {
         try await eventually { harness.status("instance-1").races.count == 3 }
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
         var answered: DirectHandoverOutcome?
-        harness.controller.handover(for: harness.origin("instance-1"), soleDocument: false) { answered = $0 }
+        harness.controller.handover(for: harness.origin("instance-1"), other: .voice) { answered = $0 }
         XCTAssertEqual(answered, .skipped(.otherDocuments))
+        // And recorded by itself, with what refused it and the path present
+        // when it was asked, for this instance's next request only.
+        let asked = harness.pathUse.pendingHandovers(for: scope)
+        XCTAssertEqual(asked.json.count, 1)
+        let record = try XCTUnwrap(asked.json.first)
+        XCTAssertTrue(record.hasPrefix(#"{"age_s":0,"ms":"#), record)
+        XCTAssertTrue(
+            record.hasSuffix(#","refused":"other_documents","other":"voice","closed":0,"kept":0,"path":"relay"}"#),
+            record
+        )
+        XCTAssertEqual(harness.pathUse.pendingHandovers(for: DirectPathUse.Scope(store: store, host: two)).json, [])
 
         // On a LAN address: the plan is named `lan` when it is made. Its
         // connection is settled after the path's class is no longer
@@ -3035,6 +3133,7 @@ extension DirectPathControllerTests {
         XCTAssertEqual(harness.pathUse.pending(for: DirectPathUse.Scope(store: store, host: two)), [])
         harness.controller.accountWillChange()
         XCTAssertEqual(harness.pathUse.pending(for: scope), [])
+        XCTAssertEqual(harness.pathUse.pendingHandovers(for: scope).json, [])
     }
 }
 
@@ -3308,5 +3407,10 @@ extension DirectPathControllerTests {
         XCTAssertEqual(DirectBackgroundCheck(.fault), .foreign)
         XCTAssertEqual(DirectPathTiming.standard.portProbeSeconds, 0.3)
         XCTAssertEqual(DirectPathTiming.standard.ownCloseSeconds, 3)
+        // An ordinary host's first load waits 2 s for the listener (11-27);
+        // the foreground watchdog's bound stays above it.
+        XCTAssertEqual(DirectPathTiming.standard.listenerWaitSeconds, 2)
+        XCTAssertEqual(DirectPathTiming.standard.strictOpenSeconds, 10)
+        XCTAssertGreaterThan(DirectPathTiming.standard.foregroundSeconds, DirectPathTiming.standard.listenerWaitSeconds)
     }
 }

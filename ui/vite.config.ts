@@ -1,5 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
 import react from '@vitejs/plugin-react'
+import type { ProxyOptions } from 'vite'
 import { configDefaults, defineConfig } from 'vitest/config'
 
 import { emojiCatalog } from './scripts/emojiCatalog.ts'
@@ -11,23 +12,21 @@ import { localeSurfaces } from './scripts/localeSurfaces.ts'
 // work can be driven against real data without restarting the local service.
 const backendTarget = process.env.VIBE_UI_BACKEND ?? 'http://localhost:5100'
 
-const backendProxy = () => ({
+const backendProxy = (): ProxyOptions => ({
   target: backendTarget,
   changeOrigin: true,
-  configure(proxy: {
-    on: (
-      event: 'proxyReq',
-      handler: (proxyReq: { setHeader: (name: string, value: string) => void }) => void,
-    ) => void
-  }) {
+  ws: true,
+  configure(proxy) {
     // Codex's in-app browser maps the Vite port to a temporary localhost
     // origin. Rewrite the development proxy headers so Avibe's same-origin
     // CSRF validation sees the isolated backend origin, while production keeps
     // using the normal browser origin unchanged.
-    proxy.on('proxyReq', (proxyReq) => {
-      proxyReq.setHeader('origin', backendTarget)
+    const rewriteOrigin = (proxyReq: { setHeader: (name: string, value: string) => void }) => {
+      proxyReq.setHeader('origin', new URL(backendTarget).origin)
       proxyReq.setHeader('referer', `${backendTarget}/`)
-    })
+    }
+    proxy.on('proxyReq', rewriteOrigin)
+    proxy.on('proxyReqWs', rewriteOrigin)
   },
 })
 

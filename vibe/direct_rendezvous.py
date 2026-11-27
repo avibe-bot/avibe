@@ -20,6 +20,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import quote
 
 from vibe.connection_settings import suspend_elapsed
 
@@ -163,6 +164,7 @@ _PATH_USE_HANDOVER_RULES = ("none", "not_usable", "other_documents", "relay_path
 _PATH_USE_RETIRED_RULES = (
     "none", "path_monitor", "lease", "revocation", "strict_revert", "idle", "background", "network_change",
 ) + _LEG_FAULT_CODES
+_APP_BUILD = re.compile(r"[\x20-\x7e]{1,32}")
 _PATH_USE_KEYS = frozenset(
     ("client", "age_min", "path", "handover_rule", "retired_rule") + _PATH_USE_COUNTS + _PATH_USE_MILLISECONDS
 )
@@ -176,7 +178,8 @@ def log_path_use(entries: Any) -> None:
     ``client`` (ios or desktop); ``age_min`` (minutes before the report);
     ``path``; the counts and milliseconds named above; ``handover_rule`` (the
     rule that refused most hand-overs, or none) and ``retired_rule`` (why most
-    links were withdrawn, or none). A malformed, empty or over-ten batch is
+    links were withdrawn, or none). Optional ``app`` is a self-reported build,
+    1–32 printable ASCII bytes. A malformed, empty or over-ten batch is
     ignored in full. It changes neither the answer nor the admission, and
     nothing of it is kept. The unit is a connection the page opened through
     the client's own listener, not a request: what never reached that
@@ -186,7 +189,9 @@ def log_path_use(entries: Any) -> None:
     if not isinstance(entries, list) or not 0 < len(entries) <= 10:
         return
     for entry in entries:
-        if not isinstance(entry, dict) or entry.keys() != _PATH_USE_KEYS:
+        if not isinstance(entry, dict) or entry.keys() - {"app"} != _PATH_USE_KEYS:
+            return
+        if "app" in entry and (not isinstance(entry["app"], str) or not _APP_BUILD.fullmatch(entry["app"])):
             return
         for key, words in (
             ("client", _PATH_USE_CLIENTS), ("path", _LEG_FAULT_PATHS),
@@ -205,7 +210,7 @@ def log_path_use(entries: Any) -> None:
             " direct=%d tunnel=%d raced=%d direct_won=%d tunnel_won=%d direct_ms=%d tunnel_ms=%d"
             " no_direct=%d sticky=%d strict=%d tunnel_only=%d direct_failed=%d direct_timed_out=%d"
             " handover_asked=%d handover_done=%d handover_refused=%d handover_rule=%s"
-            " retired=%d retired_rule=%s",
+            " retired=%d retired_rule=%s%s",
             entry["client"], entry["age_min"], entry["path"],
             entry["direct"], entry["tunnel"], entry["raced"], entry["direct_won"], entry["tunnel_won"],
             entry["direct_ms"], entry["tunnel_ms"],
@@ -213,7 +218,47 @@ def log_path_use(entries: Any) -> None:
             entry["direct_failed"], entry["direct_timed_out"],
             entry["handover_asked"], entry["handover_done"], entry["handover_refused"], entry["handover_rule"],
             entry["retired"], entry["retired_rule"],
+            " app=" + quote(entry["app"], safe="+") if "app" in entry else "",
         )
+
+
+def log_handovers(entries: Any) -> None:
+    """Log the client's bounded per-ask observations without changing rendezvous state."""
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.keys() != {"age_s", "ms", "refused", "other", "closed", "kept", "path"}:
+            return
+        if (entry["refused"] not in ("none", "not_usable", "other_documents")
+                or entry["other"] not in ("none", "voice", "child", "runtime", "unloaded", "unknown")
+                or (entry["refused"] == "other_documents") != (entry["other"] != "none")
+                or entry["path"] not in _LEG_FAULT_PATHS):
+            return
+        for key, maximum in (("age_s", 86400), ("ms", 2**31 - 1), ("closed", 2**31 - 1), ("kept", 2**31 - 1)):
+            if type(entry[key]) is not int or not 0 <= entry[key] <= maximum:
+                return
+    for entry in entries:
+        logger.info(
+            "direct rendezvous handover age_s=%d ms=%d refused=%s other=%s closed=%d kept=%d path=%s",
+            entry["age_s"], entry["ms"], entry["refused"], entry["other"], entry["closed"], entry["kept"], entry["path"],
+        )
+
+
+def log_startup(entries: Any) -> None:
+    """One bounded observation per restored cold start with both measurements."""
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 5:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.keys() != {"bind_ms", "visible_ms", "late", "visible"}:
+            return
+        if type(entry["late"]) is not bool or entry["visible"] not in ("cached", "live"):
+            return
+        for key in ("bind_ms", "visible_ms"):
+            if type(entry[key]) is not int or not 0 <= entry[key] < 2**31:
+                return
+    for entry in entries:
+        logger.info("direct rendezvous startup bind_ms=%d visible_ms=%d late=%s visible=%s",
+                    entry["bind_ms"], entry["visible_ms"], "yes" if entry["late"] else "no", entry["visible"])
 
 
 def log_slow_store_removals(durations: Any) -> None:
@@ -295,6 +340,7 @@ class _Admission:
     until: int
     session: tuple[str, str] | None  # (pairing binding, authenticated browser session)
     epoch: int  # zero disables attribution, not transport admission
+    client: str  # coarse kind only; never part of admission identity
     connections: dict[int, tuple[float, dict | None]] = field(default_factory=dict)
 
 
@@ -405,6 +451,7 @@ class DirectRendezvous:
         client_endpoint_id: str,
         is_owner: bool = False,
         session: tuple[str, str] | None = None,
+        session_kind: str | None = None,
     ) -> dict[str, Any]:
         """Describe the endpoint to one authenticated session and admit its client."""
 
@@ -412,7 +459,7 @@ class DirectRendezvous:
         base = {"version": RENDEZVOUS_VERSION, "instance_id": instance_id, "hostname": hostname}
         with self._lock:
             generation = f"{self._boot}:{self._revision}"
-            response = self._offer_locked(base, generation, now, subject, client_endpoint_id, is_owner, session)
+            response = self._offer_locked(base, generation, now, subject, client_endpoint_id, is_owner, session, session_kind)
             summary = self._log_summary(response, generation)
             tick = time.monotonic()
             previous = self._log_callers.pop(subject, None)
@@ -440,7 +487,7 @@ class DirectRendezvous:
             "offered" if offered else "refused", "none" if offered else reason if reason in _LOG_REFUSALS else "unavailable",
         )
 
-    def _offer_locked(self, base, generation, now, subject, client_endpoint_id, is_owner, session):
+    def _offer_locked(self, base, generation, now, subject, client_endpoint_id, is_owner, session, session_kind):
         endpoint = self._endpoint
         relay = None
         if endpoint and endpoint.relay_policy == PUBLIC_TRIAL:
@@ -455,7 +502,7 @@ class DirectRendezvous:
         if not ttl:
             return unavailable(instance_id=base['instance_id'], hostname=base['hostname'], reason='not_running')
         expires_at = now + ttl
-        notifications = self._admit(client_endpoint_id, subject, expires_at, now, session)
+        notifications = self._admit(client_endpoint_id, subject, expires_at, now, session, session_kind)
         if self._admission_listener is not None:
             # Schedule on the loop in mutation order while holding the lock.
             for endpoint_id, ttl_seconds in notifications:
@@ -494,18 +541,21 @@ class DirectRendezvous:
                 admission.connections.clear()
 
     def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None, *,
-                     publisher: object | None = None) -> None:
+                     publisher: object | None = None) -> str:
+        """Project the observation and label it from the same live admission."""
         with self._lock:
             if publisher is not self._publisher:
-                return
+                return "unknown"
             admission = self._admissions.get(peer)
-            if not admission or not admission.session or not epoch or admission.epoch != epoch or admission.until <= self._clock():
-                return
+            if (not admission or not admission.session or not epoch or admission.epoch != epoch
+                    or admission.until <= self._clock() or not key_limited_ttl(self._retire_at, 1)):
+                return "unknown"
             connections = admission.connections
             if phase == "close":
                 connections.pop(ordinal, None)
             elif (phase == "open" and len(connections) < 32) or ordinal in connections:
                 connections[ordinal] = (time.monotonic(), path)
+            return admission.client
 
     def session_paths(self, binding: str) -> dict[tuple[str, str], dict]:
         """Snapshot for the registry's already-visible rows, never a list of devices."""
@@ -532,7 +582,10 @@ class DirectRendezvous:
         admitted_until: int,
         now: int,
         session: tuple[str, str] | None,
+        session_kind: str | None,
     ) -> list[tuple[str, int]]:
+        client = {"iphone_app": "ios", "desktop_app": "desktop", "browser": "browser",
+                  "home_screen_app": "browser"}.get(session_kind, "unknown")
         admissions = self._admissions
         notifications: list[tuple[str, int]] = []
         for endpoint_id in [key for key, grant in admissions.items() if grant.until <= now]:
@@ -551,6 +604,7 @@ class DirectRendezvous:
         if previous and previous.subject == subject and previous.session == session:
             # A renewal preserves the epoch, including zero for a conflict.
             previous.until = admitted_until
+            previous.client = client
             admissions[client_endpoint_id] = previous
         else:
             # Only a fresh admission can start attribution. Replacing a live
@@ -559,7 +613,7 @@ class DirectRendezvous:
             if previous is None and session:
                 epoch = self._next_epoch
                 self._next_epoch += 1
-            admissions[client_endpoint_id] = _Admission(subject, admitted_until, session, epoch)
+            admissions[client_endpoint_id] = _Admission(subject, admitted_until, session, epoch, client)
         notifications.append((client_endpoint_id, max(0, min(RENDEZVOUS_TTL_SECONDS, admitted_until - now))))
         return notifications
 

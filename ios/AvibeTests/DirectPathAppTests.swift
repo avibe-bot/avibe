@@ -4647,13 +4647,13 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
         if let directTransport {
-            // The transport is selected only for a routed host. A listener
-            // fault, or a first bind slower than the App's listener wait,
-            // leaves the host on the public path with no selection at all;
-            // say which rather than fail below on a selection that was
-            // never made.
-            XCTAssertFalse(
-                app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+            // What follows needs the host routed at its first load. A
+            // listener fault leaves it on the public path with no selection
+            // at all, and a first bind slower than the App's listener wait
+            // routes it only afterwards; say which rather than fail below
+            // on what never happened.
+            XCTAssertTrue(
+                hostWasRoutedAtItsFirstLoad(by: app),
                 whyNoHostIsRouted(by: app),
                 file: file,
                 line: line
@@ -5623,12 +5623,12 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
-        // The transport is selected only for a routed host. A listener fault,
-        // or a first bind slower than the App's listener wait, leaves the
-        // host on the public path with no selection at all; say which rather
-        // than time out below.
-        XCTAssertFalse(
-            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+        // What follows needs the host routed at its first load. A listener
+        // fault leaves it on the public path with no selection at all, and a
+        // first bind slower than the App's listener wait routes it only
+        // afterwards; say which rather than time out below.
+        XCTAssertTrue(
+            hostWasRoutedAtItsFirstLoad(by: app),
             whyNoHostIsRouted(by: app)
         )
         // The transport's selection follows the browser asynchronously: wait
@@ -5683,7 +5683,7 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(status?.preferred, .tunnel)
         let handover = await withCheckedContinuation { continuation in
-            app.directHandoverProvider?(instance, true) { continuation.resume(returning: $0) }
+            app.directHandoverProvider?(instance, .sole) { continuation.resume(returning: $0) }
         }
         XCTAssertEqual(handover, .skipped(.notUsable))
 
@@ -6558,7 +6558,7 @@ final class DirectPathAppTests: XCTestCase {
         let target = try XCTUnwrap(transport.selections.last)
 
         // Before the path is usable nothing is closed.
-        let early = await handover(app, instance, sole: true)
+        let early = await handover(app, instance, other: .sole)
         XCTAssertEqual(early, .skipped(.notUsable))
 
         try await eventually {
@@ -6569,22 +6569,22 @@ final class DirectPathAppTests: XCTestCase {
         }
         // Another document of the store has the host loaded, or the App
         // cannot tell: skipped.
-        let unknown = await handover(app, instance, sole: nil)
-        XCTAssertEqual(unknown, .skipped(.otherDocuments))
-        let shared = await handover(app, instance, sole: false)
-        XCTAssertEqual(shared, .skipped(.otherDocuments))
+        for document in [DirectOtherDocument.unloaded, .unknown, .voice, .child, .runtime] {
+            let shared = await handover(app, instance, other: document)
+            XCTAssertEqual(shared, .skipped(.otherDocuments), document.rawValue)
+        }
         // The sole document: done, here with no public relay to close.
-        let sole = await handover(app, instance, sole: true)
+        let sole = await handover(app, instance, other: .sole)
         XCTAssertEqual(sole, .done(closed: 0, kept: 0))
         // Another host is not the selected instance's.
         let elsewhere = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
-        let other = await handover(app, elsewhere, sole: true)
+        let other = await handover(app, elsewhere, other: .sole)
         XCTAssertEqual(other, .skipped(.notUsable))
 
         // Lost: not usable any more.
         transport.report(.lost, for: target)
         try await eventually { self.directStatus(app, self.instance)?.preferred == .tunnel }
-        let lost = await handover(app, instance, sole: true)
+        let lost = await handover(app, instance, other: .sole)
         XCTAssertEqual(lost, .skipped(.notUsable))
     }
 
@@ -6596,30 +6596,49 @@ final class DirectPathAppTests: XCTestCase {
         configuration.websiteDataStore = store
         let page = WKWebView(frame: .zero, configuration: configuration)
         // Not registered: the App cannot tell.
-        XCTAssertNil(registry.isSoleDocument(page, host: "instance-one.example"))
-        registry.register(page)
-        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-one.example"), true)
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-one.example"), .unknown)
+        registry.register(page, as: .runtime)
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-one.example"), .sole)
 
-        // Another WebView of the same store with no page yet: cannot tell.
+        // Another WebView of the same store with no page yet: cannot tell,
+        // whatever it is.
         let second = WKWebViewConfiguration()
         second.websiteDataStore = store
         let other = WKWebView(frame: .zero, configuration: second)
-        registry.register(other)
-        XCTAssertNil(registry.isSoleDocument(page, host: "instance-one.example"))
+        registry.register(other, as: .child)
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-one.example"), .unloaded)
         other.loadHTMLString("<p>x</p>", baseURL: URL(string: "https://instance-one.example/"))
         try await eventually { other.url != nil }
-        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-one.example"), false)
-        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-two.example"), true)
+        // Loaded, it is named by what it is.
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-one.example"), .child)
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-two.example"), .sole)
+        // To the window, the page has no address yet; once it has, it is
+        // the runtime's.
+        XCTAssertEqual(registry.otherDocument(than: other, host: "instance-one.example"), .unloaded)
+        page.loadHTMLString("<p>z</p>", baseURL: URL(string: "https://instance-one.example/"))
+        try await eventually { page.url != nil }
+        XCTAssertEqual(registry.otherDocument(than: other, host: "instance-one.example"), .runtime)
+
+        // One that has the host loaded is named before one with no address
+        // yet, and a voice take before a window.
+        let third = WKWebViewConfiguration()
+        third.websiteDataStore = store
+        let take = WKWebView(frame: .zero, configuration: third)
+        registry.register(take, as: .voice)
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-one.example"), .child)
+        take.loadHTMLString("<p>v</p>", baseURL: URL(string: "https://instance-one.example/"))
+        try await eventually { take.url != nil }
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-one.example"), .voice)
 
         // A WebView of another store does not count.
         let elsewhere = WKWebViewConfiguration()
         elsewhere.websiteDataStore = WKWebsiteDataStore.nonPersistent()
         let foreign = WKWebView(frame: .zero, configuration: elsewhere)
-        registry.register(foreign)
+        registry.register(foreign, as: .runtime)
         foreign.loadHTMLString("<p>y</p>", baseURL: URL(string: "https://instance-two.example/"))
         try await eventually { foreign.url != nil }
-        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-two.example"), true)
-        withExtendedLifetime((page, other, foreign)) {}
+        XCTAssertEqual(registry.otherDocument(than: page, host: "instance-two.example"), .sole)
+        withExtendedLifetime((page, other, take, foreign)) {}
     }
 
     @MainActor
@@ -7092,7 +7111,7 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     func testDirectHandoverIsVersionTwoTakesNoParametersAndPassesTheSoleDocument() async throws {
-        var asked: [(WebOrigin, Bool?)] = []
+        var asked: [(WebOrigin, DirectOtherDocument)] = []
         let webView = WKWebView(
             frame: .zero,
             configuration: NativeBridgeConfiguration.make(
@@ -7101,13 +7120,13 @@ final class DirectPathAppTests: XCTestCase {
                 directStatus: { _, reply in
                     reply(DirectPathStatus(preferred: .direct, sequence: 1, closure: 0))
                 },
-                directHandover: { origin, sole, reply in
-                    asked.append((origin, sole))
+                directHandover: { origin, other, reply in
+                    asked.append((origin, other))
                     reply(.done(closed: 2, kept: 1))
                 }
             )
         )
-        DirectWebViewRegistry.shared.register(webView)
+        DirectWebViewRegistry.shared.register(webView, as: .runtime)
         let loader = PageLoader()
         webView.navigationDelegate = loader
         try await loader.loadHTML(
@@ -7144,7 +7163,7 @@ final class DirectPathAppTests: XCTestCase {
         // test process; whatever the registry says is passed on unchanged.
         XCTAssertEqual(
             asked.first?.1,
-            DirectWebViewRegistry.shared.isSoleDocument(webView, host: instance.host)
+            DirectWebViewRegistry.shared.otherDocument(than: webView, host: instance.host)
         )
     }
 
@@ -7565,12 +7584,14 @@ final class DirectPathAppTests: XCTestCase {
     /// What `direct.handover()` answers for `origin`, through the provider
     /// the App gives its WebViews; nil without a direct transport.
     @MainActor
-    private func handover(_ app: AppModel, _ origin: WebOrigin, sole: Bool?) async -> DirectHandoverOutcome? {
+    private func handover(
+        _ app: AppModel, _ origin: WebOrigin, other: DirectOtherDocument
+    ) async -> DirectHandoverOutcome? {
         guard let provider = app.directHandoverProvider else {
             return nil
         }
         return await withCheckedContinuation { continuation in
-            provider(origin, sole) { continuation.resume(returning: $0) }
+            provider(origin, other) { continuation.resume(returning: $0) }
         }
     }
 
@@ -7583,18 +7604,32 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
-    /// Why the App routed no host, as far as the App itself says. Two things
-    /// leave a host on the public path with nothing selected and no listener
-    /// to find, both by design: the listener's first bind or its check
-    /// failed (seen on CI after one of the simulator's system services was
-    /// interrupted, run 44934936305), or they were slower than the App's
-    /// listener wait (1 s). The App records only the first.
+    /// The premise of a test that follows WebKit's own connections through
+    /// the listener: the host had its route before its first load. Read
+    /// through WebKit's own store and the App's own record.
+    @MainActor
+    private func hostWasRoutedAtItsFirstLoad(by app: AppModel) -> Bool {
+        !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty
+            && !app.directListenerFailures.contains { $0.step == .late }
+    }
+
+    /// Why the host was not routed at its first load, as far as the App
+    /// itself says. Two things leave it on the public path then, both by
+    /// design: the listener's first bind or its check failed (seen on CI
+    /// after one of the simulator's system services was interrupted, run
+    /// 44934936305), and nothing is selected and no listener serves; or
+    /// they were slower than the App's listener wait (2 s), and the host
+    /// gets its route once the bind is confirmed, which the App records as
+    /// `late` with the bind's duration.
     @MainActor
     private func whyNoHostIsRouted(by app: AppModel) -> String {
-        let failures = app.directListenerFailures
-            .map { "\($0.step.rawValue) \($0.code.map(String.init) ?? "-")" }
+        let record = app.directListenerFailures
+        if let late = record.last(where: { $0.step == .late }) {
+            return "The App routed the host only after its first load: the listener's first bind took \(late.code.map(String.init) ?? "?") ms, longer than the listener wait, so the first load went on the public path and nothing of it passed through the listener."
+        }
+        let failures = record.map { "\($0.step.rawValue) \($0.code.map(String.init) ?? "-")" }
         return failures.isEmpty
-            ? "The App routed no host and recorded no listener failure: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+            ? "The App has routed no host and recorded no listener failure: its first bind is slower than the listener wait, so the host loaded on the public path and gets its route when the bind is confirmed."
             : "The App routed no host: its listener failed (\(failures.joined(separator: ", "))), so the host loads on the public path and nothing is selected."
     }
 
@@ -7605,7 +7640,8 @@ final class DirectPathAppTests: XCTestCase {
     /// run.
     @MainActor
     private func theSimulatorRefusedABind(of app: AppModel) -> Bool {
-        !app.directListenerFailures.isEmpty
+        // A first bind confirmed late is on the same record and is none.
+        app.directListenerFailures.contains { $0.step != .late }
     }
 
     /// The App's direct listener, found from outside: the one new listening
@@ -7620,8 +7656,8 @@ final class DirectPathAppTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> NWEndpoint.Port {
-        XCTAssertFalse(
-            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+        XCTAssertTrue(
+            hostWasRoutedAtItsFirstLoad(by: app),
             whyNoHostIsRouted(by: app),
             file: file,
             line: line
@@ -7699,8 +7735,9 @@ final class DirectPathAppTests: XCTestCase {
         // up first, `504` here, and four streams). So the dial is held until
         // the App has recorded that CONNECT's end; WebKit sends it once its
         // processes are running.
-        guard !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty else {
-            // Nothing of the runtime's goes through the listener then.
+        guard hostWasRoutedAtItsFirstLoad(by: app) else {
+            // Nothing of the runtime's first load goes through the listener
+            // then.
             XCTFail(whyNoHostIsRouted(by: app))
             throw DirectTestTimeout()
         }

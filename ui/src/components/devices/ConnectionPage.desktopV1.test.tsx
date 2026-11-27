@@ -38,12 +38,13 @@ const host = 'max-app.avibe.bot';
 /** The page and everything it reads, loaded after the shell so that they share one `native.ts`. */
 async function mount() {
   vi.resetModules();
-  const [{ ConnectionPage }, { devicesApi }, { InstanceAuthorizationContext }, { DENIED_INSTANCE_CAPABILITIES }, { MemoryRouter, Route, Routes }, { default: i18n }, { setLiveStreamVia }] = await Promise.all([
+  const [{ ConnectionPage }, { devicesApi }, { InstanceAuthorizationContext }, { DENIED_INSTANCE_CAPABILITIES }, { MemoryRouter, Route, Routes }, { default: i18n }, { beginRequestVia, noteRequestVia, setLiveStreamVia }] = await Promise.all([
     import('./ConnectionPage'), import('./api'), import('@/context/InstanceAuthorizationContext'), import('@/lib/sessionInfo'),
     import('react-router-dom'), import('../../i18n'), import('@/lib/liveStreamVia'),
   ]);
   await i18n.changeLanguage('zh');
   setLiveStreamVia('direct');
+  noteRequestVia(beginRequestVia(), 'direct');
   vi.spyOn(devicesApi, 'interfaces').mockResolvedValue([]);
   vi.spyOn(devicesApi, 'connection').mockResolvedValue({
     settings: { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: 'auto', edge_bind_address: '' },

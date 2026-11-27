@@ -18197,8 +18197,9 @@ def _escalation_command_task(
     session_id: Optional[str] = None,
     prompt: str = "",
     agent_name: Optional[str] = None,
+    on_failure: str = "agent",
 ) -> ScheduledTask:
-    """A command definition configured with ``--on-failure agent`` and a binding.
+    """A command definition configured with a failure policy and a binding.
 
     The CLI guarantees such a definition has a session policy and a binding, because
     the escalation is a real Agent turn that has to land in a real conversation.
@@ -18217,8 +18218,119 @@ def _escalation_command_task(
         cwd=str(tmp_path),
         deliver_key="slack::channel::C123",
         shell_command=shell_command,
-        metadata={"origin": "cli", "on_failure": "agent"},
+        metadata={"origin": "cli", "on_failure": on_failure},
     )
+
+
+def test_repeat_failure_reports_second_match_once_then_rearms(tmp_path, monkeypatch):
+    """SCT-063: two matching failures open one incident, independent of previous service processes."""
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command='read reason < reason; [ "$reason" = ok ] || { echo "$reason" >&2; exit 7; }',
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_report"), on_failure="auto",
+    )
+    report_count = 0
+    for reason, should_report in [
+        ("A", False), ("A", True), ("A", False), ("B", False), ("B", True),
+        ("ok", False), ("B", False), ("B", True),
+    ]:
+        # Recreate the store/service: suppression survives a restart, not just an in-memory set.
+        store = ScheduledTaskStore()
+        service = _scheduled_service_with_ledger(tmp_path, store, [])
+        (tmp_path / "reason").write_text(reason + "\n")
+        run = _fire_command_task(service, store.get_task(task.id))
+        assert run["status"] == ("succeeded" if reason == "ok" else "failed"), run.get("error")
+        assert bool(run["metadata"].get("escalation_run_id")) == should_report
+        report_count += should_report
+        assert len(_escalation_runs(store)) == report_count
+        assert store.sqlite_backend.owed_failure_notice(run["id"]) is None
+
+
+def test_repeat_failure_late_stop_does_not_count_or_replace_an_incident(tmp_path, monkeypatch):
+    """A late stop of the first, second, or a different failure must not change what is owed."""
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command='cat reason >&2; exit 7',
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_stop"), on_failure="auto",
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    real_mark = store.mark_task_result
+    for reason, stop, queued_count in [
+        ("A", True, 0), ("A", False, 0), ("A", True, 0), ("A", False, 1),
+        ("B", True, 1), ("A", False, 1), ("B", False, 1), ("B", False, 2),
+    ]:
+        def mark(*args, **kwargs):
+            stamped = real_mark(*args, **kwargs)
+            if stop:
+                assert stamped and service.request_store.cancel_run(kwargs['expected_uncanceled_run_id'])
+            return stamped
+
+        monkeypatch.setattr(store, 'mark_task_result', mark)
+        (tmp_path / 'reason').write_text(reason)
+        run = _fire_command_task(service, store.get_task(task.id))
+        assert run['status'] == ('canceled' if stop else 'failed')
+        assert len(_escalation_runs(store)) == queued_count
+        assert store.sqlite_backend.owed_failure_notice(run['id']) is None
+
+
+def test_repeat_failure_only_a_settled_success_clears_the_incident(tmp_path, monkeypatch):
+    """A zero exit code is not recovery until its Run wins terminal settlement."""
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command='read status < status; exit "$status"',
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_recovery"), on_failure="auto",
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    for code, stop, expected_reports in [
+        (7, None, 0), (0, "interrupt", 0), (7, None, 1),
+        (0, "interrupt", 1), (7, None, 1), (7, None, 1),
+        (0, "flag", 1), (7, None, 1), (7, None, 2),
+    ]:
+        (tmp_path / "status").write_text(f"{code}\n")
+        task = store.get_task(task.id)
+        if stop is None:
+            assert _fire_command_task(service, task)["status"] == "failed"
+        else:
+            queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+            claimed = service.request_store.claim(queued.id)
+            assert claimed is not None
+            original_reconcile = service._reconcile_jobs_off_loop
+            stopped = False
+
+            async def stop_after_stamp():
+                nonlocal stopped
+                if not stopped:
+                    stopped = True
+                    assert service.request_store.cancel_run(queued.id)
+                    if stop == "interrupt":
+                        raise asyncio.CancelledError
+                return await original_reconcile()
+
+            with monkeypatch.context() as patch:
+                patch.setattr(service, "_reconcile_jobs_off_loop", stop_after_stamp)
+                if stop == "interrupt":
+                    with pytest.raises(asyncio.CancelledError):
+                        asyncio.run(service._execute_claimed_request(claimed))
+                else:
+                    asyncio.run(service._execute_claimed_request(claimed))
+            assert stopped
+            assert service.request_store.get_run(queued.id)["status"] == ("canceled" if stop == "interrupt" else "succeeded")
+        assert len(_escalation_runs(store)) == expected_reports, (code, stop)
+
+
+def test_repeat_failure_without_maintainer_owes_one_user_notice(tmp_path, monkeypatch):
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 8", on_failure="auto")
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    for owes_notice in (False, True, False):
+        run = _fire_command_task(service, store.get_task(task.id))
+        assert run["status"] == "failed"
+        assert bool(store.sqlite_backend.owed_failure_notice(run["id"])) is owes_notice
+        assert not _escalation_runs(store)
 
 
 def _queued_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
@@ -18585,8 +18697,9 @@ def test_a_failed_on_failure_agent_command_fire_queues_exactly_one_escalation(
     )
 
 
+@pytest.mark.parametrize("policy", ["agent", "auto"])
 def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, policy,
 ) -> None:
     """SCT-005 -- teardown must not turn an escalated failure into a silent one.
 
@@ -18609,8 +18722,12 @@ def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
         tmp_path,
         shell_command="exit 7",
         session_id=session_id,
+        on_failure=policy,
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
+    if policy == "auto":
+        first = _fire_command_task(service, task)
+        assert not _escalation_runs(store) and store._sqlite.owed_failure_notice(first["id"]) is None
 
     run = _fire_command_task(service, task)
 
@@ -20831,8 +20948,9 @@ def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(
     )
 
 
+@pytest.mark.parametrize("policy", ["agent", "auto"])
 def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, policy,
 ) -> None:
     """Stamp refused -> zero escalation rows AND a notice: never silent.
 
@@ -20864,9 +20982,12 @@ def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
         sessions.close()
     assert session_id is not None
     task = _escalation_command_task(
-        store, tmp_path, shell_command="exit 7", session_id=session_id
+        store, tmp_path, shell_command="exit 7", session_id=session_id, on_failure=policy,
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
+    if policy == "auto":
+        first = _fire_command_task(service, task)
+        assert not _escalation_runs(store) and store.sqlite_backend.owed_failure_notice(first['id']) is None
 
     import storage.background as background
     from storage.session_reclaim import reclaim_bound_definitions

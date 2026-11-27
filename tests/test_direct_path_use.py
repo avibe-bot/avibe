@@ -125,6 +125,118 @@ def test_a_signed_in_remote_request_is_counted_by_the_path_it_arrived_on(instanc
     ]
 
 
+def test_an_accepted_remote_request_is_told_how_it_arrived_and_no_other_is(instance, counted, monkeypatch):  # noqa: F811
+    """The page reads this on each answer: its live stream is a connection of
+    its own, so only a request's own answer says how the requests arrive."""
+    config, _rendezvous = instance
+    owner = _signed_in(config, role="owner", subject="sub-owner")
+    header = ui_server.REQUEST_VIA_HEADER
+
+    def session(client):
+        return client.get("/api/session", base_url=ORIGIN, environ_base=REMOTE_PEER)
+
+    # A gated route and the page's own session check, by the path of each
+    # request: the next one says its own, not the last one's.
+    assert _post(owner, _body()).headers.get(header) == "other"
+    assert session(owner).headers.get(header) == "other"
+    with monkeypatch.context() as patch:
+        patch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+        assert _post(owner, _body()).headers.get(header) == "direct"
+        assert session(owner).headers.get(header) == "direct"
+    assert _post(owner, _body()).headers.get(header) == "other"
+    # Nothing is said to a request with no accepted session, whatever its
+    # path: a refused one, a session check that finds none, a public page.
+    anonymous = app.test_client()
+    with monkeypatch.context() as patch:
+        patch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+        refused = anonymous.post(PATH, base_url=ORIGIN, environ_base=REMOTE_PEER, json=_body())
+        assert refused.status_code == 401 and header not in refused.headers
+        assert header not in session(anonymous).headers
+        assert header not in anonymous.get("/health", base_url=ORIGIN, environ_base=REMOTE_PEER).headers
+
+
+def test_only_an_answer_no_cache_may_keep_says_how_its_request_arrived(
+    instance, counted, monkeypatch, tmp_path  # noqa: F811
+):
+    """Given again after the client changed paths, or by a shared cache to
+    another client, the word would be about a request the instance never saw."""
+    config, _rendezvous = instance
+    (tmp_path / "logo-unread.png").write_bytes(b"\x89PNG\r\n")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: tmp_path)
+    owner = _signed_in(config, role="owner", subject="sub-owner")
+    header = ui_server.REQUEST_VIA_HEADER
+
+    def get(path):
+        return owner.get(path, base_url=ORIGIN, environ_base=REMOTE_PEER)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+        # A static file with a lifetime, served to the signed-in session.
+        asset = get("/logo-unread.png")
+        assert asset.status_code == 200 and "max-age" in asset.headers["Cache-Control"]
+        assert header not in asset.headers
+        # An ordinary gated API answer now gets the default before the word is decided.
+        plain = get("/api/inbox")
+        assert plain.status_code == 200 and plain.headers["Cache-Control"] == "private, no-store"
+        assert plain.headers.get(header) == "direct"
+        # The page's session check says no-store, and says the word.
+        check = get("/api/session")
+        assert "no-store" in check.headers["Cache-Control"]
+        assert check.headers.get(header) == "direct"
+
+
+@pytest.mark.parametrize(
+    ("cache_control", "never_stored"),
+    [
+        ("no-store", True),
+        ("no-store, private", True),
+        ("private, No-Store", True),
+        (None, False),
+        ("", False),
+        ("no-cache", False),
+        ("private, max-age=31536000, immutable", False),
+        ("public, max-age=3600", False),
+        # A Show runtime's own policy, forwarded. Nothing with a quoted
+        # string is read at all: its text is an argument, may hold commas,
+        # and may hold an escaped quote, so a "no-store" inside it is
+        # extension text to a cache.
+        ('private, max-age=3600, no-cache="Set-Cookie"', False),
+        ('private, no-cache="no-store"', False),
+        ('private, max-age=3600, ext="a\\", no-store, \\"b"', False),
+        ('no-store, ext="a"', False),
+        ("max-age=3600, ext=a\\, no-store", False),
+        # Only the whole token, by itself.
+        ("x-no-store", False),
+        ("no-store-x", False),
+        ("no-store=1", False),
+        ("max-age=3600; no-store", False),
+        ("private,\tno-store ", True),
+    ],
+)
+def test_an_answer_is_never_stored_only_by_its_own_directive(cache_control, never_stored):
+    headers = {} if cache_control is None else {"Cache-Control": cache_control}
+    assert ui_server._answer_is_never_stored(ui_server.Response(b"", headers=headers)) is never_stored
+
+
+@pytest.mark.parametrize(
+    ("lines", "never_stored"),
+    [
+        # A cache reads several lines as one list.
+        (["private", "no-store"], True),
+        (["max-age=3600", "no-store"], True),
+        # A quoted string that begins on one line and ends on another: the
+        # line between them is its text, whichever line is looked at.
+        (['max-age=3600, ext="a', "no-store", 'b"'], False),
+        (["no-store", 'max-age=3600, ext="a"'], False),
+    ],
+)
+def test_every_cache_control_line_of_an_answer_is_read_as_one_list(lines, never_stored):
+    response = ui_server.Response(b"")
+    for line in lines:
+        response.headers.append("Cache-Control", line)
+    assert ui_server._answer_is_never_stored(response) is never_stored
+
+
 def test_a_later_request_of_the_session_logs_the_minutes_that_are_over(instance, counted, caplog):  # noqa: F811
     config, _rendezvous = instance
     clock, _counts = counted

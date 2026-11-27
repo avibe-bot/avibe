@@ -104,12 +104,12 @@ final class TurnActivityCoordinator {
     private let beginBackgroundTask: BackgroundTask
     private let isActive: @MainActor () -> Bool
     private static let settingKey = "avibe.liveActivities.enabled"
-    /// Lock Screen and Dynamic Island progress is switched off pending a
-    /// redesign (11-26): the shell does not announce `lockScreenProgress`, the
-    /// setting reads and stays off, nothing starts a card, and a card an
-    /// earlier build left ends at launch and whenever the App comes to the
-    /// front. The feature's code stays; this is the one switch.
-    static let shipsLockScreenProgress = false
+    /// Lock Screen and Dynamic Island progress ships (back on 11-27, after the
+    /// black-card fix). Off, the setting reads and stays off, nothing starts a
+    /// card, and a card an earlier build left ends at launch and whenever the
+    /// App comes to the front. Switching off also means removing the
+    /// `lockScreenProgress` line from NativeShellMetadata.capabilities by hand.
+    static let shipsLockScreenProgress = true
     private let available: Bool
     var deviceEnabled: Bool { available && defaults.bool(forKey: Self.settingKey) }
 
@@ -159,7 +159,7 @@ final class TurnActivityCoordinator {
         self.beginBackgroundTask = beginBackgroundTask
         self.defaults = defaults
         self.available = available
-        // Switched on by an earlier build: it stays off until the redesign.
+        // Switched off: a setting an earlier build stored on is forced off.
         if !available { defaults.set(false, forKey: Self.settingKey) }
         self.mayRequest = mayRequest
         self.now = now
@@ -442,7 +442,34 @@ final class TurnActivityCoordinator {
     private func save() {
         if let data = try? JSONEncoder().encode(ledger) { defaults.set(data, forKey: Self.ledgerKey) }
     }
+
+    /// A request that got no answer from the instance this soon lost its
+    /// connection rather than ran out of time.
+    static let lostConnectionWithin: TimeInterval = 5
+
     private func request(_ target: Target, _ method: String, _ path: String, _ body: [String: Any]?) async throws -> VoiceCaptureInstanceClient.Response {
+        // The card's hidden WebView does not hold off the instance page's
+        // direct hand-over (`holdsOffHandover` below): with Lock Screen
+        // progress on it would refuse one through every running Turn. So a
+        // hand-over may close the connection a request was about to use.
+        // Such a request fails at once, with no answer, and is made once
+        // more; every request here is safe to repeat (two reads, a replace,
+        // a removal). One that waited out its deadline is not: the
+        // instance is not answering, and a second wait helps nobody.
+        let started = now()
+        do {
+            let response = try await requestOnce(target, method, path, body)
+            // A redirect arrives with status 0 too (it is not followed),
+            // and it is an answer.
+            if response.status != 0 || response.redirected
+                || now().timeIntervalSince(started) >= Self.lostConnectionWithin { return response }
+        } catch VoiceCaptureInstanceClient.Failure.offline where now().timeIntervalSince(started) < Self.lostConnectionWithin {
+            // Made again below.
+        }
+        return try await requestOnce(target, method, path, body)
+    }
+
+    private func requestOnce(_ target: Target, _ method: String, _ path: String, _ body: [String: Any]?) async throws -> VoiceCaptureInstanceClient.Response {
         // The one way out to an instance: refused for an address the
         // session no longer vouches for. A refused removal is left to the
         // instance's own expiry.
@@ -451,7 +478,7 @@ final class TurnActivityCoordinator {
         guard let url = URL(string: target.instanceOrigin), let origin = WebOrigin(url: url) else { throw NativePushError.unavailable }
         let id = UUID()
         let client = VoiceCaptureInstanceClient(target: VoiceCaptureTarget(accountID: target.accountID,
-            instanceID: "", origin: origin, storeIdentifier: target.storeID))
+            instanceID: "", origin: origin, storeIdentifier: target.storeID), holdsOffHandover: false)
         clients[id] = client
         defer { client.close(); clients.removeValue(forKey: id) }
         return try await client.request(method, path, json: body)

@@ -21,6 +21,12 @@ const localStore = vi.hoisted(() => ({
   wipeLocalStore: vi.fn(async () => {}),
 }));
 
+vi.mock('../lib/workbenchEventSource', () => ({
+  // This suite exercises ApiContext's reconnect/catch-up owner. Transport
+  // negotiation and real sockets are covered by the adapter/browser suites.
+  createWorkbenchEventSource: (url: string) => new EventSource(url),
+}));
+
 vi.mock('../lib/apiFetch', () => ({ apiFetch }));
 vi.mock('../lib/localStore', () => localStore);
 vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast }) }));
@@ -1102,12 +1108,19 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(1);
     emitHandshakeVia(2, 'other');
     emitControllerLeg(true);
+    // The first refusal is tried again after the short spacing; the other
+    // page is still open, and from then on a repeat waits the long one.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(shell.handovers()).toBe(2);
+    emitHandshakeVia(3, 'other');
+    emitControllerLeg(true);
 
     // The App goes to the background and comes back: its listener closes and
     // binds again, so its preference goes to the public path and returns to
     // the same address. The page is told on the return, by the status it
     // reads and by the events that follow.
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(shell.handovers()).toBe(2);
     shell.call.mockImplementation((method: string) =>
       Promise.resolve(method === 'direct.handover' ? { closed: 1, kept: 0 } : null),
     );
@@ -1115,16 +1128,147 @@ describe('ApiProvider workbench stream liveness', () => {
     setVisibility('visible');
     shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
     await vi.advanceTimersByTimeAsync(0);
-    emitHandshakeVia(3, 'other');
+    emitHandshakeVia(4, 'other');
     emitControllerLeg(true);
     shell.emit({ preferred: 'direct', sequence: 3, closure: 1, path: 'ipv6' });
     await vi.advanceTimersByTimeAsync(0);
-    // An arrival: followed at once, 20 s after the last hand-over, and not
+    // An arrival: followed at once, 15 s after the last hand-over, and not
     // held to the 30 s a repeat on the same address waits.
+    expect(shell.handovers()).toBe(3);
+    emitHandshakeVia(5, 'direct');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(shell.handovers()).toBe(3);
+  });
+
+  // A goal half met is tried again as soon as the short spacing has passed.
+  const shellAnswers = (shell: { call: { mockImplementation: (f: (method: string) => Promise<unknown>) => void } }, answer: unknown) => {
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? answer : null),
+    );
+  };
+
+  it('tries again after the short spacing when a hand-over moved part of the page', async () => {
+    const shell = await pathShell();
+    // The shell closed one quiet connection and kept a busy one.
+    shellAnswers(shell, { closed: 1, kept: 1 });
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // The reopened stream landed on the kept connection.
+    emitHandshakeVia(2, 'other');
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(shell.handovers()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(shell.handovers()).toBe(2);
+    // Again part, and again soon: each one is half met in its own right.
+    emitHandshakeVia(3, 'other');
+    shellAnswers(shell, { closed: 1, kept: 0 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(shell.handovers()).toBe(3);
+    // Now all of it moved: the page is on the path, and stays.
     emitHandshakeVia(4, 'direct');
     await vi.advanceTimersByTimeAsync(60_000);
+    expect(shell.handovers()).toBe(3);
+  });
+
+  it('waits for the verdict of the last hand-over before the next, whatever the stream then says', async () => {
+    const shell = await pathShell();
+    shellAnswers(shell, { closed: 1, kept: 1 });
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // The reopened stream is slow. A request already says it came in the
+    // other way: that asks, and the ask waits for the stream's verdict.
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(shell.handovers()).toBe(1);
+    // The verdict, late: the next hand-over is this one's own, at once.
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(2);
+    // A stream that does not say how it came in is a verdict too: it must
+    // not leave every later hand-over waiting. (Nothing says "other" at
+    // that moment, so only the handshake itself can end the wait.)
+    await requestSaid('direct');
+    emitHandshake(3);
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(shell.handovers()).toBe(3);
+  });
+
+  it('does not wait for a verdict when the shell arrives at a direct address', async () => {
+    const shell = await pathShell();
+    shellAnswers(shell, { closed: 1, kept: 1 });
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // No stream has answered. The path is lost and comes back: a new path.
+    await vi.advanceTimersByTimeAsync(5_000);
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 1, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('waits the long spacing after a hand-over that moved nothing, or that the shell could not make', async () => {
+    for (const answer of [{ closed: 0, kept: 1 }, { closed: 0, kept: 0, skipped: 'not_usable' }, null]) {
+      cleanup();
+      const shell = await pathShell();
+      shellAnswers(shell, answer);
+      shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(shell.handovers()).toBe(1);
+      emitHandshakeVia(2, 'other');
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(shell.handovers()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(shell.handovers()).toBe(2);
+    }
+  });
+
+  it('tries again soon only after the first refusal for another document, and stays within three that moved nothing', async () => {
+    const shell = await pathShell();
+    // Another document of the instance is open, and stays open.
+    shellAnswers(shell, { closed: 0, kept: 0, skipped: 'other_documents' });
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    emitHandshakeVia(2, 'other');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(shell.handovers()).toBe(2);
+    // The second refusal in a row waits the long spacing.
+    emitHandshakeVia(3, 'other');
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(shell.handovers()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(shell.handovers()).toBe(3);
+    // Three in a row moved nothing: no more, however long it stays open.
+    emitHandshakeVia(4, 'other');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(shell.handovers()).toBe(3);
+  });
+
+  it('counts a refusal as the first again once the shell made a hand-over in between', async () => {
+    const shell = await pathShell();
+    shellAnswers(shell, { closed: 0, kept: 0, skipped: 'other_documents' });
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    emitHandshakeVia(2, 'other');
+    // The hidden document is gone five seconds later: the shell moves all of it.
+    shellAnswers(shell, { closed: 1, kept: 0 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(shell.handovers()).toBe(2);
+    emitHandshakeVia(3, 'direct');
+    // Much later the page falls back, and another document is open again.
+    await vi.advanceTimersByTimeAsync(60_000);
+    emitHeartbeat();
+    shellAnswers(shell, { closed: 0, kept: 0, skipped: 'other_documents' });
+    emitHandshakeVia(4, 'other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(3);
+    emitHandshakeVia(5, 'other');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(shell.handovers()).toBe(4);
   });
 
   it('makes at most six hand-overs however the path flaps between kinds, until ten minutes pass without one', async () => {
@@ -1179,6 +1323,90 @@ describe('ApiProvider workbench stream liveness', () => {
     }
     expect(shell.handovers()).toBe(1);
     expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  // The live stream is a connection of its own (a WebSocket), so the stream's
+  // word does not speak for the page's requests. The instance says on each
+  // answer how that request arrived (`X-Avibe-Via`), and the page follows both.
+  const requestSaid = async (word: 'direct' | 'other') => {
+    const page = await import('../lib/liveStreamVia');
+    page.noteRequestVia(page.beginRequestVia(), word);
+  };
+
+  it('keeps going while the requests are not on the path, though the stream came in directly', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // The shell kept the busy request connection; the stream opened a new
+    // one, which took the path. The stream's own reconnect begins with a
+    // request, and that one still came in the other way.
+    await requestSaid('other');
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(shell.handovers()).toBe(2);
+    // Now both came in directly: the page is on the path, and stays.
+    await requestSaid('direct');
+    emitHandshakeVia(3, 'direct');
+    for (let sequence = 2; sequence < 12; sequence += 2) {
+      shell.emit({ preferred: 'tunnel', sequence, closure: 0 });
+      shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 0, path: 'ipv4' });
+      await vi.advanceTimersByTimeAsync(31_000);
+      emitHeartbeat();
+    }
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('asks again when a request falls back to another way between two streams', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    await requestSaid('direct');
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(31_000);
+    emitHeartbeat();
+    expect(shell.handovers()).toBe(1);
+    // The request connection was lost and came back on the public leg. No
+    // stream says so: the request's own answer does.
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+    // The same word again is not a change, and asks nothing.
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('stops after three hand-overs that did not move the requests, though each stream came in directly', async () => {
+    // Requests on a connection the shell cannot close (it was made before
+    // the route existed): every new stream takes the path, the requests never.
+    const shell = await pathShell();
+    await requestSaid('other');
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    for (let round = 1; round <= 3; round += 1) {
+      expect(shell.handovers()).toBe(round);
+      emitHandshakeVia(round + 1, 'direct');
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    expect(shell.handovers()).toBe(3);
+    for (let round = 0; round < 5; round += 1) {
+      emitHandshakeVia(10 + round, 'direct');
+      await vi.advanceTimersByTimeAsync(40_000);
+    }
+    expect(shell.handovers()).toBe(3);
+  });
+
+  it('moves nothing on the relay, whichever of the stream and the requests came in through it', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'relay' });
+    await requestSaid('other');
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(61_000);
+    await requestSaid('direct');
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(shell.handovers()).toBe(0);
   });
 
   it('stops after three hand-overs in a row that did not move the stream, until the path changes', async () => {

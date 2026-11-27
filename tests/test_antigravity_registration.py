@@ -28,7 +28,7 @@ from modules.agents.catalog import (
     get_agent_backend_descriptor,
 )
 from vibe import api
-from vibe.backend_model_catalog import backend_model_snapshot
+from vibe.backend_model_catalog import backend_model_snapshot, load_bundled_catalog
 from vibe.cli_health import cli_version
 from vibe.cli_repair import identify_repair_source
 from vibe.desktop_backends import BACKEND_SPECS, DesktopBackendError, install_desktop_backend
@@ -229,7 +229,8 @@ async def test_antigravity_live_model_catalog_cache_is_account_scoped_and_enrich
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     cfg = V2Config.default()
     cfg.agents.antigravity.enabled = True
-    cfg.agents.antigravity.auth_mode = "oauth-personal"
+    cfg.agents.antigravity.auth_mode = "gemini-api-key"
+    cfg.agents.antigravity.api_key = "fixture-key"
     cfg.save()
 
     from tests.helpers.acp_probe_stub import make_probe_client
@@ -328,6 +329,8 @@ def test_legacy_model_cache_is_ignored_and_replaced(tmp_path, monkeypatch, agy_s
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     cfg = V2Config.default()
+    cfg.agents.antigravity.auth_mode = "gemini-api-key"
+    cfg.agents.antigravity.api_key = "fixture-key"
     cache_path = paths.get_state_dir() / "antigravity_models_cache.json"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps({
@@ -335,18 +338,21 @@ def test_legacy_model_cache_is_ignored_and_replaced(tmp_path, monkeypatch, agy_s
         "models": [{"id": "gemini-4-carbon-medium"}],
     }))
     if not refresh:
-        assert read_antigravity_live_models(cfg) == []
+        assert read_antigravity_live_models(cfg) is None
     else:
-        # Config-option updates must discard legacy entries too, even without a full session payload.
+        # A delta alone must never promote a partial or old list.
         record_antigravity_live_models(cfg, agy_session_options["configOptions"])
-        entries = read_antigravity_live_models(cfg)
-        assert [entry["id"] for entry in entries] == AGY_MODEL_IDS
+        assert read_antigravity_live_models(cfg) is None
+        record_antigravity_live_models(cfg, agy_session_options)
+        assert [entry["id"] for entry in read_antigravity_live_models(cfg)] == AGY_MODEL_IDS
 
 
 def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, monkeypatch):
     from modules.agents.antigravity.models import record_antigravity_live_models, read_antigravity_live_models
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     cfg = V2Config.default()
+    cfg.agents.antigravity.auth_mode = "gemini-api-key"
+    cfg.agents.antigravity.api_key = "fixture-key"
     cfg.save()
     model_option = {"id": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}, {"value": "live-only"}]}
     record_antigravity_live_models(cfg, {"configOptions": [model_option]})
@@ -355,10 +361,16 @@ def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, mon
     snapshot = backend_model_snapshot("antigravity", schedule_refresh=False)
     assert all(row["value"] == "__default__" for row in snapshot["reasoning_options"]["gemini-4-neon"])
     assert all(row["value"] == "__default__" for row in snapshot["reasoning_options"]["live-only"])
+    # One malformed option invalidates the *whole* replacement; it is not a withdrawal.
+    record_antigravity_live_models(cfg, {"configOptions": [{**model_option, "options": [{"value": "live-only"}, {}]}]})
+    assert read_antigravity_live_models(cfg) == entries
+    record_antigravity_live_models(cfg, {"configOptions": [{"id": "model", "options": []}]})
+    empty = backend_model_snapshot("antigravity", schedule_refresh=False)
+    assert empty["authoritative"] and empty["models"] == []
 
 
 def test_bundled_antigravity_menu_matches_agy_1_5_17():
-    bundle = json.loads((Path(__file__).parents[1] / "vibe/data/backend_models.json").read_text())["backends"]["antigravity"]["models"]
+    bundle = load_bundled_catalog()["backends"]["antigravity"]["models"]
     expected = {
         "gemini-4-neon": ["low", "medium", "high", "xhigh"],
         "gemini-4-carbon": ["low", "medium", "high"],

@@ -917,6 +917,41 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             publish_runtime_activity()
 
     @asynccontextmanager
+    async def borrow_picker_server(self) -> AsyncIterator[OpenCodeGeneration]:
+        """Borrow, never prepare or acquire. Do not even wait for a drain to end."""
+        from modules.agents.direct_inventory import InventoryNotReady
+
+        service = self.controller.agent_service
+        server = self._runtime.current()
+        if (
+            server is None
+            or not server.picker_launch_proof
+            or server.model_hub_overlay_hash is not None
+            or server.model_hub_provider_ids
+            or not service.is_backend_ready(self.name)
+        ):
+            raise InventoryNotReady("no serving Direct OpenCode generation")
+
+        # bind is bookkeeping only. A generation replaced or force-stopped
+        # while the HTTP request was in flight cannot contribute an answer.
+        def still_current() -> bool:
+            return (
+                self._runtime.current() is server
+                and service.agents.get(self.name) is self
+                and service.is_backend_ready(self.name)
+            )
+
+        binding = await self._runtime.bind(server)
+        try:
+            if not await asyncio.to_thread(server.serves_picker) or not still_current():
+                raise InventoryNotReady("OpenCode generation not serving")
+            yield server
+            if not await asyncio.to_thread(server.serves_picker) or not still_current():
+                raise ValueError("OpenCode generation changed")
+        finally:
+            await self._release_binding(binding)
+
+    @asynccontextmanager
     async def current_server(self) -> AsyncIterator[OpenCodeGeneration]:
         """Pin the current generation for one controller-side request sequence."""
 
@@ -1564,6 +1599,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model_hub_config, model_hub_overlay, launch_spec, opencode_settings = await self._prepare_launch(
                 request.context
             )
+            if model_hub_overlay is None and (refresh := getattr(self.controller, "native_inventory_refresh", None)):
+                refresh.remember_opencode_cwd(request.working_path)
             turn.binding = await self._runtime.acquire(launch_spec)
             server = turn.binding.generation.runtime
             self._session_generations[request.base_session_id] = server

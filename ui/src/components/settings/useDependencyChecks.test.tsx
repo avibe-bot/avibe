@@ -6,6 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DependenciesResult, DependencyItem, DependencyReadOptions } from '@/context/ApiContext';
 import { DEPENDENCY_CHECK_GROUPS, useDependencyChecks } from './useDependencyChecks';
 
+const reactivation = vi.hoisted(() => new Set<() => void>());
+vi.mock('@/lib/pageActivity', () => ({
+  onPageReactivated: (listener: () => void) => {
+    reactivation.add(listener);
+    return () => reactivation.delete(listener);
+  },
+}));
+
 const row = (id: string, overrides: Partial<DependencyItem> = {}): DependencyItem => ({
   id, kind: 'runtime', required: true, installed: true, status: 'ready', version: '1.2.3', ...overrides,
 });
@@ -126,5 +134,79 @@ describe('independent dependency checks', () => {
     unmount();
     for (const [options] of read.mock.calls) expect(options?.signal?.aborted).toBe(true);
     await act(async () => slow.resolve({ ok: true, deps: [] }));
+  });
+
+  it('retries a failed inspection once and stops even when it keeps failing', async () => {
+    vi.useFakeTimers();
+    try {
+      const read = vi.fn().mockRejectedValue(new Error('offline'));
+      const { result, unmount } = renderHook(() => useDependencyChecks(read));
+      await act(async () => result.current.refresh());
+      expect(read).toHaveBeenCalledTimes(5);
+      await act(async () => vi.advanceTimersByTimeAsync(1_500));
+      expect(read).toHaveBeenCalledTimes(10);
+      await act(async () => vi.advanceTimersByTimeAsync(120_000));
+      expect(read).toHaveBeenCalledTimes(10);
+      expect(result.current.checks.askill.error).toBe('failed');
+      unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['page', 'network', 'stream'] as const)(
+    'recovers only failed groups on %s recovery without duplicating an in-flight read',
+    async (trigger) => {
+      vi.useFakeTimers();
+      try {
+        let offline = true;
+        const slow = deferred();
+        const read = vi.fn(async (options: DependencyReadOptions = {}) => {
+          if (!options.ids?.includes('node')) return ready(options);
+          if (offline) throw new Error('offline');
+          return slow.promise;
+        });
+        const { result, unmount } = renderHook(() => useDependencyChecks(read));
+        await act(async () => result.current.refresh());
+        await act(async () => vi.advanceTimersByTimeAsync(1_500));
+        expect(read).toHaveBeenCalledTimes(6);
+        offline = false;
+        const recover = () => {
+          if (trigger === 'page') for (const listener of reactivation) listener();
+          if (trigger === 'network') window.dispatchEvent(new Event('online'));
+          if (trigger === 'stream') result.current.retryFailed();
+        };
+        act(() => { recover(); recover(); });
+        expect(read).toHaveBeenCalledTimes(7);
+        const signal = read.mock.calls.at(-1)?.[0]?.signal;
+        expect(signal?.aborted).toBe(false);
+        await act(async () => slow.resolve(ready({ ids: ['show-runtime', 'node'] })));
+        expect(result.current.checks.node.error).toBeNull();
+        expect(result.current.checks.node.data?.status).toBe('ready');
+        await act(async () => vi.advanceTimersByTimeAsync(120_000));
+        expect(read).toHaveBeenCalledTimes(7);
+        unmount();
+      } finally { vi.useRealTimers(); }
+    },
+  );
+
+  it('discards pending recovery when unmounted and ignores results from a replaced reader', async () => {
+    vi.useFakeTimers();
+    try {
+      const old = deferred();
+      const read = vi.fn(() => old.promise);
+      const next = vi.fn().mockRejectedValue(new Error('unavailable'));
+      const { result, rerender, unmount } = renderHook(({ reader }) => useDependencyChecks(reader), {
+        initialProps: { reader: read as (options?: DependencyReadOptions) => Promise<DependenciesResult> },
+      });
+      act(() => { void result.current.refresh(); });
+      rerender({ reader: next });
+      await act(async () => old.resolve({ ok: true, deps: [], login_session_state: 'healthy' }));
+      expect(result.current.loginSessionState).toBeUndefined();
+      await act(async () => result.current.refresh());
+      unmount();
+      window.dispatchEvent(new Event('online'));
+      await act(async () => vi.advanceTimersByTimeAsync(120_000));
+      expect(next).toHaveBeenCalledTimes(5);
+      expect(reactivation.size).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 });

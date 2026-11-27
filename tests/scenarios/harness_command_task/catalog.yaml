@@ -697,3 +697,10 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_command_task_integration.py::test_sct_062_command_fire_replaces_service_caller_with_definition_binding
+  - id: SCT-063
+    name: Matching recurring command failures escalate once per incident and rearm after recovery
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_repeat_failure_reports_second_match_once_then_rearms

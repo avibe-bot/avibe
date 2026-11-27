@@ -95,6 +95,11 @@ struct DirectPathUseConnection: Equatable, Sendable {
 /// Counts are kept apart by the account's data store and the instance's
 /// host (`Scope`), in memory only, and a report carries only the counts of
 /// the instance it goes to. An account change drops them all.
+///
+/// Beside the minutes it keeps the last hand-overs the page asked for, one
+/// record each (`Handover`, `handovers` on the same request): a minute says
+/// how many were asked and refused, a record says what one of them closed
+/// and kept, how long it took, and what kind of document refused it.
 final class DirectPathUse: @unchecked Sendable {
     static let shared = DirectPathUse()
 
@@ -152,9 +157,67 @@ final class DirectPathUse: @unchecked Sendable {
         let json: String
     }
 
+    /// One hand-over the page asked for, as the App answered it, ready to
+    /// send.
+    struct Handover: Sendable {
+        let id: Int
+        let scope: Scope
+        /// The second it was asked, on this object's clock: the second the
+        /// App answered it, less the whole seconds that took.
+        let asked: Int
+        /// From the ask to the App's answer, in milliseconds.
+        let ms: Int
+        /// Nil when the App took it: it then closed `closed` quiet
+        /// connections and kept `kept` busy ones, and either may be zero.
+        /// A hand-over that was taken is not thereby one that moved the
+        /// page.
+        let refused: HandoverRule?
+        /// What refused it, when another document did; `sole` otherwise.
+        let other: DirectOtherDocument
+        let closed: Int
+        let kept: Int
+        let path: Path
+
+        /// The entry as the instance requires it: exactly its seven keys,
+        /// written by hand in a fixed order. `age` is seconds from the ask
+        /// to now. The instance accepts `other` other than `none` with
+        /// `other_documents`, and only with it.
+        func json(now: Int) -> String {
+            func bounded(_ value: Int, _ most: Int = Int(Int32.max)) -> Int {
+                min(max(value, 0), most)
+            }
+            let age = bounded(now - asked, DirectPathUse.maxHandoverAgeSeconds)
+            let blocker: DirectOtherDocument
+            if refused == .otherDocuments {
+                blocker = other == .sole ? .unknown : other
+            } else {
+                blocker = .sole
+            }
+            return "{\"age_s\":\(age),\"ms\":\(bounded(ms))"
+                + ",\"refused\":\"\(refused?.rawValue ?? "none")\",\"other\":\"\(blocker.rawValue)\""
+                + ",\"closed\":\(bounded(closed)),\"kept\":\(bounded(kept)),\"path\":\"\(path.rawValue)\"}"
+        }
+    }
+
+    /// The hand-overs of one instance waiting for an answered request, with
+    /// the entries to send for them.
+    struct HandoverReport: Sendable {
+        let ids: [Int]
+        /// Oldest first, at most `handoverLimit`.
+        let json: [String]
+    }
+
     /// The most entries one request carries; the instance ignores a longer
     /// list whole.
     static let reportLimit = 10
+    /// The most hand-overs one request carries, and the most kept for one
+    /// instance while none is answered: the oldest is dropped for a new one.
+    static let handoverLimit = 8
+    /// The most hand-overs kept in all, over every instance.
+    static let handoversKept = 32
+    /// A hand-over older than this is dropped unsent: the instance accepts
+    /// no greater age.
+    static let maxHandoverAgeSeconds = 86400
     /// The most minute-and-path entries kept while none is answered.
     static let kept = 30
     /// A minute older than this is dropped unsent: the instance accepts no
@@ -198,12 +261,32 @@ final class DirectPathUse: @unchecked Sendable {
 
     private let lock = NSLock()
     private let seconds: @Sendable () -> Int
+    /// This App's build (`CFBundleVersion`, for example "57.1"), sent as each
+    /// entry's `app`; nil when it is unknown or not what the instance
+    /// accepts (1–32 printable ASCII characters).
+    let app: String?
     private var entries: [Key: Entry] = [:]
+    /// In the order they were answered.
+    private var handovers: [Handover] = []
+    private var nextHandoverID = 0
 
     /// `seconds`: whole seconds on a clock that never goes back and keeps
     /// counting while the device sleeps.
-    init(seconds: @escaping @Sendable () -> Int = DirectPathUse.continuousSeconds()) {
+    init(
+        seconds: @escaping @Sendable () -> Int = DirectPathUse.continuousSeconds(),
+        app: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    ) {
         self.seconds = seconds
+        self.app = app.flatMap(Self.acceptedBuild)
+    }
+
+    /// The build as the instance accepts it, or nil.
+    static func acceptedBuild(_ build: String) -> String? {
+        let bytes = Array(build.utf8)
+        guard (1...32).contains(bytes.count), bytes.allSatisfy({ (0x20...0x7e).contains($0) }) else {
+            return nil
+        }
+        return build
     }
 
     static func continuousSeconds() -> @Sendable () -> Int {
@@ -260,6 +343,68 @@ final class DirectPathUse: @unchecked Sendable {
         }
     }
 
+    /// The App answered a hand-over the page asked for: `outcome` is its
+    /// answer to the page, `other` what refused it when another document
+    /// did, `took` the time from the ask, and `path` the direct path present
+    /// when it was asked. `handover(refused:scope:path:)` counted the ask.
+    func handoverAnswered(
+        _ outcome: DirectHandoverOutcome,
+        refusedBy other: DirectOtherDocument,
+        took: Duration,
+        scope: Scope,
+        path: Path
+    ) {
+        let refused: HandoverRule?
+        var closed = 0
+        var kept = 0
+        switch outcome {
+        case .done(let closedCount, let keptCount):
+            refused = nil
+            closed = closedCount
+            kept = keptCount
+        case .skipped(.notUsable):
+            refused = .notUsable
+        case .skipped(.otherDocuments):
+            refused = .otherDocuments
+        }
+        // Within the instance's bound (0 ..< 2^31).
+        let (wholeSeconds, attoseconds) = took.components
+        let ms = min(
+            max(0, Int(clamping: wholeSeconds) &* 1_000 &+ Int(attoseconds / 1_000_000_000_000_000)),
+            Int(Int32.max)
+        )
+        lock.withLock {
+            let now = seconds()
+            nextHandoverID += 1
+            handovers.append(Handover(
+                id: nextHandoverID, scope: scope, asked: now - ms / 1000, ms: ms,
+                refused: refused, other: other, closed: closed, kept: kept, path: path
+            ))
+            dropHandoversLocked(now: now)
+        }
+    }
+
+    /// The hand-overs of `scope` no answered request has carried yet, the
+    /// oldest ask first (to the second; of two asked in one second, the one
+    /// answered first). Asking changes nothing: a request that fails
+    /// reports them again with the next.
+    func pendingHandovers(for scope: Scope) -> HandoverReport {
+        lock.withLock {
+            let now = seconds()
+            dropHandoversLocked(now: now)
+            let mine = handovers.filter { $0.scope == scope }.suffix(Self.handoverLimit)
+                .sorted { ($0.asked, $0.id) < ($1.asked, $1.id) }
+            return HandoverReport(ids: mine.map(\.id), json: mine.map { $0.json(now: now) })
+        }
+    }
+
+    /// The instance answered a request that carried these: they are done.
+    func answered(_ report: HandoverReport) {
+        lock.withLock {
+            handovers.removeAll { report.ids.contains($0.id) }
+        }
+    }
+
     func retired(_ rule: RetiredRule, scope: Scope, path: Path) {
         update(scope, path) { entry in
             entry.retired += 1
@@ -280,7 +425,7 @@ final class DirectPathUse: @unchecked Sendable {
                 .prefix(Self.reportLimit)
                 .compactMap { key in
                     entries[key].map {
-                        Report(scope: key.scope, minute: key.minute, path: key.path, json: Self.json($0, key, now: now))
+                        Report(scope: key.scope, minute: key.minute, path: key.path, json: Self.json($0, key, now: now, app: app))
                     }
                 }
         }
@@ -299,6 +444,7 @@ final class DirectPathUse: @unchecked Sendable {
     func removeAll() {
         lock.withLock {
             entries.removeAll()
+            handovers.removeAll()
         }
     }
 
@@ -321,6 +467,22 @@ final class DirectPathUse: @unchecked Sendable {
         }
         for key in entries.keys.sorted(by: Key.earlier).prefix(excess) {
             entries.removeValue(forKey: key)
+        }
+    }
+
+    /// Hand-overs too old to send, then the oldest of an instance past
+    /// `handoverLimit`, then the oldest of all past `handoversKept`.
+    private func dropHandoversLocked(now: Int) {
+        handovers.removeAll { now - $0.asked > Self.maxHandoverAgeSeconds }
+        var seen: [Scope: Int] = [:]
+        var keep = Set<Int>()
+        for handover in handovers.reversed() where seen[handover.scope, default: 0] < Self.handoverLimit {
+            seen[handover.scope, default: 0] += 1
+            keep.insert(handover.id)
+        }
+        handovers.removeAll { !keep.contains($0.id) }
+        if handovers.count > Self.handoversKept {
+            handovers.removeFirst(handovers.count - Self.handoversKept)
         }
     }
 
@@ -352,8 +514,8 @@ final class DirectPathUse: @unchecked Sendable {
     }
 
     /// Written by hand, in a fixed order: four fixed words and integers
-    /// within the instance's bounds.
-    private static func json(_ entry: Entry, _ key: Key, now: Int) -> String {
+    /// within the instance's bounds, then `app` when the build is known.
+    private static func json(_ entry: Entry, _ key: Key, now: Int, app: String?) -> String {
         func bounded(_ value: Int) -> Int {
             min(max(value, 0), Int(Int32.max))
         }
@@ -371,6 +533,12 @@ final class DirectPathUse: @unchecked Sendable {
         let words = "\"client\":\"ios\",\"path\":\"\(key.path.rawValue)\""
             + ",\"handover_rule\":\"\(most(entry.handoverRules))\""
             + ",\"retired_rule\":\"\(most(entry.retiredRules))\""
-        return "{" + words + numbers.map { ",\"\($0.0)\":\(bounded($0.1))" }.joined() + "}"
+        // Printable ASCII only (`acceptedBuild`): a quote and a backslash
+        // are the two characters JSON escapes among them.
+        let build = app.map {
+            ",\"app\":\"" + $0.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        } ?? ""
+        return "{" + words + numbers.map { ",\"\($0.0)\":\(bounded($0.1))" }.joined() + build + "}"
     }
 }

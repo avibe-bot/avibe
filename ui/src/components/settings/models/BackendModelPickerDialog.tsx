@@ -569,7 +569,7 @@ export const BackendModelPickerDialog: React.FC<{
  * renders checked and disabled: it answers 「this exists」 without offering a
  * duplicate.
  */
-const PickerRow: React.FC<{
+export const PickerRow: React.FC<{
   candidate: ModelCandidate;
   picked: boolean;
   listed: boolean;

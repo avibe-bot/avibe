@@ -143,6 +143,66 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
     assert saved.retirement_reason == "schedule_missed"
 
 
+@pytest.mark.parametrize(("state", "flag", "value", "armed"), [
+    ("fired_zone_edit", "--at", "2090-01-01T00:00:00Z", True),
+    ("fired", "--at", "2090-01-01T00:00:00Z", True),
+    ("fired", "--cron", "0 9 * * *", True),
+    ("paused", "--at", "2090-01-01T00:00:00Z", False),
+    ("fired_then_paused", "--at", "2090-01-01T00:00:00Z", False),
+    ("fired_then_ui_paused", "--at", "2090-01-01T00:00:00Z", False),
+    ("cron", "--cron", "0 9 * * *", True),
+    ("paused_cron", "--cron", "0 9 * * *", False),
+    ("fired", "--name", "renamed", False),
+    ("fired", "--at", "2000-01-01T00:00:00Z", False),
+])
+def test_task_update_arm_state(state, flag, value, armed, capsys):
+    store = scheduled_tasks.ScheduledTaskStore()
+    recurring = state.endswith("cron")
+    task = store.add_task(session_key="", prompt="", shell_command="true", timezone_name="UTC",
+                          schedule_type="cron" if recurring else "at", cron="0 * * * *" if recurring else None,
+                          run_at=None if recurring else "2001-01-01T00:00:00+00:00")
+    if state.startswith("fired"):
+        assert scheduled_tasks.TaskExecutionStore().enqueue_task_run(
+            task.id, source_kind="scheduler", task=task, expected_run_at=task.run_at,
+            expected_timezone=task.timezone, expected_job_id="old-generation",
+        )
+        store.load()
+    if state == "fired_zone_edit":
+        zone_args = cli.build_parser().parse_args(["task", "update", task.id, "--timezone", "Asia/Tokyo"])
+        result, error = _capture_stderr_json(cli.cmd_task_update, zone_args)
+        assert result == 1 and error["code"] == "task_schedule_retired"
+        owner = store.get_task(task.id)
+        generation = scheduled_tasks.TaskExecutionStore().get_run(owner.last_run_id)["metadata"]["task_schedule_consumed"]
+        assert store.mark_task_result(task.id, error=None, expected_schedule_generation=generation,
+                                      expected_terminal_run_id=owner.last_run_id)
+    if state.endswith("ui_paused"):
+        assert store.sqlite_backend.set_definition_enabled(task.id, False, definition_type="scheduled")
+    elif "paused" in state:
+        store.set_enabled(task.id, False)
+    extra = ["--timezone", "Asia/Tokyo"] if state == "fired_zone_edit" else []
+    args = cli.build_parser().parse_args(["task", "update", task.id, flag, value, *extra])
+    if value.startswith("2000-"):
+        status, error = _capture_stderr_json(cli.cmd_task_update, args)
+        assert status == 1 and error["code"] == "invalid_run_at"
+        assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).run_at == task.run_at
+        return
+    assert cli.cmd_task_update(args) == 0
+    row = json.loads(capsys.readouterr().out)["definition"]
+    assert row["enabled"] is armed
+    assert (row["next_run_at"] is not None) is armed
+    assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).enabled is armed
+    if flag == "--at" and armed:
+        assert row["next_run_at"] == ("2090-01-01T09:00:00+09:00" if state == "fired_zone_edit" else "2090-01-01T00:00:00+00:00")
+    if "paused" in state:
+        assert row["hint"] == f"paused; run `vibe task resume {task.id}` to arm it"
+        assert cli.cmd_task_show(task.id) == 0
+        shown = json.loads(capsys.readouterr().out)["definition"]
+        assert shown["enabled"] is False and shown["next_run_at"] is None
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
+        listed = next(item for item in json.loads(capsys.readouterr().out)["definitions"] if item["id"] == task.id)
+        assert listed["enabled"] is False and listed["next_run_at"] is None
+
+
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = vibe_agents.VibeAgentStore(db_path)
@@ -371,8 +431,8 @@ def test_task_add_help_states_task_kinds_and_cron_weekday_names(capsys) -> None:
     text = " ".join(capsys.readouterr().out.split())
     assert "A message task stores --message and sends it to the target Session on each run." in text
     assert "A command task (--shell, or a command after '--') runs with no Agent turn." in text
-    assert "with --on-failure agent starts one Agent turn" in text
-    assert "Only that form takes Session, scope, or Agent flags." in text
+    assert "second matching failure once" in text
+    assert "agent-on-repeat" not in text
     assert "Write cron weekdays as names (mon ... sun): numbers are rejected" in text
     assert "vibe task add --cron '0 9 * * mon-fri' --message" in text
 
@@ -1150,7 +1210,8 @@ def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> N
     assert rows[unnamed.id]["message_preview"] == "Share the nightly summary."
     assert rows[paused.id]["lifecycle_state"] == "paused"
     assert rows[paused.id]["last_error"] == "delivery failed"
-    assert "next_run_at" not in rows[paused.id]
+    assert rows[paused.id]["enabled"] is False
+    assert rows[paused.id]["next_run_at"] is None
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -4060,6 +4121,15 @@ def test_task_add_rejects_on_failure_without_command(monkeypatch) -> None:
     assert payload["code"] == "on_failure_requires_command"
 
 
+def test_one_shot_command_without_override_keeps_immediate_notice(tmp_path, capsys, monkeypatch):
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(["--at", "2030-01-01T12:00:00Z", "--shell", "false"])
+    with patch.object(lent, "task_store", store):
+        assert cli.cmd_task_add(args) == 0
+    assert json.loads(capsys.readouterr().out)["definition"]["on_failure"] == "none"
+
+
 def test_task_add_rejects_timeout_without_command(monkeypatch) -> None:
     _bare_terminal_caller(monkeypatch)
     args = _parse_task_add(
@@ -4125,7 +4195,7 @@ def test_task_add_rejects_session_flags_for_pure_command_task(
     monkeypatch, flag_argv: list[str], flag_name: str
 ) -> None:
     _bare_terminal_caller(monkeypatch)
-    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", *flag_argv])
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", "--on-failure", "none", *flag_argv])
 
     result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
@@ -4151,7 +4221,7 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
     _agent_shell_caller(monkeypatch)
     db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory)
     store = _command_task_store(tmp_path)
-    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh"])
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", "--on-failure", "none"])
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
@@ -4172,11 +4242,13 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
     assert definition["metadata"]["created_by"]["caller"]["session_id"] == "sesCaller"
 
 
+@pytest.mark.parametrize("policy,target", [("agent", None), (None, None), (None, "sesMaintainer")])
 def test_task_add_escalating_command_task_binds_caller_session(
-    tmp_path: Path, capsys, monkeypatch, sqlite_schema_db_factory
+    tmp_path: Path, capsys, monkeypatch, sqlite_schema_db_factory, policy, target,
 ) -> None:
     _agent_shell_caller(monkeypatch)
-    db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory)
+    db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory, session_id=target or "sesCaller")
+    monkeypatch.chdir(tmp_path)
     store = _command_task_store(tmp_path)
     args = _parse_task_add(
         [
@@ -4184,8 +4256,8 @@ def test_task_add_escalating_command_task_binds_caller_session(
             "0 3 * * *",
             "--shell",
             "./scripts/sync.sh",
-            "--on-failure",
-            "agent",
+            *(["--on-failure", policy] if policy else []),
+            *(["--session-id", target] if target else []),
             "--message",
             "The nightly sync failed. Diagnose it.",
         ]
@@ -4202,11 +4274,13 @@ def test_task_add_escalating_command_task_binds_caller_session(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     definition = payload["definition"]
-    assert definition["session_id"] == "sesCaller"
+    assert definition["session_id"] == (target or "sesCaller")
+    if policy is None:
+        assert Path(definition["cwd"]).resolve() == tmp_path.resolve()
     assert definition["session_policy"] == "existing"
     assert definition["shell_command"] == "./scripts/sync.sh"
     assert definition["message"] == "The nightly sync failed. Diagnose it."
-    assert definition["metadata"]["on_failure"] == "agent"
+    assert definition["metadata"]["on_failure"] == (policy or "auto")
     assert definition["kind"] == "command"
     assert "session_default_notice" not in payload
 
@@ -4429,12 +4503,12 @@ def test_task_add_pure_shell_command_persists_command_fields(
     assert definition["timeout_seconds"] == 0
     assert "message" not in definition
     assert definition["cwd"] == str(tmp_path)
-    assert definition["metadata"]["on_failure"] == "none"
+    assert definition["metadata"]["on_failure"] == "auto"
     assert "session_workdir" not in definition["metadata"]
 
     stored = store.get_task(definition["id"])
     assert stored.has_command is True
-    assert stored.on_failure == "none"
+    assert stored.on_failure == "auto"
     assert stored.shell_command == "./scripts/sync.sh"
     assert stored.timeout_seconds == 0
 

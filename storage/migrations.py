@@ -145,6 +145,7 @@ class MigrationPreflight:
 
 
 HEAD_TABLES = INITIAL_TABLES | {
+    "command_failure_incidents",
     "live_activity_trackings",
     "run_definitions",
     "agent_runs",

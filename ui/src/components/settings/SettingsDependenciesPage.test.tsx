@@ -6,11 +6,12 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsDependenciesPage } from './SettingsDependenciesPage';
-import type { DependenciesResult, DependencyReadOptions } from '@/context/ApiContext';
+import type { DependenciesResult, DependencyReadOptions, WorkbenchEventHandlers } from '@/context/ApiContext';
 
 const api = vi.hoisted(() => ({
   installDependency: vi.fn(),
   listDependencies: vi.fn(),
+  connectWorkbenchEvents: vi.fn((_handlers: WorkbenchEventHandlers) => vi.fn()),
 }));
 const showToast = vi.hoisted(() => vi.fn());
 
@@ -75,6 +76,19 @@ afterEach(() => {
 });
 
 describe('SettingsDependenciesPage Show Runtime status', () => {
+  it('re-reads failed checks when the shared event connection recovers', async () => {
+    api.listDependencies.mockRejectedValue(new Error('offline'));
+    const { unmount } = renderPage();
+    await waitFor(() => expect(screen.getAllByText('settings.dependencies.checkFailed')).toHaveLength(6));
+    stubDependencies({ ok: true, deps: [dependency()] });
+    await act(async () => api.connectWorkbenchEvents.mock.calls.at(-1)?.[0].onConnected?.());
+    await waitFor(() => expect(screen.queryByText('settings.dependencies.checkFailed')).toBeNull());
+    expect(api.listDependencies).toHaveBeenCalledTimes(10);
+    const unsubscribe = api.connectWorkbenchEvents.mock.results.at(-1)?.value;
+    unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
   it('renders inspection failure without authorizing install or repair', async () => {
     stubDependencies({
       ok: true,

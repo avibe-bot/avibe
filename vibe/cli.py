@@ -1303,15 +1303,14 @@ def _task_add_examples_text() -> str:
     return dedent(
         """\
         A message task stores --message and sends it to the target Session on each run.
-        A command task (--shell, or a command after '--') runs with no Agent turn. A success is
-          silent; a failure records a notice, or with --on-failure agent starts one Agent turn
-          with the failure and --message. Only that form takes Session, scope, or Agent flags.
+        A command task (--shell, or a command after '--') runs with no Agent turn.
+        Recurring commands report the second matching failure once, to --session-id or the
+          creating Session, otherwise by notice. One-shot failures notify immediately.
         Write cron weekdays as names (mon ... sun): numbers are rejected, because Avibe reads
           0 as Monday and crontab(5) reads it as Sunday.
 
         Examples:
           vibe task add --cron '0 9 * * mon-fri' --message 'Share the morning summary.'
-          vibe task add --at '2026-03-31T09:00:00+08:00' --create-session --scope-id slack::channel::C123 --message-file briefing.md
           vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'The sync failed. Diagnose it.'
         """
     )
@@ -1322,6 +1321,7 @@ def _task_update_examples_text() -> str:
         """\
         Unspecified fields keep their values. A message task cannot become a command task, or
           the reverse, and --on-failure cannot change: remove the task and add a new one.
+        A new future --at or --cron re-arms a consumed one-shot. Paused tasks stay paused.
         Write cron weekdays as names (mon ... sun); numbers are rejected.
 
         Examples:
@@ -2824,8 +2824,12 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
     """
 
     kind = _task_kind(task)
+    disarmed = (
+        {"enabled": False, "next_run_at": None}
+        if task.get("enabled") is False and task.get("lifecycle_state") != "removed" else {}
+    )
     if not brief:
-        return _definition_detail_payload(task, kind=kind, on_failure=_task_on_failure(task))
+        return _definition_detail_payload(task, kind=kind, on_failure=_task_on_failure(task)) | disarmed
     name = task.get("name")
     # An unnamed task is labelled by what it does.
     preview = {}
@@ -2858,7 +2862,7 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
             **({} if task.get("lifecycle_state") == "removed" else _definition_health_fields(task)),
             "resume_blocked": task.get("resume_blocked"),
         }
-    )
+    ) | disarmed
 
 
 def _task_fallback_projection(task) -> dict:
@@ -2980,6 +2984,14 @@ def _task_mutation_payload(task, reader: SQLiteBackgroundTaskStore | None = None
     if projected is None:
         projected = _task_fallback_projection(task)
     return _task_projection_payload(projected)
+
+
+def _task_update_payload(task, reader) -> dict:
+    payload = _task_mutation_payload(task, reader)
+    payload.setdefault("next_run_at", None)
+    if not payload["enabled"] and not payload.get("resume_blocked") and not payload.get("retired_at"):
+        payload["hint"] = f"paused; run `vibe task resume {task.id}` to arm it"
+    return payload
 
 
 def _task_request_store(*, read_only: bool = False) -> TaskExecutionStore:
@@ -4637,20 +4649,35 @@ def _task_add(args, invocation: _ServiceInvocation) -> dict:
             help_command="vibe task add --help",
         )
         requested_on_failure = getattr(args, "on_failure", None)
-        effective_on_failure = requested_on_failure or "none"
-        # A command task that escalates keeps the whole Session/Agent flow below,
-        # because its failure notice runs a real Agent turn. A PURE command task has
-        # no Session at all, so every Session-shaped input is refused instead of
-        # silently stored.
-        is_pure_command = has_command and effective_on_failure == "none"
+        schedule_type = "cron" if args.cron else "at"
+        automatic = has_command and requested_on_failure is None and schedule_type == "cron"
+        effective_on_failure = "auto" if automatic else requested_on_failure or "none"
+        # A terminal-created recurring command need not invent an Agent or Session.
+        # Its second matching failure takes the ordinary failure-notice route.
+        has_owner = bool(_explicit_flag_names(args, _TASK_SESSION_FLAG_ARGS))
+        if automatic and not has_owner:
+            implicit_id = _default_session_id_from_caller(caller_context)
+            if implicit_id:
+                from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
+
+                # Provenance survives its Session. Only bind a usable maintainer;
+                # an explicit target, a denied admission, or a store fault must
+                # still follow the existing error path rather than reroute work.
+                try:
+                    resolve_session_id_target(implicit_id, read_only=True)
+                except UnresolvableSessionTarget as exc:
+                    if exc.reason not in {"missing", "archived"}:
+                        raise
+                else:
+                    has_owner = True
+        is_pure_command = has_command and (effective_on_failure == "none" or (automatic and not has_owner))
         _validate_task_action_matrix(
             args,
             has_command=has_command,
             requested_on_failure=requested_on_failure,
-            effective_on_failure=effective_on_failure,
+            effective_on_failure="none" if is_pure_command else effective_on_failure,
             help_command="vibe task add --help",
         )
-        schedule_type = "cron" if args.cron else "at"
         if is_pure_command:
             _reject_session_flags_for_command_task(args, help_command="vibe task add --help")
             # Deliberately BEFORE any caller default is applied: inside an Avibe Agent
@@ -4736,6 +4763,9 @@ def _task_add(args, invocation: _ServiceInvocation) -> dict:
                 invocation_cwd=invocation.cwd,
                 invocation_home=invocation.home,
             )
+            if automatic and not getattr(args, "cwd", None) and session_policy == "existing":
+                # Naming (or inheriting) the maintainer must not move a relative command.
+                cwd = _invocation_directory(invocation.cwd, help_command="vibe task add --help")
             agent_resolution = _resolve_agent_target(
                 agent_name=getattr(args, "agent", None),
                 session_id=session_id,
@@ -5079,6 +5109,8 @@ def _resolve_definition_schedule_update(
                 help_command=help_command,
                 details={"at": args.at, "timezone": timezone_name},
             ) from exc
+        if datetime.fromisoformat(run_at) <= datetime.now(timezone):
+            raise TaskCliError("--at must be in the future", code="invalid_run_at", help_command=help_command)
         return "at", None, run_at, timezone_name
     return task.schedule_type, task.cron, task.run_at, timezone_name
 
@@ -5202,7 +5234,7 @@ def _task_update_pure_command(args, store, task, invocation: _ServiceInvocation,
         update_command_fields=True,
         metadata=metadata,
     )
-    return _definition_payload(_task_mutation_payload(updated, invocation.stores.definition_reader))
+    return _definition_payload(_task_update_payload(updated, invocation.stores.definition_reader))
 
 
 def cmd_task_update(args):
@@ -5211,7 +5243,7 @@ def cmd_task_update(args):
 
 def _task_update(args, invocation: _ServiceInvocation) -> dict:
     from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
-    from storage.background import DefinitionWriteConflict
+    from storage.background import DefinitionWriteConflict, TaskScheduleRetired
 
     stores = invocation.stores
     reserved_session_id: Optional[str] = None
@@ -5234,7 +5266,10 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
         # to be legal beside a command (``message_without_consumer``). Rejecting it for
         # every command task forbade the exact shape the add path blesses, so the
         # guidance could only be reworded by deleting and recreating the task.
-        if task.has_command and message_flags and task.on_failure == "none":
+        unbound_command = task.has_command and (task.on_failure == "none" or (
+            task.on_failure == "auto" and not (task.session_policy or task.session_id or task.session_key)
+        ))
+        if unbound_command and message_flags:
             raise TaskCliError(
                 "this task runs a command, so its message inputs cannot be changed",
                 code="task_mode_immutable",
@@ -5266,7 +5301,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
                     "requested_on_failure": requested_on_failure,
                 },
             )
-        if task.has_command and task.on_failure == "none":
+        if unbound_command:
             return _task_update_pure_command(args, store, task, invocation, expected_state=expected_state)
 
         if getattr(args, "reset_delivery", False) and (
@@ -5675,7 +5710,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_mutation_payload(updated, stores.definition_reader)
+        task_payload = _task_update_payload(updated, stores.definition_reader)
         return _definition_payload(task_payload, warnings=warnings)
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
@@ -5688,12 +5723,18 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
             help_command="vibe task update --help",
             details={"task_id": getattr(args, "task_id", exc.definition_id)},
         ) from exc
-    except Exception:
+    except Exception as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task update failed before its Session reservation was adopted",
             )
+        if isinstance(exc, TaskScheduleRetired):
+            raise TaskCliError(
+                "Cannot rewrite the recorded time of a retired one-shot.", code=exc.code,
+                hint="Pass a new future --at or --cron to replace the schedule.",
+                help_command="vibe task update --help",
+            ) from exc
         raise
 
 
@@ -21200,7 +21241,6 @@ def build_parser():
     task_add_parser = task_subparsers.add_parser(
         "add",
         help="Create a scheduled task",
-        description="Schedule an Agent message (message task) or a command with no Agent turn (command task).",
         epilog=_task_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe task add --help",
@@ -21229,7 +21269,7 @@ def build_parser():
         "--on-failure",
         choices=["none", "agent"],
         default=None,
-        help="Command task failure: record a notice, or start an Agent turn",
+        help="Override the default: notice on every failure (none), or an Agent turn on every failure (agent)",
     )
     task_add_parser.add_argument(
         "--timeout",

@@ -622,7 +622,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The listener's last few failures, for the rendezvous request.
+    /// The listener's last few failures, and a first bind confirmed late,
+    /// for the rendezvous request.
     var directListenerFailures: [DirectListenerFailure] {
         directPathController?.listenerFailures ?? []
     }
@@ -633,12 +634,12 @@ final class AppModel: ObservableObject {
         guard directPathController != nil else {
             return nil
         }
-        return { [weak self] origin, soleDocument, reply in
+        return { [weak self] origin, other, reply in
             guard let controller = self?.directPathController else {
                 reply(.skipped(.notUsable))
                 return
             }
-            controller.handover(for: origin, soleDocument: soleDocument, reply: reply)
+            controller.handover(for: origin, other: other, reply: reply)
         }
     }
 
@@ -1587,6 +1588,10 @@ final class AppModel: ObservableObject {
             signposter.endInterval("runtime open", state, "ended")
             runtimeOpenSignpost = nil
         }
+        if let old, old.id != new?.id {
+            // An attempt ended or was replaced (`ColdStartTimings`).
+            ColdStartTimings.shared.openEnded(attemptID: old.id)
+        }
         guard let new else {
             return
         }
@@ -1595,6 +1600,18 @@ final class AppModel: ObservableObject {
         }
         if old?.id != new.id || old?.phase != new.phase {
             signposter.emitEvent("runtime open stage", "\(String(describing: new.phase), privacy: .public)")
+            // The first frame that uncovers the instance (`ColdStartTimings`):
+            // its cached page, shown uncovered (live to touch, or with the
+            // offline or unreachable row, which can come straight from under
+            // the cover), or connected from under its cover (straight to
+            // `.documentLoaded`); or its live document.
+            let fromCache: [RuntimeOpenPhase] = [.showingCached, .showingCachedLive, .cachedUnreachable, .cachedOffline]
+            if [.showingCachedLive, .cachedOffline, .cachedUnreachable].contains(new.phase) {
+                ColdStartTimings.shared.firstVisible(.cached, attemptID: new.id)
+            } else if new.phase == .documentLoaded {
+                let cached = old?.id == new.id && old.map { fromCache.contains($0.phase) } == true
+                ColdStartTimings.shared.firstVisible(cached ? .cached : .live, attemptID: new.id)
+            }
         }
         if new.phase == .documentLoaded || new.phase == .failed,
            let state = runtimeOpenSignpost {
@@ -1627,6 +1644,9 @@ final class AppModel: ObservableObject {
         {
             Self.coldStartSignposter.emitEvent("opened before the session check")
             openRuntime(runtime)
+            if let attempt = runtimeOpenAttempt, attempt.runtime == runtime {
+                ColdStartTimings.shared.openedRestoredInstance(attemptID: attempt.id)
+            }
             let check = Self.coldStartSignposter.beginInterval("session check")
             let checked = try? await sessionCoordinator.refresh()
             Self.coldStartSignposter.endInterval("session check", check)
@@ -1659,6 +1679,10 @@ final class AppModel: ObservableObject {
             ) {
                 sessionCoordinator.deactivateAccountSurface()
                 openRuntime(runtime)
+                // A launch from a tap or a shortcut is no restored open.
+                if pendingInstanceOpen == nil, let attempt = runtimeOpenAttempt, attempt.runtime == runtime {
+                    ColdStartTimings.shared.openedRestoredInstance(attemptID: attempt.id)
+                }
                 // Opened although listed offline (only for its cached page):
                 // the confirmed listing applies as after an open-first.
                 settleListedAvailability(runtime, checked: state)

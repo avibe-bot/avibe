@@ -30,6 +30,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      native_path_receipt: ${{ steps.scope.outputs.native_path_receipt }}
       advisory_ios: ${{ steps.scope.outputs.advisory_ios }}
       portfolio: ${{ steps.scope.outputs.portfolio }}
       sensitive: ${{ steps.scope.outputs.sensitive }}
@@ -70,6 +71,9 @@ jobs:
     needs: changes
     if: fromJSON(needs.changes.outputs.dispatch_jobs)['ios-shell'] == 'run'
     uses: ./.github/workflows/ios-shell.yml
+    with:
+      native-path-receipt: ${{ needs.changes.outputs.native_path_receipt }}
+      fast-native: ${{ github.event_name == 'pull_request' && needs.changes.outputs.portfolio == 'true' }}
 
   desktop-shell:
     needs: changes
@@ -314,6 +318,7 @@ jobs:
           npm run typecheck:tests
           npm run typecheck:design
           npm run typecheck:e2e
+          npm run test:dev-event-proxy
 
   ui-tests:
     needs: changes
@@ -393,7 +398,7 @@ jobs:
           - lane: 4
             suites: |
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
-              npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts
+              npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts unacknowledged-send.spec.ts
               npm run test:badge-triggers
               # What a real browser does with a retired address's answer (Chromium and WebKit).
               npm run test:address-retired

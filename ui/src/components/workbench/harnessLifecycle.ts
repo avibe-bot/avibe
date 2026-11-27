@@ -572,7 +572,7 @@ export function taskTimeout(row: HarnessDefinitionFacts): {
   return { seconds: COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS, isDefault: true };
 }
 
-export const TASK_ON_FAILURE_VALUES = ['none', 'agent'] as const;
+export const TASK_ON_FAILURE_VALUES = ['none', 'agent', 'auto'] as const;
 export type TaskOnFailure = (typeof TASK_ON_FAILURE_VALUES)[number];
 
 // What a failed command run does. MIRROR of ``ScheduledTask.on_failure``: the
@@ -586,6 +586,7 @@ export function taskOnFailure(row: HarnessDefinitionFacts): TaskOnFailure {
   const raw = (metadata as Record<string, unknown>).on_failure;
   if (typeof raw !== 'string') return 'none';
   const value = raw.trim().toLowerCase();
+  if (value === 'auto' && row.schedule_type === 'cron') return 'auto';
   return value === 'agent' ? 'agent' : 'none';
 }
 

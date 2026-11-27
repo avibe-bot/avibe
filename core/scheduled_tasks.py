@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -119,8 +120,10 @@ from storage.background import (
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
+    TASK_PAUSED_AFTER_CONSUMPTION,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
+    TaskScheduleRetired,
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
     TASK_LAST_RESULT_STATUS_METADATA_KEY,
     SweptRun,
@@ -132,6 +135,7 @@ from storage.background import (
     notice_write_expectation,
     owed_notice_eligible,
     require_task_resumable,
+    task_resume_block,
     resolve_run_at,
     task_schedule_generation,
 )
@@ -1581,6 +1585,7 @@ class ScheduledTaskStore:
         expect: DefinitionWriteExpectation,
         *,
         queued_run: Optional[dict[str, Any]] = None,
+        repeat_failure_key: Optional[str] = None,
         expected_uncanceled_run_id: Optional[str] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
@@ -1619,7 +1624,7 @@ class ScheduledTaskStore:
                 self._publish(task)
                 _publish_task_definitions_updated()
                 return True
-            if queued_run is None:
+            if queued_run is None and repeat_failure_key is None:
                 landed = self._sqlite.upsert_scheduled_task(
                     task.to_dict(),
                     expect=expect,
@@ -1636,6 +1641,7 @@ class ScheduledTaskStore:
                     task.to_dict(),
                     expect=expect,
                     run_payload=queued_run,
+                    **({"repeat_failure_key": repeat_failure_key} if repeat_failure_key is not None else {}),
                     expected_uncanceled_run_id=expected_uncanceled_run_id,
                     expected_schedule_generation=expected_schedule_generation,
                     expected_terminal_run_id=expected_terminal_run_id,
@@ -1814,6 +1820,8 @@ class ScheduledTaskStore:
             )
         expect = self._read_state(task)
         task.enabled = enabled
+        if not enabled and task.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            task.metadata[TASK_PAUSED_AFTER_CONSUMPTION] = "paused"
         task.updated_at = _utc_now_iso()
         if not self._write_task(task, expect):
             # A pause/resume that lost to a teardown must not be reported as applied:
@@ -1887,6 +1895,12 @@ class ScheduledTaskStore:
         # payload still belongs to the caller's original read, not this newer row.
         expect = expected_state or self._read_state(task)
         previous_schedule = (task.schedule_type, task.run_at, task.timezone)
+        consumed_only = (
+            task.schedule_type == "at" and not task.enabled and task.retired_at
+            and task.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED
+            and not task.metadata.get(TASK_PAUSED_AFTER_CONSUMPTION)
+            and not task_resume_block(task.metadata, task.session_id)
+        )
         task.name = name
         task.session_key = session_key
         task.session_id = session_id
@@ -1905,7 +1919,26 @@ class ScheduledTaskStore:
         task.timezone = timezone_name
         # Changing a one-shot schedule creates a new lifecycle. The previous
         # terminal fact remains in Run history but cannot own the new instant.
-        if (schedule_type, run_at, timezone_name) != previous_schedule:
+        schedule_changed = (schedule_type, run_at, timezone_name) != previous_schedule
+        if schedule_changed and previous_schedule[0] == schedule_type == "at" and task.retired_at:
+            # A different display zone (or ISO spelling) is not a new fire.
+            try:
+                same_instant = (
+                    resolve_run_at(previous_schedule[1], previous_schedule[2]).timestamp()
+                    == resolve_run_at(run_at, timezone_name).timestamp()
+                )
+            except (ValueError, TypeError, KeyError):
+                pass  # Permit replacement of an invalid legacy schedule.
+            else:
+                if same_instant:
+                    # The consuming Run owns the original strings as well as the instant.
+                    # Do not invalidate its queued execution, terminal stamp, or history.
+                    raise TaskScheduleRetired(task.id)
+        if schedule_changed:
+            if consumed_only and (schedule_type, run_at) != previous_schedule[:2] and compute_next_run_at(
+                enabled=True, schedule_type=schedule_type, cron=cron, run_at=run_at, timezone_name=timezone_name,
+            ):
+                task.enabled = True
             task.retired_at = None
             task.retirement_reason = None
             task.last_run_id = None
@@ -1919,6 +1952,8 @@ class ScheduledTaskStore:
             metadata if metadata is not None else task.metadata,
             user_context,
         )
+        if schedule_changed:
+            task.metadata.pop(TASK_PAUSED_AFTER_CONSUMPTION, None)
         task.updated_at = _utc_now_iso()
         if not self._write_task(
             task,
@@ -2082,6 +2117,7 @@ class ScheduledTaskStore:
         exit_code: Optional[int] = None,
         records_command_outcome: bool = False,
         timed_out: bool = False,
+        repeat_failure_key: Optional[str] = None,
         result_status: Optional[str] = None,
         queued_run: Optional[dict[str, Any]] = None,
         expected_uncanceled_run_id: Optional[str] = None,
@@ -2227,7 +2263,7 @@ class ScheduledTaskStore:
         # the user replaces and resumes that schedule must not disable the new
         # lifecycle. The legacy file backend has no atomic enqueue boundary, so
         # it retains its result-time transition for compatibility.
-        if disable_one_shot and task.schedule_type == "at" and self._sqlite is None:
+        if disable_one_shot and task.enabled and task.schedule_type == "at" and self._sqlite is None:
             task.enabled = False
             if task.retired_at is None:
                 task.retired_at = _utc_now_iso()
@@ -2241,6 +2277,7 @@ class ScheduledTaskStore:
             task,
             expect,
             queued_run=queued_run,
+            repeat_failure_key=repeat_failure_key,
             expected_uncanceled_run_id=expected_uncanceled_run_id,
             expected_schedule_generation=expected_schedule_generation,
             expected_terminal_run_id=expected_terminal_run_id,
@@ -2257,6 +2294,8 @@ class ScheduledTaskStore:
             return False
         expect = self._read_state(task)
         task.enabled = False
+        if task.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            task.metadata[TASK_PAUSED_AFTER_CONSUMPTION] = "paused"
         task.last_run_at = _utc_now_iso()
         task.last_error = error
         task.updated_at = _utc_now_iso()
@@ -9358,7 +9397,7 @@ class ScheduledTaskService:
             else:
                 outcome = dict(intent.outcome)
             queued_run = intent.definition_stamp.get("queued_run")
-            if stamped and queued_run:
+            if stamped and queued_run and intent.definition_stamp.get("repeat_failure_key") is None:
                 outcome["escalation_run_id"] = queued_run["id"]
             elif stamped is False and not outcome.get("error"):
                 outcome.update(ok=False, error=self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY))
@@ -9697,7 +9736,9 @@ class ScheduledTaskService:
         # RAISES on a disabled one, and a failed ``at`` task is disabled by the very
         # stamp that authorises this turn.
         escalation_request = None
-        if error and task.on_failure == "agent":
+        repeat = task.on_failure == "auto" and task.schedule_type == "cron"
+        has_maintainer = bool(task.session_id or task.session_key or task.session_policy == "create_per_run")
+        if error and (task.on_failure == "agent" or (repeat and has_maintainer)):
             escalation_request = self.request_store.build_hook_send(
                 session_key=task.session_key or "",
                 session_id=task.session_id,
@@ -9762,6 +9803,17 @@ class ScheduledTaskService:
             ),
             expected_non_owner_retired_one_shot=non_owner_retired_expectation,
         )
+        if repeat:
+            # Classify by stable machine outcome and the last captured diagnostic,
+            # never a Run id, translated prefix or stdout. No diagnostic text in the cursor.
+            detail = next((line.strip() for line in reversed((stderr_value or "").splitlines()) if line.strip()), "")
+            identity = [task.shell_command, task.command, timed_out, exit_code,
+                        "" if timed_out else detail or (error if exit_code is None else "")]
+            stamp_kwargs.update(
+                repeat_failure_key=hashlib.sha256(json.dumps(identity).encode()).hexdigest() if error else "",
+                expected_binding=(task.session_id, task.session_key, task.schedule_type),
+                expected_uncanceled_run_id=execution_id,
+            )
         stamped, projection_error, retry_stamp = await self._store_step(
             self._mark_command_result, task.id, **stamp_kwargs
         )
@@ -9770,7 +9822,7 @@ class ScheduledTaskService:
         # so claiming an escalation id here would suppress the failure notice in favour
         # of a turn that does not exist -- and the failure would be silent.
         escalation_run_id = (
-            escalation_request.id if escalation_request is not None and stamped else None
+            escalation_request.id if escalation_request is not None and stamped and not repeat else None
         )
         if stamped is False:
             # Same refusal as the message path (HFR-261/HFR-264): the definition was
@@ -9828,6 +9880,8 @@ class ScheduledTaskService:
         """
 
         lines: list[str] = []
+        if task.on_failure == "auto":
+            lines.append("Triage this recurring command failure. Contact the user only if a decision or permission is needed.")
         stored_message = (task.prompt or "").strip()
         if stored_message:
             lines.append(stored_message)

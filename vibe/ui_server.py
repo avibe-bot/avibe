@@ -35,7 +35,7 @@ from aiohttp import ClientConnectionError, ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from fastapi.exception_handlers import http_exception_handler
-from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.datastructures import MutableHeaders, UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect, HTTPConnection
@@ -185,7 +185,25 @@ class _ShowEventDispatchOutcome(str, Enum):
 # served as a type browsers accept (an octet-stream manifest is rejected).
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
-app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
+_API_CACHE_DEFAULT = "private, no-store"
+
+
+class _UIApp(CompatApp):
+    """Backstop for middleware denials and framework errors that bypass after_request."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            return await super().__call__(scope, receive, send)
+
+        async def send_with_cache_policy(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message).setdefault("Cache-Control", _API_CACHE_DEFAULT)
+            await send(message)
+
+        await super().__call__(scope, receive, send_with_cache_policy)
+
+
+app = _UIApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
 register_mobile_routes(app)
 register_connection_routes(app)
 
@@ -1548,10 +1566,16 @@ def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
     Called where a request's session is accepted as current: the gate every
     route that needs a session passes, and ``/api/session``, which reads the
     session itself.
+
+    The same observation is told to the page on this request's answer
+    (``add_request_via_header``): a page's live stream is a connection of its
+    own, so the stream's ``via`` no longer says how the page's requests arrive.
     """
+    direct = _is_direct_ingress_request()
+    g.remote_request_via = "direct" if direct else "other"
     direct_path_use.counts.note(
         (str(identity.get("sub")), str(identity.get("browser_session_id"))),
-        direct=_is_direct_ingress_request(),
+        direct=direct,
         owner=owner,
     )
 
@@ -3235,6 +3259,56 @@ def add_public_show_representation_vary(response: Response) -> Response:
     return response
 
 
+# How this request arrived, for the page that made it: ``direct`` through the
+# direct ingress, ``other`` for any other way in, which is never named (the
+# words of the event stream's ``via``). Only on the answer to a request whose
+# remote session was accepted as current, and only what the instance counted
+# for it. Not an address, and nothing a client did not already choose.
+#
+# Only on an answer that itself says ``no-store``: one no cache may keep, so
+# the word cannot be given again for a request the instance never saw (after
+# the client changed paths, or by a shared cache to another client). Opting
+# in by that directive, not out by a list of what makes an answer reusable:
+# a lifetime, a validator added after this hook, or a policy forwarded from
+# a Show runtime can then never carry it. The page's session check, which
+# begins every stream, is such an answer.
+REQUEST_VIA_HEADER = "X-Avibe-Via"
+
+
+def _answer_is_never_stored(response: Response) -> bool:
+    """The answer carries an actual ``no-store`` directive, read without parsing.
+
+    This is no HTTP parser and must not become one: a value it cannot read as
+    plainly as a cache does is declined. Any quoted string is (its text may
+    hold commas, and an escaped quote, so ``no-store`` inside it would look
+    like a directive here and be extension text to a cache), and then a whole
+    comma-separated token must be exactly ``no-store``. Every ``Cache-Control``
+    line of the answer is read as the one list a cache makes of them: a
+    quoted string may begin on one line and end on another.
+    """
+    value = ", ".join(response.headers.getlist("Cache-Control"))
+    if '"' in value or "\\" in value:
+        return False
+    return any(token.strip(" \t").lower() == "no-store" for token in value.split(","))
+
+
+@app.after_request
+def add_request_via_header(response: Response) -> Response:
+    via = getattr(g, "remote_request_via", None)
+    if via is not None and _answer_is_never_stored(response):
+        response.headers[REQUEST_VIA_HEADER] = via
+    return response
+
+
+@app.after_request
+def apply_api_cache_default(response: Response) -> Response:
+    # Hooks run in reverse registration order: let the arrival-word hook see
+    # the policy that will actually go to the client.
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", _API_CACHE_DEFAULT)
+    return response
+
+
 @app.after_request
 def add_api_timing_headers(response: Response) -> Response:
     started_at = getattr(g, "api_request_started_at", None)
@@ -4427,6 +4501,48 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
     except Exception:
         logger.debug("Public show runtime HMR websocket unavailable", exc_info=True)
         await websocket.close(code=1011)
+
+
+async def _event_websocket(websocket: WebSocket, handler: Callable):
+    from vibe.event_websocket import stream_event_response
+
+    # Reuse the exact-origin policy shared by Terminal and Show HMR. The
+    # permission gate below is the original event route's, never Terminal's.
+    if not await asyncio.to_thread(_terminal_origin_allowed, websocket):
+        await websocket.close(code=1008)
+        return
+
+    async def response():
+        scope = {
+            **websocket.scope,
+            "type": "http",
+            "method": "GET",
+            "scheme": "https" if websocket.scope["scheme"] == "wss" else "http",
+        }
+        return await app.dispatch_native_request(FastAPIRequest(scope), handler, parse_json=False)
+
+    await stream_event_response(websocket, response)
+
+
+@app.websocket("/api/events")
+async def workbench_events_websocket(websocket: WebSocket):
+    await _event_websocket(websocket, workbench_events)
+
+
+@app.websocket("/show/{session_id}/__show/events")
+async def show_events_websocket(websocket: WebSocket, session_id: str):
+    async def response():
+        return await serve_private_show_page(session_id, "__show/events")
+
+    await _event_websocket(websocket, response)
+
+
+@app.websocket("/p/{share_id}/__show/events")
+async def public_show_events_websocket(websocket: WebSocket, share_id: str):
+    async def response():
+        return await serve_public_show_page(share_id, "__show/events")
+
+    await _event_websocket(websocket, response)
 
 
 @app.websocket("/api/terminal/{session_id}")
@@ -9230,10 +9346,20 @@ def direct_rendezvous():
         auth = getattr(g, "authorization_context", None)
         identity = getattr(g, "remote_session_identity", None)
         registered_session = None
+        session_kind = None
         if identity and identity.get("sub") == subject and identity.get("browser_session_id") and identity.get("_device_binding"):
+            from sqlalchemy.exc import SQLAlchemyError
+            from storage import device_registry
+
             registered_session = (identity["_device_binding"], identity["browser_session_id"])
+            # The native sign-in and this WebView need not send the same UA.
+            # Use the registered session's kind, never a hint in this report.
+            try:
+                session_kind = device_registry.session_kind(registered_session[0], subject, registered_session[1])
+            except (OSError, SQLAlchemyError):
+                pass  # Optional diagnostic; don't deny an otherwise valid offer.
         result = rendezvous_state.rendezvous.offer(
-            session=registered_session,
+            session=registered_session, session_kind=session_kind,
             is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
@@ -9243,6 +9369,8 @@ def direct_rendezvous():
     rendezvous_state.log_listener_faults(payload.get("listener_faults"))
     rendezvous_state.log_leg_faults(payload.get("leg_faults"))
     rendezvous_state.log_path_use(payload.get("path_use"))
+    rendezvous_state.log_startup(payload.get("startup"))
+    rendezvous_state.log_handovers(payload.get("handovers"))
     rendezvous_state.log_slow_store_removals(payload.get("slow_store_removals_ms"))
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
@@ -10377,6 +10505,7 @@ def api_session():
                 "instance_kind": instance_kind,
                 "instance_role": "owner",
                 "capabilities": context.capability_projection(),
+                "event_stream_transport": "websocket-sse-v1",
                 # The principal this browser's Chat rows are written as, so the
                 # UI can recognise them as its own. Only a direct loopback
                 # browser is ``local``; a LAN setup host is not remote either,
@@ -10438,6 +10567,7 @@ def api_session():
                         "instance_kind": instance_kind,
                         "instance_role": context.instance_role,
                         "capabilities": context.capability_projection(),
+                        "event_stream_transport": "websocket-sse-v1",
                         "authorization_state": "current",
                         "instance_id": config.remote_access.vibe_cloud.instance_id,
                         "authorization_policy": resolution.policy,
@@ -11274,6 +11404,23 @@ def codex_models():
     from vibe import api
 
     return jsonify(api.codex_models())
+
+
+@app.put("/api/backend/{backend}/models/visibility", include_in_schema=False)
+async def direct_model_visibility(backend: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.direct_model_menu import set_removed
+
+        payload = request.json
+        if not isinstance(payload, dict) or set(payload) != {"model_id", "removed"}:
+            return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
+        try:
+            await asyncio.to_thread(set_removed, backend, payload["model_id"], payload["removed"])
+        except ValueError:
+            return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
+        return jsonify({"ok": True})
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.get("/api/antigravity/models", include_in_schema=False)
@@ -20163,6 +20310,7 @@ def _show_runtime_config_payload(
         "basePath": base_path,
         "eventsPath": events_path,
         "streamPath": f"{events_path}?stream=1",
+        "eventStreamTransport": "websocket-sse-v1",
         "annotation": {
             "authenticated": authenticated,
             "mePath": "__show/me",

@@ -1,1 +1,1 @@
-Run desktop-shell: this PR changes what the Desktop's direct core reports and counts (desktop/src-tauri/src/direct), and the test on a real link (desktop_direct_real_sidecar) runs only in that job, on macOS and Windows.
+Run ui-browser-checks and ios-shell: this PR changes what the chat composer keeps when the page is torn down before a send is answered (the iPhone App case); the new browser spec and the App shell exercise it.

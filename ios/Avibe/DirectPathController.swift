@@ -169,12 +169,33 @@ enum DirectHandoverSkip: String, Equatable, Sendable {
     case otherDocuments = "other_documents"
 }
 
-/// Answers `direct.handover` for an instance origin. `soleDocument` is
-/// whether the calling WebView is the only live document of its data store
-/// with that host loaded: `nil` when the App cannot tell.
+/// What else of the calling WebView's data store has the instance loaded
+/// when a page asks to hand over (`DirectWebViewRegistry`). Anything but
+/// `sole` refuses the hand-over; which one it was goes into the hand-over's
+/// record (`DirectPathUse.Handover`), in these words.
+enum DirectOtherDocument: String, Equatable, Sendable {
+    /// Nothing: the caller is the only live document of its store with the
+    /// host loaded.
+    case sole = "none"
+    /// A voice take's hidden WebView.
+    case voice
+    /// A window a page of the runtime opened.
+    case child
+    /// A runtime's own page: an earlier runtime not freed yet, or the page
+    /// that opened the calling window.
+    case runtime
+    /// A WebView of the store with no address yet, whatever it is: the App
+    /// cannot tell what it will load.
+    case unloaded
+    /// The caller itself is not one of the App's listed WebViews.
+    case unknown
+}
+
+/// Answers `direct.handover` for an instance origin. `other` is what else
+/// of the calling WebView's data store has that host loaded.
 typealias DirectHandoverProvider = @MainActor (
     WebOrigin,
-    _ soleDocument: Bool?,
+    _ other: DirectOtherDocument,
     @escaping @MainActor (DirectHandoverOutcome) -> Void
 ) -> Void
 
@@ -201,8 +222,10 @@ final class DirectRouteOwner {
         let allowsFailover: Bool
     }
     private var hostsByStore: [UUID: [RoutedHost]] = [:]
-    /// Hosts a store loaded without a route. They are never added to that
-    /// store later: WebKit would keep using its existing connections.
+    /// Hosts a store loaded without a route and that get none there later:
+    /// the listener was failed, closed or never started when they loaded.
+    /// (A host that loaded while the first bind was still under way is not
+    /// one of them: `DirectPathController.lateRoute`.)
     private var excluded: Set<StoreHost> = []
 
     func routes(_ host: String, store: UUID) -> Bool {
@@ -301,7 +324,13 @@ final class DirectRouteOwner {
 /// Proposed bounds for the controller (docs/plans/remote-direct-ios.md
 /// section 9). Not measurements.
 struct DirectPathTiming: Sendable {
-    /// How long a runtime's first load waits for the listener and its route.
+    /// How long a runtime's first load waits for the listener and its route:
+    /// a 「仅直连和中继」 host (`strictOpenSeconds`), and any other host
+    /// (`listenerWaitSeconds`). An ordinary host whose wait runs out loads on
+    /// WebKit's normal path and gets its route when the bind is confirmed
+    /// (`lateRoute`). The ordinary wait is 2 s since 2026-11-27 (1 s before):
+    /// a cold start's first bind can take longer than a second, and every
+    /// load that goes first starts on the public path.
     let strictOpenSeconds: TimeInterval
     let listenerWaitSeconds: TimeInterval
     /// How long the return to the foreground may take to re-bind and check
@@ -345,12 +374,13 @@ struct DirectPathTiming: Sendable {
         self.portProbeSeconds = portProbeSeconds
     }
 
-    static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
+    static let standard = DirectPathTiming(listenerWaitSeconds: 2, rebindSeconds: 2)
 }
 
 /// One failed attempt to bind the listener's port or to check that the
-/// listener on it is this App's. Numbers only: no wall time, address, port
-/// or identifier.
+/// listener on it is this App's; or, as `late`, a first bind that was
+/// confirmed after a host's first load. Numbers only: no wall time,
+/// address, port or identifier.
 struct DirectListenerFailure: Equatable, Sendable {
     enum Step: String, Sendable {
         /// The port could not be bound.
@@ -364,10 +394,15 @@ struct DirectListenerFailure: Equatable, Sendable {
         case deadline
         /// The listening socket failed while it was serving.
         case socket
+        /// Not a failure: the first bind was confirmed only after a host's
+        /// first load had gone ahead without a route. `code` is how long
+        /// that bind took, in milliseconds.
+        case late
     }
 
     let step: Step
-    /// The POSIX or Network error number, when there is one.
+    /// The POSIX or Network error number, when there is one. For `late`,
+    /// how long the first bind took, in milliseconds.
     let code: Int32?
     /// How long the App had been away before the stay in the foreground
     /// this attempt belongs to; `nil` for a failure with no background
@@ -558,8 +593,10 @@ final class DirectPathController {
     }
 
     private var recovery: Recovery?
-    /// The last few failures of the listener in this process, oldest first.
-    /// Numbers only; for `direct.status()` and the rendezvous request.
+    /// The last few failures of the listener in this process, oldest first,
+    /// and a first bind confirmed late (`late`, which is no failure and
+    /// starts no recovery). Numbers only; for `direct.status()` and the
+    /// rendezvous request.
     private(set) var listenerFailures: [DirectListenerFailure] = []
     static let listenerFailureLimit = 5
     /// How many attempts this stay's recovery has scheduled, and the one
@@ -719,6 +756,29 @@ final class DirectPathController {
     private var firstRouteWait: FirstRouteWait?
     private var firstRouteWake: Task<Void, Never>?
     private var firstRouteRetry: Task<Void, Never>?
+    /// An ordinary host's runtime that loaded without a route because the
+    /// listener's first bind was still under way when its wait ran out. The
+    /// listener is kept, and the host gets its route when the bind is
+    /// confirmed. WebKit uses a route added then from its next new
+    /// connection to the host, not on the connection it already has
+    /// (docs/plans/remote-direct-ios.md section 2).
+    private struct LateRoute {
+        let runtime: MobileRuntimeContext
+        let store: UUID
+        let host: String
+    }
+    private var lateRoute: LateRoute?
+    private var lateRouteTask: Task<Void, Never>?
+    /// When the first bind of the listener that is there now was started.
+    private var firstBindStarted: ContinuousClock.Instant?
+    /// Listeners started in this process: only the first one's bind is a
+    /// cold start's (`ColdStartTimings`).
+    private var listenersStarted = 0
+    /// Hosts whose route was added after their first load, until one of
+    /// their connections reaches the listener. Their documents are told
+    /// `tunnel` meanwhile: nothing of theirs passes through the listener
+    /// yet, so a hand-over could move nothing.
+    private var awaitingFirstConnect: Set<String> = []
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -786,6 +846,10 @@ final class DirectPathController {
     /// `direct` only for the selected instance's host.
     func currentStatus(for origin: WebOrigin) -> DirectPathStatus {
         let selected = origin.host == target?.authority.host
+        // A host whose route came after its first load: `direct` is said to
+        // its documents only once one of its connections has reached the
+        // listener. The diagnostics are shown meanwhile.
+        let direct = preferred == .direct && selected && !awaitingFirstConnect.contains(origin.host)
         var diagnostics: DirectPathDiagnostics?
         var selectedPath: DirectSelectedPath?
         var counts = DirectPathCounts.zero
@@ -795,18 +859,18 @@ final class DirectPathController {
             counts = transport.pathCounts
             // The current path only while new connections prefer it.
             let shown = DirectPathDiagnostics(
-                current: preferred == .direct ? currentPath : nil,
+                current: direct ? currentPath : nil,
                 attempts: read.attempts
             )
             diagnostics = shown == .empty ? nil : shown
         }
         return DirectPathStatus(
-            preferred: preferred == .direct && selected ? .direct : .tunnel,
+            preferred: direct ? .direct : .tunnel,
             sequence: sequence,
             closure: closures[origin.host] ?? 0,
             diagnostics: diagnostics,
-            path: preferred == .direct && selected ? currentPath : nil,
-            selected: preferred == .direct && selected ? selectedPath : nil,
+            path: direct ? currentPath : nil,
+            selected: direct ? selectedPath : nil,
             counts: counts,
             races: selected ? races : [],
             losses: selected ? losses : [],
@@ -830,14 +894,29 @@ final class DirectPathController {
     /// get there) are closed, so WebKit's next connection takes
     /// the route to the direct backend. Busy relays are kept; nothing is
     /// replayed. Only when the caller is the sole live document of the store
-    /// with that host loaded (`soleDocument == true`): a relay of another
+    /// with that host loaded (`other == .sole`): a relay of another
     /// document's connection is never closed for this one.
+    ///
+    /// Each ask is counted in its minute when it is made, and recorded once
+    /// it is answered, with how it ended (`DirectPathUse.Handover`).
     func handover(
         for origin: WebOrigin,
-        soleDocument: Bool?,
+        other: DirectOtherDocument,
         reply: @escaping @MainActor (DirectHandoverOutcome) -> Void
     ) {
         settleRecordedFault()
+        let asked = ContinuousClock.now
+        let scope = useScope(origin.host)
+        let path = pathInUse(for: origin.host)
+        let pathUse = pathUse
+        // An ask is counted when it is made and recorded when it is
+        // answered, with the path present when it was asked.
+        let answer: @MainActor (DirectHandoverOutcome, DirectOtherDocument) -> Void = { outcome, other in
+            pathUse.handoverAnswered(
+                outcome, refusedBy: other, took: asked.duration(to: .now), scope: scope, path: path
+            )
+            reply(outcome)
+        }
         guard
             !isResuming,
             preferred == .direct,
@@ -846,16 +925,16 @@ final class DirectPathController {
             directAuthorized(for: target.authority),
             let listener
         else {
-            pathUse.handover(refused: .notUsable, scope: useScope(origin.host), path: pathInUse(for: origin.host))
-            reply(.skipped(.notUsable))
+            pathUse.handover(refused: .notUsable, scope: scope, path: path)
+            answer(.skipped(.notUsable), .sole)
             return
         }
-        guard soleDocument == true else {
-            pathUse.handover(refused: .otherDocuments, scope: useScope(origin.host), path: pathInUse(for: origin.host))
-            reply(.skipped(.otherDocuments))
+        guard other == .sole else {
+            pathUse.handover(refused: .otherDocuments, scope: scope, path: path)
+            answer(.skipped(.otherDocuments), other)
             return
         }
-        pathUse.handover(refused: nil, scope: useScope(origin.host), path: pathInUse(for: origin.host))
+        pathUse.handover(refused: nil, scope: scope, path: path)
         let host = origin.host
         Task {
             let result = await listener.closeQuietRelays(
@@ -868,7 +947,7 @@ final class DirectPathController {
                 "Direct hand-over: closed \(result.closed, privacy: .public), kept \(result.kept, privacy: .public) public relays"
             )
             await MainActor.run {
-                reply(.done(closed: result.closed, kept: result.kept))
+                answer(.done(closed: result.closed, kept: result.kept), .sole)
             }
         }
     }
@@ -913,8 +992,10 @@ final class DirectPathController {
     /// the listener if this is the first route of the process, checks it,
     /// and adds the host to the current store's route. Waits at most the
     /// listener bound. If the listener is not ready by then, or the host
-    /// cannot be added, the runtime loads on WebKit's normal path and the
-    /// host is never added to this store later. `stillWanted` is asked after
+    /// cannot be added, the runtime loads on WebKit's normal path. A host
+    /// whose wait ran out while the first bind was still under way gets its
+    /// route when that bind is confirmed (`lateRoute`); any other is never
+    /// added to this store later. `stillWanted` is asked after
     /// every wait: a superseded open adds nothing and, if no route was ever
     /// written, leaves no listener behind. A host that already has a route
     /// is left as it is, with no wait: whether its runtime may load now is
@@ -923,12 +1004,22 @@ final class DirectPathController {
         for runtime: MobileRuntimeContext,
         stillWanted: @escaping () -> Bool
     ) async {
+        await prepareRoute(for: runtime, late: false, stillWanted: stillWanted)
+    }
+
+    /// `late`: for a host whose first load has already gone ahead
+    /// (`addLateRoute`). Only a route this call itself writes is a late one.
+    private func prepareRoute(
+        for runtime: MobileRuntimeContext,
+        late: Bool,
+        stillWanted: @escaping () -> Bool
+    ) async {
         preparations += 1
-        await addRoute(for: runtime, stillWanted: stillWanted)
+        await addRoute(for: runtime, late: late, stillWanted: stillWanted)
         preparations -= 1
         // A listener no route points at, and no open is waiting for, has
         // nothing to do.
-        if routeOwner.allowedHosts.isEmpty, preparations == 0, listener != nil, !firstRouteWanted {
+        if routeOwner.allowedHosts.isEmpty, preparations == 0, listener != nil, !firstRouteWanted, lateRoute == nil {
             await stopListener()
         }
         scheduleFirstRouteRetry()
@@ -936,6 +1027,7 @@ final class DirectPathController {
 
     private func addRoute(
         for runtime: MobileRuntimeContext,
+        late: Bool,
         stillWanted: () -> Bool
     ) async {
         guard let authority = DirectAuthority(instanceURL: runtime.instance.url) else {
@@ -964,7 +1056,18 @@ final class DirectPathController {
             listenerState == .ready
         else {
             if !needsListener(authority.host) {
-                routeOwner.exclude(authority.host, store: store)
+                if listenerState == .binding, lateRouteTask == nil {
+                    // The first bind is still under way. The runtime loads
+                    // now, on WebKit's normal path, and the host gets its
+                    // route when the bind is confirmed. One host at a time:
+                    // an earlier one that was still waiting gets none.
+                    if let earlier = lateRoute, earlier.host != authority.host || earlier.store != store {
+                        routeOwner.exclude(earlier.host, store: earlier.store)
+                    }
+                    lateRoute = LateRoute(runtime: runtime, store: store, host: authority.host)
+                } else {
+                    routeOwner.exclude(authority.host, store: store)
+                }
             }
             return
         }
@@ -1002,6 +1105,15 @@ final class DirectPathController {
                 routeOwner.exclude(authority.host, store: store)
             }
             return
+        }
+        if late {
+            // Written after the host's first load, and marked in the same
+            // turn as the write: no connection of the host can have reached
+            // the listener through this route before the mark. A route an
+            // ordinary open wrote first (the same host opened again while
+            // the bind was under way) is not marked: that open's own load
+            // goes through the listener.
+            awaitingFirstConnect.insert(authority.host)
         }
         if firstRouteWait?.runtime == runtime, firstRouteRetry == nil { cancelFirstRouteWait() }
     }
@@ -1322,6 +1434,7 @@ final class DirectPathController {
     /// that selection close; public relays and closures are untouched (the
     /// documents that would act on a closure are gone).
     func runtimeDidStop() {
+        abandonLateRoute()
         cancelFirstRouteWait()
         let hadSelection = runtime != nil || target != nil
         runtime = nil
@@ -1341,6 +1454,8 @@ final class DirectPathController {
     func accountWillChange() {
         // Nothing counted for this account is sent after it.
         pathUse.removeAll()
+        abandonLateRoute()
+        awaitingFirstConnect.removeAll()
         cancelFirstRouteWait()
         runtime = nil
         settleHeldReplies()
@@ -1527,6 +1642,12 @@ final class DirectPathController {
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
         let host = authority.host
         guard routeOwner.allowedHosts.contains(host) else { return nil }
+        if awaitingFirstConnect.remove(host) != nil {
+            // WebKit brought a connection of this host to the listener: from
+            // here on its documents hear what the transport prefers.
+            sequence += 1
+            notify()
+        }
         if rewriting.contains(host) {
             // Not a refusal: WebKit might still have the old failover route. Neither
             // opener may run until the drain and rewrite have both finished.
@@ -2039,6 +2160,8 @@ final class DirectPathController {
     }
 
     private func startListener() -> Task<Bool, Never> {
+        listenersStarted += 1
+        let firstInProcess = listenersStarted == 1
         // The failure callback names the listener it came from, so one from
         // a listener that was replaced or stopped does nothing.
         let listenerBox = DirectListenerBox()
@@ -2058,6 +2181,7 @@ final class DirectPathController {
         )
         listenerBox.listener = listener
         self.listener = listener
+        firstBindStarted = ContinuousClock.now
         // The first bind starts in the foreground: its episode begins here.
         armWatchdog()
         let rebindSeconds = timing.rebindSeconds
@@ -2101,6 +2225,16 @@ final class DirectPathController {
                 self.listenerPort = binding.port
                 self.listenerGeneration = binding.generation
                 self.disarmWatchdog()
+                if firstInProcess, let started = self.firstBindStarted {
+                    // The process's first listener only: a later one (after
+                    // the first failed or was retired) is no cold start's.
+                    // A host that loaded while this bind was under way gets
+                    // its route late (`lateRoute`).
+                    ColdStartTimings.shared.firstBindConfirmed(
+                        took: started.duration(to: ContinuousClock.now),
+                        late: self.lateRoute != nil
+                    )
+                }
                 return true
             }
         }
@@ -2117,9 +2251,76 @@ final class DirectPathController {
                 if !ready, self.listener === listener, self.listenerState == .none {
                     self.retireAndStop()
                 }
+                if ready, self.listener === listener {
+                    self.addLateRoute()
+                }
             }
         }
         return task
+    }
+
+    /// The first bind was confirmed after a host's first load had gone
+    /// ahead: the miss goes on record with how long the bind took, and the
+    /// host gets its route if its runtime is still the one on show. Its
+    /// documents hear `direct` only once one of its connections has reached
+    /// the listener (`awaitingFirstConnect`).
+    private func addLateRoute() {
+        guard let late = lateRoute, lateRouteTask == nil else {
+            return
+        }
+        if let started = firstBindStarted {
+            let took = ContinuousClock.now - started
+            let milliseconds = took.components.seconds * 1000 + took.components.attoseconds / 1_000_000_000_000_000
+            appendToRecord(DirectListenerFailure(
+                step: .late,
+                code: Int32(clamping: max(milliseconds, 0)),
+                backgroundSeconds: awaySeconds,
+                at: ContinuousClock.now
+            ))
+            Self.logger.notice(
+                "Direct path: the first bind was confirmed after the first load, \(milliseconds, privacy: .public) ms after it started"
+            )
+        }
+        lateRouteTask = Task { [weak self] in
+            guard let self else { return }
+            await self.prepareRoute(for: late.runtime, late: true) {
+                self.lateRoute?.runtime == late.runtime && self.isCurrentRuntime(late.runtime)
+                    && !self.isInBackground && self.websiteDataStore.identifier == late.store
+            }
+            // Routed by this task, or by an ordinary open of the same host
+            // that got there first.
+            let routed = self.routeOwner.routes(late.host, store: late.store)
+            // Abandoned meanwhile: whoever did that has settled the rest.
+            guard let still = self.lateRoute, still.runtime == late.runtime, still.store == late.store else {
+                return
+            }
+            self.lateRoute = nil
+            self.lateRouteTask = nil
+            if routed {
+                self.select()
+                self.updatePreference()
+            } else {
+                // Its runtime is no longer the one on show, or the write
+                // was refused: it loaded without a route and gets none.
+                self.routeOwner.exclude(late.host, store: late.store)
+                if self.preparations == 0, self.routeOwner.allowedHosts.isEmpty, !self.firstRouteWanted {
+                    self.retireAndStop()
+                }
+            }
+            self.onAvailabilityChanged()
+        }
+    }
+
+    /// The host that was waiting for the first bind gets no route on its
+    /// store: its runtime went away, or the listener it waited for did.
+    private func abandonLateRoute() {
+        guard let late = lateRoute else {
+            return
+        }
+        lateRoute = nil
+        lateRouteTask?.cancel()
+        lateRouteTask = nil
+        routeOwner.exclude(late.host, store: late.store)
     }
 
     private func stopListener() async {
@@ -2155,6 +2356,9 @@ final class DirectPathController {
             if let unheard {
                 recordFailure(unheard, "a listener no route points at had failed")
             }
+            // Whoever waited for this listener's first bind gets no route.
+            abandonLateRoute()
+            firstBindStarted = nil
             disarmWatchdog()
             endRecovery()
             self.listener = nil
@@ -2229,7 +2433,7 @@ final class DirectPathController {
         firstRouteRetry?.cancel()
         firstRouteRetry = nil
         firstRouteWait = nil
-        if preparations == 0, routeOwner.allowedHosts.isEmpty { retireAndStop() }
+        if preparations == 0, routeOwner.allowedHosts.isEmpty, lateRoute == nil { retireAndStop() }
     }
 
     private func scheduleFirstRouteRetry() {
@@ -2294,6 +2498,22 @@ final class DirectPathController {
             listenerFailed(failure.cause, reason)
         }
         return true
+    }
+
+    /// Adds `entry` to the record unless it says what the last one does,
+    /// and keeps the last few.
+    private func appendToRecord(_ entry: DirectListenerFailure) {
+        if let last = listenerFailures.last,
+           last.step == entry.step,
+           last.code == entry.code,
+           last.backgroundSeconds == entry.backgroundSeconds
+        {
+            return
+        }
+        listenerFailures.append(entry)
+        if listenerFailures.count > Self.listenerFailureLimit {
+            listenerFailures.removeFirst(listenerFailures.count - Self.listenerFailureLimit)
+        }
     }
 
     /// The one exit for every listener failure, entered once for each, in
@@ -2391,18 +2611,7 @@ final class DirectPathController {
         if let wait = firstRouteWait, failure.at >= wait.since, firstRouteWanted {
             firstRouteWait?.lastFailure = failure
         }
-        if let last = listenerFailures.last,
-           last.step == failure.step,
-           last.code == failure.code,
-           last.backgroundSeconds == failure.backgroundSeconds
-        {
-            // Already there.
-        } else {
-            listenerFailures.append(failure)
-            if listenerFailures.count > Self.listenerFailureLimit {
-                listenerFailures.removeFirst(listenerFailures.count - Self.listenerFailureLimit)
-            }
-        }
+        appendToRecord(failure)
         let step = cause.step.rawValue
         let code = cause.code.map(String.init) ?? "none"
         Self.logger.error(
@@ -2964,42 +3173,66 @@ struct DirectRebindAttempts: Equatable {
     }
 }
 
-/// Every WKWebView the App makes, held weakly, so a hand-over can tell
-/// whether another live document of the same data store has a host loaded
-/// (`direct.handover`). A WebView is listed from creation until it is
-/// deallocated, whether or not it is on screen: one that still exists may
-/// still hold connections.
+/// Every WKWebView the App makes that may load an instance, held weakly,
+/// so a hand-over can tell whether another live document of the same data
+/// store has a host loaded (`direct.handover`). A WebView is listed from
+/// creation until it is deallocated, whether or not it is on screen: one
+/// that still exists may still hold connections.
 @MainActor
 final class DirectWebViewRegistry {
     static let shared = DirectWebViewRegistry()
 
+    /// What a listed WebView is, for the record of a hand-over it refused.
+    enum Kind: Sendable {
+        /// A runtime's own page.
+        case runtime
+        /// A window a page of the runtime opened.
+        case child
+        /// A voice take's hidden WebView.
+        case voice
+
+        var other: DirectOtherDocument {
+            switch self {
+            case .runtime: return .runtime
+            case .child: return .child
+            case .voice: return .voice
+            }
+        }
+    }
+
     private final class Entry {
         weak var webView: WKWebView?
+        let kind: Kind
 
-        init(_ webView: WKWebView) {
+        init(_ webView: WKWebView, _ kind: Kind) {
             self.webView = webView
+            self.kind = kind
         }
     }
 
     private var entries: [Entry] = []
 
-    func register(_ webView: WKWebView) {
+    func register(_ webView: WKWebView, as kind: Kind) {
         entries.removeAll { $0.webView == nil }
         guard !entries.contains(where: { $0.webView === webView }) else {
             return
         }
-        entries.append(Entry(webView))
+        entries.append(Entry(webView, kind))
     }
 
-    /// Whether `webView` is the only live WebView of its data store with
-    /// `host` loaded or loading. `nil` when that cannot be told: the caller
-    /// is not registered, or another WebView of the store has no URL yet.
-    func isSoleDocument(_ webView: WKWebView, host: String) -> Bool? {
+    /// What else of `webView`'s data store has `host` loaded or loading:
+    /// `sole` when nothing has. Of several, one that has the host loaded is
+    /// named before one with no address yet, and among those a voice take
+    /// before a child window before a runtime's page. `unknown` when the
+    /// caller is not listed.
+    func otherDocument(than webView: WKWebView, host: String) -> DirectOtherDocument {
         entries.removeAll { $0.webView == nil }
         guard entries.contains(where: { $0.webView === webView }) else {
-            return nil
+            return .unknown
         }
         let store = webView.configuration.websiteDataStore
+        var loaded: [Kind] = []
+        var unloaded = false
         for entry in entries {
             guard let other = entry.webView, other !== webView else {
                 continue
@@ -3012,12 +3245,16 @@ final class DirectWebViewRegistry {
                 continue
             }
             guard let url = other.url else {
-                return nil
+                unloaded = true
+                continue
             }
             if url.host?.lowercased() == host.lowercased() {
-                return false
+                loaded.append(entry.kind)
             }
         }
-        return true
+        for kind in [Kind.voice, .child, .runtime] where loaded.contains(kind) {
+            return kind.other
+        }
+        return unloaded ? .unloaded : .sole
     }
 }

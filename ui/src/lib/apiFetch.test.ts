@@ -294,6 +294,37 @@ describe('apiFetch remote auth recovery', () => {
     expect(isApiFetchDeadlineAbort(callerReason)).toBe(false);
   });
 
+  it.each([false, true])('recognizes WebKit abort copies with caller signal=%s', async (withCaller) => {
+    vi.useFakeTimers();
+    const failure = new DOMException('Fetch is aborted', 'AbortError');
+    const operation = withApiDeadline(100, withCaller ? new AbortController().signal : undefined,
+      (signal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(failure))));
+    const caught = operation.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await caught).toBe(failure);
+    expect(isApiFetchDeadlineAbort(failure)).toBe(true);
+  });
+
+  it('does not misclassify caller cancellation or an unrelated failure after the deadline', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const cancelled = new DOMException('Fetch is aborted', 'AbortError');
+    const pending = withApiDeadline(100, caller.signal,
+      (signal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(cancelled))));
+    const caught = pending.catch((error: unknown) => error);
+    caller.abort(new DOMException('caller timed out', 'TimeoutError'));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await caught).toBe(cancelled);
+    expect(isApiFetchDeadlineAbort(cancelled)).toBe(false);
+    const unrelated = new Error('parse failed');
+    const late = withApiDeadline(100, undefined,
+      () => new Promise((_, reject) => setTimeout(() => reject(unrelated), 200)));
+    const lateCaught = late.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await lateCaught).toBe(unrelated);
+    expect(isApiFetchDeadlineAbort(unrelated)).toBe(false);
+  });
+
   it('fires the deadline while a shared CSRF fetch is in flight', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()

@@ -558,6 +558,25 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    /// An avibe.bot page that shares the account's store only ever holds
+    /// its one page on the control plane. It is no other document of an
+    /// instance for the instance page's direct hand-over.
+    func testAnAvibePageIsNoOtherDocumentOfAnInstance() throws {
+        let store = WKWebsiteDataStore.nonPersistent()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = store
+        let page = WKWebView(frame: .zero, configuration: configuration)
+        DirectWebViewRegistry.shared.register(page, as: .runtime)
+        let sheet = AvibePageViewController(
+            page: .accountDeletion,
+            controlPlane: MobileControlPlaneConfiguration.productionURL,
+            websiteDataStore: store,
+            onFinish: { _ in }
+        )
+        XCTAssertTrue(sheet.webView.configuration.websiteDataStore === store)
+        XCTAssertEqual(DirectWebViewRegistry.shared.otherDocument(than: page, host: "instance-one.example"), .sole)
+    }
+
     // The bundled page names a page, never an address: each page has one
     // fixed address on the control plane.
     func testAvibePagesOpenOnlyTheirFixedControlPlaneAddresses() {
@@ -2213,8 +2232,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
         XCTAssertEqual(NativeShellMetadata.capabilities["device"], 1)
         // Withdrawn (11-21): the methods stay recognized but refuse.
-        // Lock Screen progress is switched off pending a redesign (11-26).
-        XCTAssertNil(NativeShellMetadata.capabilities["lockScreenProgress"])
+        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
         XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),

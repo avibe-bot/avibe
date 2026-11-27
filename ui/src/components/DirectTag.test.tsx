@@ -4,7 +4,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '../i18n';
-import { setLiveStreamVia } from '../lib/liveStreamVia';
+import { beginRequestVia, noteRequestVia, setLiveStreamVia } from '../lib/liveStreamVia';
 import type { NativeDirectPathKind } from '../lib/native';
 import { DirectTag } from './DirectTag';
 
@@ -24,6 +24,11 @@ vi.mock('../lib/native', () => ({
     return () => app.listeners.delete(handler);
   },
 }));
+
+/** The instance's word on the page's latest request. */
+function requestVia(word: 'direct' | 'other') {
+  act(() => noteRequestVia(beginRequestVia(), word));
+}
 
 function appPath(next: NativeDirectPathKind | null) {
   act(() => {
@@ -46,8 +51,10 @@ describe('DirectTag', () => {
     const { container } = render(<DirectTag />);
     expect(container.innerHTML).toBe('');
 
-    // On the direct ingress, but the App names no path (a browser, or not yet known): nothing.
+    // On the direct ingress, stream and requests, but the App names no path (a browser, or not
+    // yet known): nothing.
     act(() => setLiveStreamVia('direct'));
+    requestVia('direct');
     expect(container.innerHTML).toBe('');
 
     appPath('ipv6');
@@ -65,6 +72,19 @@ describe('DirectTag', () => {
     expect(container.innerHTML).toBe('');
     appPath('ipv4');
     expect(container.innerHTML).toBe('');
+
+    // The stream is a connection of its own. One that came in directly does not speak for
+    // the page's requests: while they go another way the tag says nothing, on a direct
+    // address and on the relay alike, and says so again once they have moved.
+    act(() => setLiveStreamVia('direct'));
+    requestVia('other');
+    expect(container.innerHTML).toBe('');
+    appPath('relay');
+    expect(container.innerHTML).toBe('');
+    requestVia('direct');
+    expect(container.textContent).toBe('中继');
+    appPath('ipv4');
+    expect(container.textContent).toBe('直连');
   });
 
   it('shows nothing for an App whose path can be stale (direct version 2)', async () => {
@@ -72,6 +92,7 @@ describe('DirectTag', () => {
     app.reported = false;
     app.path = 'ipv4';
     act(() => setLiveStreamVia('direct'));
+    requestVia('direct');
     const { container } = render(<DirectTag />);
     expect(container.innerHTML).toBe('');
     appPath('relay');
@@ -82,6 +103,7 @@ describe('DirectTag', () => {
     await i18n.changeLanguage('en');
     app.path = 'relay';
     act(() => setLiveStreamVia('direct'));
+    requestVia('direct');
     const { container } = render(<DirectTag />);
     expect(container.textContent).toBe('Relay');
     appPath('ipv4');

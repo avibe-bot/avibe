@@ -44,6 +44,7 @@ def test_every_bots_route_is_owner_only():
 def test_the_bot_lifecycle_over_http(client, tmp_path):
     listed = client.get("/api/bots")
     assert listed.status_code == 200, listed.get_json()
+    assert listed.headers["Cache-Control"] == "private, no-store"
     (main,) = listed.get_json()["bots"]
     assert main == {
         "handle": "main",
@@ -95,6 +96,7 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
     url = uploaded.get_json()["bot"]["avatar"]["url"]
     served = client.get(url)
     assert (served.status_code, served.headers["content-type"]) == (200, "image/png")
+    assert served.headers["Cache-Control"] == "private, max-age=31536000, immutable"
     assert (tmp_path / "bots" / "cso" / "avatar.png").read_bytes() == served.content
 
     assert client.delete("/api/bots/main", headers=csrf_headers(client)).status_code == 409
