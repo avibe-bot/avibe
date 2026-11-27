@@ -58,4 +58,8 @@ EVENT_TRANSPORT_WEBKIT=/absolute/path/to/webkit/pw_run.sh \
 That opt-in test uses test-owned HOME/config/SQLite and a real ephemeral uvicorn
 listener. It checks four Workbench plus four SDK subscriptions, real Chinese
 Show event replay after a cursor, ordinary session reads, and broker release
-when the pages close. No installed Runtime or Desktop window is touched.
+when the pages close. It also executes the exact native share READ script
+extracted from the Rust bridge against real routes: six old SSE sources must
+block the access/page reads until one closes, while eight WS sources must let
+them finish promptly. It does not present an AppKit menu. No installed Runtime
+or Desktop window is touched.

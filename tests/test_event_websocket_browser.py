@@ -8,6 +8,7 @@ loopback ephemeral uvicorn listener. It never starts the installed service.
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 import socket
 
@@ -67,6 +68,7 @@ async def test_real_runtime_with_production_ui_and_sdk(monkeypatch, tmp_path, br
     server = uvicorn.Server(uvicorn.Config(ui_server.app, lifespan="off", log_level="error"))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     baseline = broker.subscriber_count()
+    native_share_read = re.search('pub const READ: &str = r#"(.*?)"#;', (root / "desktop/src-tauri/src/macos_show_share.rs").read_text(), re.S).group(1)
     program = r'''
 import { chromium, webkit } from './ui/node_modules/playwright/index.mjs';
 const kind = process.env.EVENT_BROWSER;
@@ -105,8 +107,27 @@ try {
     }));
   }
   if (Math.max(...timings) >= 1000) throw Error('ordinary request queued: ' + JSON.stringify(timings));
+  const readShare = () => pages[7].evaluate(async source => {
+    const start = performance.now();
+    const value = await new Function('origin', 'sessionID', 'return (async () => {' + source + '})()')(location.origin, 'fixture');
+    return {milliseconds:performance.now()-start, value};
+  }, process.env.EVENT_SHARE_READ);
+  const shareWs = await readShare();
+  if (!shareWs.value.allowed || shareWs.milliseconds >= 1000) throw Error('native share preflight blocked on WS');
+  await Promise.all(pages.map(page => page.evaluate(() => window.eventTransport.close())));
+  await Promise.all(pages.slice(0,6).map(async page => {
+    await page.evaluate(() => window.eventTransport.start({family:'workbench',client:'old'}));
+    await page.waitForFunction(() => window.eventTransport.state().readyState === 1);
+  }));
+  let completed = false;
+  const pendingShare = readShare().then(value => { completed = true; return value; });
+  await new Promise(resolve => setTimeout(resolve,2000));
+  if (completed) throw Error('native share baseline did not queue behind six SSE');
+  await pages[0].evaluate(() => window.eventTransport.close());
+  const shareSse = await pendingShare;
+  if (!shareSse.value.allowed || shareSse.milliseconds < 1800) throw Error('native share baseline mismatch');
   await Promise.all(pages.map(page => page.close()));
-  console.log(JSON.stringify({browser:kind, version:browser.version(), streams:8, workbench:4, sdk:4, fetchMilliseconds:timings, unicodeReplay:true}));
+  console.log(JSON.stringify({browser:kind, version:browser.version(), streams:8, workbench:4, sdk:4, fetchMilliseconds:timings, unicodeReplay:true, nativeSharePreflight:{ws:shareWs.milliseconds,sse:shareSse.milliseconds}}));
 } finally { await context.close(); await browser.close(); }
 '''
     try:
@@ -114,7 +135,7 @@ try {
             await asyncio.sleep(0.01)
         process = await asyncio.create_subprocess_exec(
             "node", "--input-type=module", "-e", program,
-            cwd=root, env={**os.environ, "EVENT_BROWSER": browser_name, "EVENT_ORIGIN": f"http://127.0.0.1:{port}"},
+            cwd=root, env={**os.environ, "EVENT_BROWSER": browser_name, "EVENT_ORIGIN": f"http://127.0.0.1:{port}", "EVENT_SHARE_READ": native_share_read},
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:

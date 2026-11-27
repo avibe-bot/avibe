@@ -77,7 +77,7 @@ Desktop acceptance is deferred. Never operate the active installed app windows.
 ## Implementation evidence (2026-11-27)
 
 The Avibe branch was rebased to `0a01fa4af8`. Show SDK PR #79 is
-`e6e3aaed494e142000a28fca2727e2f9be9a0525`. The paired fixture records source and
+`f7f282148bab3f401ef0b66003097d33d563f95e`. The paired fixture records source and
 artifact SHA256 values, so its pre-commit provenance remains tied to the exact
 transport bytes tested.
 
@@ -89,23 +89,23 @@ transport bytes tested.
   ApiContext reconnect, heartbeat, catch-up, local-store and snapshot owners.
 - The production-compiled UI/SDK fixture passes 28 Chromium/WebKit scenarios.
   Across both families, all three SSE compatibility combinations hold an
-  ordinary HTTP/1.1 fetch for 2005.5–2232 ms, until one occupied slot closes.
-  With eight new/new WS sources, Workbench fetches take 0.9–3.8 ms in Chromium
-  and 2–3 ms in WebKit; SDK fetches take 0.8–1.4 ms and 2–3 ms respectively.
+  ordinary HTTP/1.1 fetch for 2005–2215 ms, until one occupied slot closes.
+  With eight new/new WS sources, Workbench fetches take 0.6–1.0 ms in Chromium
+  and 2–3 ms in WebKit; SDK fetches take 0.7–1.1 ms and 2–3 ms respectively.
   WS denial never downgrades; SDK reconnect retains after_id; switching and
   disposal prevent late delivery or retries. Every cleanup reaches zero streams.
 - The opt-in `tests/test_event_websocket_browser.py` runs the compiled real
   clients against actual isolated Runtime routes, SQLite Show events and a
   real ephemeral uvicorn listener. Four UI plus four SDK streams coexist;
   persisted Chinese/emoji events replay after the supplied cursor; ordinary
-  `/api/session` reads take 6.5–8.2 ms in Chromium 156 and 8–13 ms in WebKit 27.2.
+  `/api/session` reads take 6.3–7.5 ms in Chromium 156 and 8–13 ms in WebKit 27.2.
   Closing all pages releases every broker subscription.
 - `npm run build`, UI lint/typecheck and changed-Python Ruff pass. The unsigned
   headless engines are test evidence; no installed/signed Desktop was operated.
 
 Evidence is in the owner's `2026-11-27-desktop-full-acceptance/findings/`:
-`event-transport-browser-results.json`, individual `event-transport/*.json`,
-`event-real-runtime-browser.txt`, `event-python-regression.txt`, and
+`event-transport-browser-results-f7f2821-default.json`, individual
+`event-transport-f7f2821-default/*.json`, `event-real-runtime-share-browser.txt`, `event-python-regression.txt`, and
 `event-ui-regression.txt`.
 
 ### First-load budget
@@ -117,3 +117,24 @@ transport/negotiation/parser, which is needed on the first screen. The separate
 budget gate exceeds its unchanged limits by 935 / 1,060 B. Main owns resolution
 of the baseline/allowance; this lane does not raise it or hide immediately used
 code behind an asynchronous import. PR #4365 is independent and not stacked.
+
+### Review and native-share follow-up
+
+The first review found the development proxy did not forward WS upgrades.
+Vite now enables WS and rewrites the backend Origin on both HTTP and upgrade
+requests. A real Vite/backend integration test fails on the former config
+(upgrade remains pending for 5 seconds) and passes with this config (160 ms).
+It is part of the existing static UI CI job; run `npm run test:dev-event-proxy`.
+
+The real Runtime browser test executes the native share bridge's exact READ
+script from `macos_show_share.rs`: access/page GETs wait behind six SSE sources
+until one closes (2041.1 / 2035 ms), but complete while eight WS streams stay
+open (26.3 / 31 ms in Chromium/WebKit). This covers the D09-06 network preflight,
+not the installed AppKit picker; signed Desktop acceptance is still pending.
+
+D09-07/08 has an independently reproduced stale visibility gate:
+ShowPageShareControl samples the frame only when the popover opens. A later
+visible iframe does not restore PDF/image entries until reopening. This
+predates RC2 (#3936, inherited by desktop #4037). WS shortens the loading race
+but does not eliminate it. Main was notified; the separate UI fix is outside
+this PR. Owner evidence: `show-share-followup.md` and the diagnostic test copy.
