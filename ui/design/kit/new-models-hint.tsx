@@ -2,21 +2,24 @@
 // foot of the model list, and Settings › 模型 › add puts the same few first. Nothing outside the menu
 // marks them: no badge, no dot, no notification.
 //
-// The menu is drawn here, not with the shipped AgentRoutePicker, because the row lives inside it and the
-// picker mixes its reads with its markup (ui/design/AGENTS.md). The menu's parts copy the compact
-// picker's markup (RouteColumn, RouteItem, PickerExitButton, EffortChip) and sit in the shipped
-// ResponsiveMenu, so the popover and the phone sheet are the product's own. When this ships, the frames
-// switch to the shipped picker and this file is deleted.
+// The row lives inside AgentRoutePicker's compact menu, which reads its own data, so the menu cannot be
+// drawn whole with the row in it (ui/design/AGENTS.md). It is assembled here from the picker's shipped
+// parts (RouteColumn, RouteItem, ModelName, PickerExitButton, EffortChip, FastToggle) in the shipped
+// ResponsiveMenu; only the hint itself and the few lines that arrange the parts are new. The Settings
+// dialog likewise lists the shipped PickerRow. When the hint ships, the frames switch to the shipped
+// picker and dialog and this file is deleted.
 import { Check, ChevronDown, ChevronRight, Plus, Search, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { BackendAvatar } from '@/components/visual';
+import { PickerRow } from '@/components/settings/models/BackendModelPickerDialog';
+import type { ModelCandidate } from '@/components/settings/models/types';
+import { EffortChip, FastToggle, ModelName, PickerExitButton, RouteColumn, RouteItem } from '@/components/workbench/AgentRoutePicker';
 import { useDraft } from './draft';
 
 /** A model as the menu names it: the label from the catalog, the ID under it. */
@@ -34,60 +37,14 @@ export type NewModelsHint =
 
 const noop = () => {};
 
-// ---- The menu's parts, as the compact AgentRoutePicker writes them ----
-
-const RouteColumn = ({ title, className, children }: { title: string; className?: string; children: React.ReactNode }) => (
-  <div className={clsx('flex min-w-0 flex-col overflow-y-auto p-1.5 sm:max-h-[320px]', className)}>
-    <div className="px-2 pb-1 pt-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{title}</div>
-    {children}
-  </div>
-);
-
-const RouteItem = ({ active, children }: { active: boolean; children: React.ReactNode }) => (
-  <Button
-    type="button"
-    variant="ghost"
-    size="sm"
-    className={clsx(
-      'h-auto w-full justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal',
-      active ? 'bg-cyan/[0.10] text-cyan-ink hover:bg-cyan/[0.10] hover:text-cyan-ink' : 'text-foreground hover:bg-wash',
-    )}
-  >
-    {children}
-  </Button>
-);
-
+/** A model's lines as the compact menu writes them: the label, then the ID when it differs. */
 const ModelLines = ({ model }: { model: DraftModel }) => (
   <span className="flex min-w-0 flex-1 flex-col">
-    <span className="whitespace-normal break-words font-semibold leading-snug">{model.label}</span>
-    <span className="whitespace-normal break-words font-mono text-[10px] leading-snug text-muted">{model.id}</span>
-  </span>
-);
-
-const PickerExitButton = ({ label }: { label: string }) => (
-  <Button
-    type="button"
-    variant="ghost"
-    size="sm"
-    className="mt-1 h-auto w-full justify-start gap-1.5 rounded px-2 py-1.5 text-[11px] font-medium text-cyan-ink hover:bg-cyan/[0.08] hover:text-cyan-ink"
-  >
-    <Plus className="size-3.5" />
-    {label}
-  </Button>
-);
-
-const EffortChip = ({ active, label }: { active: boolean; label: string }) => (
-  <button
-    type="button"
-    role="radio"
-    aria-checked={active}
-    className={clsx(
-      'min-w-[3rem] flex-1 whitespace-nowrap rounded-[4px] border px-2 py-1.5 text-[12px] capitalize transition-colors',
-      active ? 'border-cyan/40 bg-cyan-soft font-bold text-cyan-ink' : 'border-transparent font-medium text-muted hover:text-foreground',
+    <span className="whitespace-normal break-words font-semibold leading-snug"><ModelName label={model.label} /></span>
+    {model.label !== model.id && (
+      <span className="whitespace-normal break-words font-mono text-[10px] leading-snug text-muted">{model.id}</span>
     )}
-  >
-    {label}
-  </button>
+  </span>
 );
 
 // ---- The proposal: the hint row ----
@@ -225,7 +182,7 @@ function MenuBody({ models, current, effort, hint }: ModelMenuDraftProps) {
       </button>
       <RouteColumn title={t('chat.picker.model')} className="max-h-[40vh] border-t border-border">
         {models.map((model) => (
-          <RouteItem key={model.id} active={model.id === current}>
+          <RouteItem key={model.id} active={model.id === current} onClick={noop}>
             <ModelLines model={model} />
             {model.id === current && <Check className="size-3.5 shrink-0" />}
           </RouteItem>
@@ -233,29 +190,18 @@ function MenuBody({ models, current, effort, hint }: ModelMenuDraftProps) {
         <NewModelsOpened hint={hint} />
         <div className="sticky -bottom-1.5 z-10 -mx-1.5 -mb-1.5 border-t border-border bg-panel px-1.5 pb-1.5">
           <NewModelsLine hint={hint} />
-          <PickerExitButton label={t('chat.picker.addModel')} />
+          <PickerExitButton label={t('chat.picker.addModel')} onClick={noop} />
         </div>
       </RouteColumn>
       <div className="border-t border-border p-3">
         <div className="flex items-center pb-2">
           <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('chat.picker.effort')}</span>
-          {/* The Fast toggle as the picker draws it where the route offers no fast tier. */}
-          <span className="ml-auto">
-            <button
-              type="button"
-              aria-pressed={false}
-              disabled
-              className="inline-flex items-center gap-1 rounded-full border border-edge bg-field px-2 py-0.5 text-[11px] font-semibold text-muted disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="size-[11px] shrink-0"><path d="M13.6 2.2 6.4 13.1h5l-1.5 8.7 7.7-11.4h-5.2z" /></svg>
-              {t('chat.picker.fast')}
-            </button>
-          </span>
+          <FastToggle on={false} offered={false} unconfirmed={false} active={false} onToggle={noop} />
         </div>
         <div role="radiogroup" aria-label={t('chat.picker.effort')} className="flex flex-wrap gap-0.5 rounded-md border border-edge bg-field p-0.5">
-          <EffortChip active={false} label={t('chat.picker.effortDefault')} />
+          <EffortChip active={false} label={t('chat.picker.effortDefault')} onClick={noop} />
           {effortOrder.filter((option) => efforts.includes(option)).map((option) => (
-            <EffortChip key={option} active={option === effort} label={t(`chat.picker.effortOptions.${option}`, { defaultValue: option })} />
+            <EffortChip key={option} active={option === effort} label={t(`chat.picker.effortOptions.${option}`, { defaultValue: option })} onClick={noop} />
           ))}
         </div>
       </div>
@@ -309,29 +255,17 @@ export interface DraftCandidate {
   suppliers: string[];
 }
 
-/** One candidate as the shipped PickerRow writes it: checkbox, name, ID, and (outside a provider fold) who lists it. */
+/** A candidate as the picker reads one from the server. */
+const asCandidate = ({ model, suppliers }: DraftCandidate): ModelCandidate => ({
+  id: model.id,
+  display_name: model.label,
+  reasoning_efforts: [],
+  suppliers: suppliers.map((name) => ({ source_id: name, source_name: name, model_id: model.id })),
+  origin: 'provider',
+});
+
 const CandidateRow = ({ candidate, grouped = false }: { candidate: DraftCandidate; grouped?: boolean }) => (
-  <button
-    type="button"
-    role="checkbox"
-    aria-checked={false}
-    className={clsx('model-hub-picker-row min-w-0', !grouped && 'model-hub-picker-row--suppliers')}
-  >
-    <Checkbox presentational checked={false} />
-    <span className="model-hub-picker-entry">
-      <span className="model-hub-picker-line flex-auto">
-        <span className="model-hub-picker-name truncate">{candidate.model.label}</span>
-        <span className="model-hub-picker-id truncate font-mono">{candidate.model.id}</span>
-      </span>
-      {!grouped && (
-        <span className="model-hub-picker-chips">
-          {candidate.suppliers.map((name) => (
-            <span key={name} className="model-hub-pill model-hub-fill-0a border border-edge text-muted">{name}</span>
-          ))}
-        </span>
-      )}
-    </span>
-  </button>
+  <PickerRow candidate={asCandidate(candidate)} picked={false} listed={false} grouped={grouped} onToggle={noop} />
 );
 
 /** 添加 Vibey 模型 from Settings › 模型, with the new models as the first group. */

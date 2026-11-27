@@ -942,7 +942,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
 // One effort in the compact menu's radio group. A refused saved effort stays
 // checked and gold: routing still sends it, so it shows as itself.
-const EffortChip: React.FC<{
+export const EffortChip: React.FC<{
   active: boolean;
   label: string;
   onClick: () => void;
@@ -972,7 +972,7 @@ const EffortChip: React.FC<{
   </button>
 );
 
-const RouteColumn: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className, children }) => (
+export const RouteColumn: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className, children }) => (
   <div className={clsx('flex min-w-0 flex-col overflow-y-auto p-1.5 sm:max-h-[320px]', className)}>
     <div className="px-2 pb-1 pt-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{title}</div>
     {children}
@@ -981,7 +981,7 @@ const RouteColumn: React.FC<{ title: string; className?: string; children: React
 
 // The "+ …" row closing a column: it leaves the picker for the page where that
 // column's list is edited.
-const PickerExitButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
+export const PickerExitButton: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
   <Button
     type="button"
     variant="ghost"
@@ -996,7 +996,7 @@ const PickerExitButton: React.FC<{ label: string; onClick: () => void }> = ({ la
 
 // A picker row on the shared Button primitive (variant + className overrides)
 // so it inherits the design system's focus/disabled behavior.
-const RouteItem: React.FC<{
+export const RouteItem: React.FC<{
   active: boolean;
   disabled?: boolean;
   onClick: () => void;
@@ -1020,7 +1020,7 @@ const RouteItem: React.FC<{
 // Renders a model id with its OpenCode-style `provider/vendor/` prefix muted so
 // the model name (the last path segment, what actually differs) reads first.
 // No `/` (claude / codex) → the whole id shows plainly.
-const ModelName: React.FC<{ label: string }> = ({ label }) => {
+export const ModelName: React.FC<{ label: string }> = ({ label }) => {
   const cut = label.lastIndexOf('/');
   if (cut < 0) return <>{label}</>;
   return (
@@ -1054,7 +1054,7 @@ const FastMark: React.FC<React.SVGProps<SVGSVGElement> & { hollow?: boolean }> =
 // It stays switchable where the last fast response did not confirm the tier: a
 // user may try it, or stop paying for it. Only a model whose hop offers no fast
 // tier keeps the choice without changing it here.
-const FastToggle: React.FC<{
+export const FastToggle: React.FC<{
   on: boolean;
   offered: boolean;
   unconfirmed: boolean;
