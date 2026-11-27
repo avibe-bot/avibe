@@ -40,7 +40,7 @@ def manifest(repo, rev):
     return payload, doc['rehearsals']
 
 
-def successor(previous, desired):
+def successor(previous, desired, *, origin=False):
     if previous and previous.raw == desired.raw:
         return
     if previous and desired.sequence <= previous.sequence:
@@ -54,6 +54,11 @@ def successor(previous, desired):
         if previous and previous.tombstone(w.asset_release_tag) == w:
             continue
         target = previous and previous.release(w.asset_release_tag)
+        # A lagging origin may never have seen the retired master entry. The
+        # merge preflight already checked that withdrawal against the actual
+        # base manifest (or the floor for an unlisted packaged engine).
+        if origin and target is None:
+            continue
         minimum = target.minimum if target else channel.FIRST_CHANNEL_AVIBE_VERSION
         if desired.release(w.rollback_to).minimum > minimum:
             raise Error('rollback target needs a newer Avibe than an affected client')
@@ -97,7 +102,7 @@ def write_index(desired, envelope, *, bucket, roots, verifier, public, assert_cu
         raise Error('signed artifact does not match the master manifest')
     stored = bucket.read()
     previous = producer.authenticate(stored[0], roots=roots, verifier=verifier) if stored else None
-    successor(previous, desired)
+    successor(previous, desired, origin=True)
     if previous is None or previous.raw != desired.raw:
         verify_assets(desired)
         assert_current()

@@ -54,6 +54,23 @@ class Origin:
         self.puts += 1
 
 
+def test_withdrawal_survives_a_missed_promotion_upload(monkeypatch):
+    signer, bucket = Signer(), Origin()
+    a, b = [release_entry(manifest_bytes(build=i), minimum='3.2.8') for i in (1, 2)]
+    def make(seq, entries, revoked=()):
+        return channel.parse_payload(json.dumps(payload_document(seq, releases=entries, revoked=list(revoked))).encode())
+    origin, merged = make(1, [a]), make(2, [a, b])
+    desired = make(3, [a], [tombstone(B, A)])
+    publish.successor(merged, desired)
+    with pytest.raises(publish.Error, match='newer Avibe'):
+        publish.successor(origin, desired)  # packaged-only B still needs a 3.2.6 fallback at merge
+    bucket.stored = envelope_bytes(signer, origin.raw)
+    monkeypatch.setattr(publish.q, 'require_published', lambda *_: None)
+    publish.write_index(desired, envelope_bytes(signer, desired.raw), bucket=bucket, roots=signer.roots(),
+                        verifier=LocalVerifier(), public=lambda: bucket.stored, assert_current=lambda: None)
+    assert bucket.puts == 1 and channel.authenticate(bucket.stored, roots=signer.roots(), verifier=LocalVerifier())[1].raw == desired.raw
+
+
 def test_promotion_then_withdrawal_reaches_client_via_authenticated_origin(tmp_path, monkeypatch):
     signer, verifier, bucket = Signer(), LocalVerifier(), Origin()
     roots = signer.roots()
