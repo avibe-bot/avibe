@@ -519,7 +519,10 @@ impl Client {
                     },
                     next=paths.next()=>{
                         let Some(snapshot) = next else {break FaultCode::ConnectionEnded};
-                        let Some(path) = link.selected_in(snapshot) else {break FaultCode::NoPermittedPath};
+                        let path = match link.judged(snapshot) {
+                            Ok(path) => path,
+                            Err(code) => break code,
+                        };
                         let _writer=writer.lock().unwrap();
                         if !tx.borrow().as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break FaultCode::Superseded;}
                         if accepting && health.has_changed().is_ok() {PathStatus::publish(&status,Some(path),false);}

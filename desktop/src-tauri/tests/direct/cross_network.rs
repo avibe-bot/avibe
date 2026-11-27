@@ -196,10 +196,7 @@ fn a_link_is_judged_by_its_selected_path_alone() {
     let offer = parse(json!([]), json!({"policy":"public-trial-v1","url":home})).unwrap();
     let judge = |paths: Vec<(bool, TransportAddr)>| offer.judge(offer.id, paths);
 
-    assert_eq!(
-        judge(vec![(true, relay())]),
-        Verdict::Accepted(Relay, AddressClass::Relay)
-    );
+    assert_eq!(judge(vec![(true, relay())]), Verdict::Accepted(Relay));
     // A refused candidate beside the selected relay, or beside a selected
     // local path: the link stays as it is.
     for (refused, named) in [
@@ -209,12 +206,12 @@ fn a_link_is_judged_by_its_selected_path_alone() {
     ] {
         assert_eq!(
             judge(vec![(false, ip(refused)), (true, relay())]),
-            Verdict::Accepted(Relay, AddressClass::Relay),
+            Verdict::Accepted(Relay),
             "{refused}"
         );
         assert_eq!(
             judge(vec![(true, ip("10.1.1.2:80")), (false, ip(refused)), (false, relay())]),
-            Verdict::Accepted(Lan(Ipv4), AddressClass::Private),
+            Verdict::Accepted(Lan(Ipv4)),
             "{refused}"
         );
         // Selected, it carries the data: refused, though the relay is open,
@@ -229,7 +226,7 @@ fn a_link_is_judged_by_its_selected_path_alone() {
     // the link goes on, as a local one.
     assert_eq!(
         judge(vec![(false, relay()), (true, ip("100.100.1.2:4433"))]),
-        Verdict::Accepted(Lan(Ipv4), AddressClass::Cgnat)
+        Verdict::Accepted(Lan(Ipv4))
     );
     // Nothing selected is not a refusal.
     assert_eq!(

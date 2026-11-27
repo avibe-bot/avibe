@@ -64,7 +64,7 @@ pub(super) enum Verdict {
     /// The selected path is one the grant does not permit: the class of its
     /// address, for the report.
     Refused(AddressClass),
-    Accepted(SelectedPath, AddressClass),
+    Accepted(SelectedPath),
 }
 
 pub(super) fn lan(addr: SocketAddr) -> bool {
@@ -93,9 +93,8 @@ impl Offer {
         let Some((_, remote)) = paths.into_iter().find(|(selected, _)| *selected) else {
             return Verdict::Unselected;
         };
-        let class = class(&remote);
         self.selected(peer, &remote)
-            .map_or(Verdict::Refused(class), |path| Verdict::Accepted(path, class))
+            .map_or_else(|| Verdict::Refused(class(&remote)), Verdict::Accepted)
     }
 
     /// Called only with a path snapshot of the authenticated connection, never

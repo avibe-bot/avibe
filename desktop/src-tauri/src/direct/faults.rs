@@ -160,6 +160,38 @@ mod tests {
         }
     }
 
+    /// The instance accepts a fixed list of code words and ignores a report
+    /// that carries any other (`_LEG_FAULT_CODES` in
+    /// `vibe/direct_rendezvous.py`): the words for a refused path are that
+    /// list's, one for each class of address.
+    #[test]
+    fn a_refused_path_is_reported_by_the_class_of_its_address_in_the_instances_words() {
+        use crate::direct::path::AddressClass::*;
+        let word = |code: FaultCode| serde_json::json!(code).as_str().unwrap().to_owned();
+        assert_eq!(word(FaultCode::PathUnselected), "path_unselected");
+        assert_eq!(word(FaultCode::NoPermittedPath), "no_permitted_path");
+        for (class, expected) in [
+            (Relay, "path_refused_relay"),
+            (Private, "path_refused_private"),
+            (Cgnat, "path_refused_cgnat"),
+            (Ula, "path_refused_ula"),
+            (Linklocal, "path_refused_linklocal"),
+            (Loopback, "path_refused_loopback"),
+            (Public, "path_refused_public"),
+            (Global, "path_refused_global"),
+            (Nat64, "path_refused_nat64"),
+            (Mapped, "path_refused_mapped"),
+            (Other, "path_refused_other"),
+        ] {
+            assert_eq!(word(FaultCode::refused(class)), expected);
+            // The class's own word is the code's last part.
+            assert_eq!(
+                format!("path_refused_{}", serde_json::json!(class).as_str().unwrap()),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn equal_faults_in_a_row_are_one_entry_and_the_last_five_are_kept() {
         let faults = Faults::default();

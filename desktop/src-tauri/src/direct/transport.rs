@@ -4,7 +4,7 @@ use super::{
     clock::Clock,
     connect::Authority,
     offer::{Offer, Verdict, ALPN},
-    path::{SelectedPath, TrialRelay},
+    path::{AddressClass, SelectedPath, TrialRelay},
     selection::Selection,
 };
 use iroh::{
@@ -51,6 +51,8 @@ pub enum FaultCode {
     Expired,
     Other,
     InvalidOffer,
+    /// No permitted path is selected, by a caller that cannot say which of
+    /// the two below it is. The core itself says which.
     NoPermittedPath,
     ListenerClosed,
     Superseded,
@@ -67,6 +69,40 @@ pub enum FaultCode {
     NotReadyDisabled,
     NotReadyNoAddress,
     NotReadyOther,
+    // What `NoPermittedPath` covered, told apart. The connection has no
+    // selected path at all; or its selected path's address is one the grant
+    // does not permit, by the class of that address (`AddressClass`). A
+    // class, never an address.
+    PathUnselected,
+    PathRefusedRelay,
+    PathRefusedPrivate,
+    PathRefusedCgnat,
+    PathRefusedUla,
+    PathRefusedLinklocal,
+    PathRefusedLoopback,
+    PathRefusedPublic,
+    PathRefusedGlobal,
+    PathRefusedNat64,
+    PathRefusedMapped,
+    PathRefusedOther,
+}
+impl FaultCode {
+    /// The selected path's address is one the grant does not permit.
+    pub(super) fn refused(class: AddressClass) -> Self {
+        match class {
+            AddressClass::Relay => Self::PathRefusedRelay,
+            AddressClass::Private => Self::PathRefusedPrivate,
+            AddressClass::Cgnat => Self::PathRefusedCgnat,
+            AddressClass::Ula => Self::PathRefusedUla,
+            AddressClass::Linklocal => Self::PathRefusedLinklocal,
+            AddressClass::Loopback => Self::PathRefusedLoopback,
+            AddressClass::Public => Self::PathRefusedPublic,
+            AddressClass::Global => Self::PathRefusedGlobal,
+            AddressClass::Nat64 => Self::PathRefusedNat64,
+            AddressClass::Mapped => Self::PathRefusedMapped,
+            AddressClass::Other => Self::PathRefusedOther,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Fault(pub Stage, pub FaultCode);
@@ -237,10 +273,17 @@ impl Link {
         self.selected_path().is_some()
     }
     pub(super) fn selected_in(&self, paths: iroh::endpoint::PathList<'_>) -> Option<SelectedPath> {
+        self.judged(paths).ok()
+    }
+    /// The selected path the grant permits; or why there is none, in the
+    /// word the reports use: nothing is selected, or the selected path's
+    /// address is of a class the grant refuses.
+    pub(super) fn judged(&self, paths: iroh::endpoint::PathList<'_>) -> Result<SelectedPath, FaultCode> {
         let paths = paths.iter().map(|p| (p.is_selected(), p.remote_addr().clone()));
         match self.offer.judge(self.conn.remote_id(), paths) {
-            Verdict::Accepted(path, _) => Some(path),
-            Verdict::Unselected | Verdict::Refused(_) => None,
+            Verdict::Accepted(path) => Ok(path),
+            Verdict::Unselected => Err(FaultCode::PathUnselected),
+            Verdict::Refused(class) => Err(FaultCode::refused(class)),
         }
     }
     pub(super) fn selected_path(&self) -> Option<SelectedPath> {
@@ -256,9 +299,9 @@ impl Link {
         if self.conn.close_reason().is_some() {
             return Err(Fault(stage, FaultCode::ConnectionEnded));
         }
-        self.selected_in(self.conn.paths())
+        self.judged(self.conn.paths())
             .map(|_| ())
-            .ok_or(Fault(stage, FaultCode::NoPermittedPath))
+            .map_err(|code| Fault(stage, code))
     }
     #[cfg(test)]
     pub(super) async fn dial(ep: &Endpoint, offer: Offer, host: &Authority, clock: Clock) -> Option<Arc<Self>> {
