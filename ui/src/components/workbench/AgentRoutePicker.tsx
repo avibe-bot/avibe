@@ -942,9 +942,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
 // One effort in the compact menu's radio group. A refused saved effort stays
 // checked and gold: routing still sends it, so it shows as itself. Each segment
-// is as wide as its label and shares what the row leaves over, so the longest
-// label (「默认（高）」, "Extra High") stays inside its segment at the 320px menu;
-// a row that cannot hold them all wraps rather than overflowing.
+// is as wide as its label and shares what the row leaves over, so a long label
+// stays inside its segment at the 320px menu; a row that cannot hold them all
+// wraps rather than overflowing.
 // ui/design: chat/composer/route-picker-long-efforts
 const EffortChip: React.FC<{
   active: boolean;

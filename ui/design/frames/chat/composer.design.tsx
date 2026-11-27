@@ -150,10 +150,10 @@ const designFrames = frames([
     render: chatPhone,
   },
   {
-    // The longest effort row the menu draws: an Agent with its own effort names it in 默认（高）, and the
-    // model offers 极高; every label stays inside its segment at the menu's narrowest width.
+    // A long effort row: an Agent with its own effort names it in 默认（高）, and the model offers 极高;
+    // every label stays inside its segment at the menu's narrowest width, wrapping when the row is full.
     name: 'route-picker-long-efforts',
-    title: '输入框 · Agent 与模型 · 思考强度标签最长时（Codex：默认带 Agent 的强度，另有极高）',
+    title: '输入框 · Agent 与模型 · 思考强度标签较长时（Codex：默认带 Agent 的强度，另有极高）',
     width: 1192,
     height: 720,
     status: 'shipped',
@@ -164,7 +164,7 @@ const designFrames = frames([
   },
   {
     name: 'phone-route-picker-long-efforts',
-    title: '输入框 · Agent 与模型 · 思考强度标签最长时 · 手机',
+    title: '输入框 · Agent 与模型 · 思考强度标签较长时 · 手机',
     width: 390,
     height: 844,
     status: 'shipped',
