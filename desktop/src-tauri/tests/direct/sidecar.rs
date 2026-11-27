@@ -238,7 +238,7 @@ async fn run(changed_selection: bool) {
     let retained = RefreshOutcome::Retained {
         retry_before: Duration::from_secs(1),
     };
-    for reply in [Reply::NotReady, Reply::Failed, Reply::Refused(503)] {
+    for reply in [Reply::NotReady, Reply::Failed, Reply::TimedOut, Reply::Refused(503)] {
         assert_eq!(client.refresh_reply(|_| async { reply }).await, retained);
         assert!(!deadlines.has_changed().unwrap());
     }
@@ -329,6 +329,36 @@ async fn run(changed_selection: bool) {
         .await
         .unwrap()
         .unwrap();
+    // Why the link was withdrawn is on record for the instance's log, once,
+    // under the kind of path it was on, and counted in its minute; the
+    // CONNECTs the link carried are counted there as well.
+    let withdrawn: Vec<_> = client
+        .faults
+        .take()
+        .iter()
+        .map(super::faults::LegFault::json)
+        .filter(|fault| fault["stage"] == "handover")
+        .collect();
+    let last = withdrawn.last().expect("the withdrawal is on record");
+    assert_eq!(
+        last["code"],
+        if changed_selection { "superseded" } else { "expired" },
+        "{withdrawn:?}"
+    );
+    assert_eq!(last["path"], "lan", "{withdrawn:?}");
+    // Exactly one, on the LAN path, also where new connections had left
+    // that path before the link went (the terminal accept error above).
+    // Summed: the expiry arm waits between the CONNECT and the withdrawal,
+    // and the count's clock is the real one, so a minute may end between.
+    assert_eq!(
+        (withdrawn.len(), &last["count"]),
+        (1, &serde_json::json!(1)),
+        "{withdrawn:?}"
+    );
+    let usage = &client.listener.access.usage;
+    let lan = Some(super::faults::PathWord::Lan);
+    assert_eq!((usage.total(lan, "retired"), usage.total(None, "retired")), (1, 1));
+    assert!(usage.total(lan, "direct") >= 1);
     assert_eq!(
         client.refresh_reply(|_| async { Reply::Failed }).await,
         RefreshOutcome::Retired

@@ -1277,8 +1277,8 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
     workflow = _jobs()
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
-    assert inputs["operation"]["options"] == list(producer.OPERATION_POLICY)
-    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rollback_to", "reason"}
+    assert inputs["operation"]["options"] == ["release"]
+    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rehearsal_attempt"}
     # Creating a ledger is owner commissioning, run by hand; no step of this workflow reaches it.
     scripts = "\n".join(step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"])
     for forbidden in ("initialize", "--first-sequence", "first_publication", "recover"):
@@ -1295,11 +1295,7 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
 
 def test_every_privileged_job_follows_authorization_and_proves_approval_before_its_first_privileged_step() -> None:
     jobs = _jobs()["jobs"]
-    privileged = {
-        "release": producer.WRITER_ENVIRONMENT,
-        "sign": producer.SIGNER_ENVIRONMENT,
-        "publish": producer.WRITER_ENVIRONMENT,
-    }
+    privileged = {"release": "model-hub-engine-asset-approval"}
 
     assert {name for name, job in jobs.items() if "environment" in job} == set(privileged)
     for name, environment in privileged.items():
@@ -1318,32 +1314,27 @@ def test_every_privileged_job_follows_authorization_and_proves_approval_before_i
 
 
 def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither_key_nor_ledger() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    jobs = _jobs()["jobs"]
+    jobs = yaml.safe_load(WORKFLOW.with_name('model-hub-engine-manifest.yml').read_text())['jobs']
+    assert set(jobs) == {'prepare', 'sign', 'upload'}
+    for name, job in jobs.items():
+        assert job['runs-on'] == 'ubuntu-latest'
+        assert job.get('environment') == {'sign': producer.SIGNER_ENVIRONMENT, 'upload': producer.WRITER_ENVIRONMENT}.get(name)
+        text = json.dumps(job)
+        assert ('secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE' in text) == (name == 'sign')
+        assert ('secrets.R2_SECRET_ACCESS_KEY' in text) == (name == 'upload')
+        assert 'self-hosted' not in text
+    assert not {'sign', 'publish'} & _jobs()['jobs'].keys()
 
-    def mentions(job: str, needle: str) -> bool:
-        return needle in json.dumps(jobs[job])
 
-    # Scheduled onto the signer's runner group, whose policy decides which workflows it admits.
-    assert jobs["sign"]["runs-on"] == {
-        "group": "model-hub-engine-channel-signer",
-        "labels": ["self-hosted", "model-hub-engine-channel-signer"],
-    }
-    assert not mentions("sign", "secrets.") and not mentions("sign", "AWS_")
-    assert mentions("sign", "MODEL_HUB_ENGINE_CHANNEL_LEDGER") and mentions("sign", "--ledger")
-    for name in ("authorize", "prepare", "release", "publish"):
-        assert not mentions(name, "LEDGER") and not mentions(name, "KEY_ENVELOPE")
-        assert not mentions(name, "model_hub_engine_channel.py sign") and jobs[name]["runs-on"] == "ubuntu-latest"
-    # The channel's bucket credential is not the release mirror's.
-    assert "secrets.R2_" not in text and text.count("secrets.MODEL_HUB_ENGINE_CHANNEL_R2_") == 3
-    # The signer runs this checkout's scripts only: no downloaded assets or receipt, no installs.
-    sign_text = json.dumps(jobs["sign"])
-    for forbidden in ("candidate-assets", "receipt", "pip install", "gh run download", "download-artifact",
-                      "contents\": \"write"):
-        assert forbidden not in sign_text
-    assert all(job.get("permissions", {}).get("contents") != "write" for name, job in jobs.items() if name != "release")
-    assert jobs["prepare"]["outputs"] == {"baselines": "${{ steps.context.outputs.baselines }}"}
-    assert mentions("sign", "needs.prepare.outputs.baselines") and mentions("sign", "--rehearsal-baselines")
+def test_upload_only_retry_downloads_the_envelope_id_returned_by_the_successful_signer() -> None:
+    jobs = yaml.safe_load(WORKFLOW.with_name('model-hub-engine-manifest.yml').read_text())['jobs']
+    sign, upload = jobs['sign'], jobs['upload']
+    artifact = next(s for s in sign['steps'] if s.get('uses', '').startswith('actions/upload-artifact@'))
+    download = next(s for s in upload['steps'] if s.get('uses', '').startswith('actions/download-artifact@'))
+    assert sign['outputs']['artifact_id'] == '${{ steps.' + artifact['id'] + '.outputs.artifact-id }}'
+    assert 'sign' in upload['needs']
+    assert download['with']['artifact-ids'] == '${{ needs.sign.outputs.artifact_id }}'
+    assert 'name' not in download['with'] and 'github.run_attempt' not in json.dumps(upload)
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:
@@ -1356,4 +1347,4 @@ def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -
         assert artifact in json.dumps(_jobs()["jobs"]["prepare"])
     assert "qualification-released-" in produced
     assert qualification.TRUSTED_ASSETS_ARTIFACT in json.dumps(_jobs()["jobs"]["prepare"])
-    assert "verify-untrusted-rehearsal" in json.dumps(_jobs()["jobs"]["prepare"])
+    assert 'evidence-build' in json.dumps(_jobs()['jobs']['prepare'])

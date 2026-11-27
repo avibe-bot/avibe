@@ -7052,6 +7052,197 @@ def test_remote_org_show_events_stream_ignores_resource_acl_changes(
     assert body == ": show events connected\n\n"
 
 
+@pytest.mark.parametrize("change", ["offline", "private", "limited", "rotate", "rename", "archive", "delete"])
+@pytest.mark.parametrize("phase", ["replay", "live"])
+def test_public_show_events_stream_closes_when_binding_changes(monkeypatch, tmp_path, change, phase):
+    from core.show_session_events import ShowSessionEventStore
+    from sqlalchemy import delete
+    from storage.models import show_pages
+    from storage.workbench_sessions_service import archive_session
+    from vibe.sse_broker import broker
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+    if phase == "replay":
+        event_store = ShowSessionEventStore()
+        try:
+            for index in range(2):
+                event_store.append(
+                    "ses123",
+                    {"type": "human.annotation.created", "annotation": {"comment": f"note {index}"}},
+                )
+        finally:
+            event_store.close()
+
+    async def exercise():
+        baseline = broker.subscriber_count()
+        response = await ui_server._show_events_stream(
+            "ses123", public=True, public_share_id=share_id,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            assert await anext(iterator) == ": show events connected\n\n"
+            if phase == "replay":
+                assert "event: show.event" in await anext(iterator)
+            else:
+                # Finish replay and suspend inside queue.get before changing
+                # persisted state from a separate store, as a CLI caller does.
+                next_frame = asyncio.create_task(anext(iterator))
+                await asyncio.sleep(0)
+                assert not next_frame.done()
+            store = ShowPageStore()
+            try:
+                if change == "offline":
+                    store.set_offline("ses123", True)
+                elif change == "private":
+                    store.update_visibility("ses123", "private")
+                elif change == "limited":
+                    access = store.get_access("ses123")
+                    assert access is not None
+                    result = store.apply_access(
+                        "ses123",
+                        expected_revision=access.revision,
+                        target_access_mode="limited",
+                        target_share_id=share_id,
+                        target_emails=["viewer@example.com"],
+                    )
+                    assert result.status == "applied"
+                elif change == "rotate":
+                    store.rotate_share("ses123")
+                elif change == "rename":
+                    store.set_share_id("ses123", "replacement-link")
+                elif change == "archive":
+                    with store.engine.begin() as conn:
+                        archive_session(conn, "ses123")
+                elif change == "delete":
+                    with store.engine.begin() as conn:
+                        conn.execute(delete(show_pages).where(show_pages.c.session_id == "ses123"))
+            finally:
+                store.close()
+            broker.publish(
+                "show.dispatch",
+                {"session_id": "ses123", "event": "turn.chunk", "data": {"text": "later output"}},
+            )
+            frame = await asyncio.wait_for(
+                next_frame if phase == "live" else anext(iterator), timeout=1,
+            )
+            assert "event: remote.authorization" in frame
+            assert '"state":"revoked"' in frame
+            assert "later output" not in frame
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(iterator), timeout=1)
+            assert broker.subscriber_count() == baseline
+        finally:
+            await iterator.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_public_show_events_stream_closes_while_idle(monkeypatch, tmp_path):
+    from vibe.sse_broker import broker
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+
+    async def exercise():
+        baseline = broker.subscriber_count()
+        response = await ui_server._show_events_stream(
+            "ses123", public=True, public_share_id=share_id,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            assert await anext(iterator) == ": show events connected\n\n"
+            next_frame = asyncio.create_task(anext(iterator))
+            await asyncio.sleep(0)
+            assert not next_frame.done()
+            store = ShowPageStore()
+            try:
+                store.set_offline("ses123", True)
+            finally:
+                store.close()
+            # No broker publication: the existing heartbeat bounds the wait
+            # even when the mutation belongs to another process.
+            frame = await asyncio.wait_for(next_frame, timeout=16)
+            assert "event: remote.authorization" in frame
+            assert '"state":"revoked"' in frame
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(iterator), timeout=1)
+            assert broker.subscriber_count() == baseline
+        finally:
+            await iterator.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_public_show_events_http_response_finishes_after_binding_change(monkeypatch, tmp_path):
+    from vibe.sse_broker import broker
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+
+    async def exercise():
+        baseline = broker.subscriber_count()
+        sent = []
+        connected = asyncio.Event()
+        request_delivered = False
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Event().wait()
+
+        async def send(message):
+            sent.append(message)
+            if b": show events connected" in message.get("body", b""):
+                connected.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": f"/p/{share_id}/__show/events",
+            "query_string": b"stream=1",
+            "headers": [(b"host", b"127.0.0.1:5123")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 5123),
+        }
+        task = asyncio.create_task(app(scope, receive, send))
+        try:
+            await asyncio.wait_for(connected.wait(), timeout=2)
+            store = ShowPageStore()
+            try:
+                store.set_offline("ses123", True)
+            finally:
+                store.close()
+            broker.publish(
+                "show.dispatch",
+                {"session_id": "ses123", "event": "turn.chunk", "data": {"text": "later output"}},
+            )
+            await asyncio.wait_for(task, timeout=2)
+            assert sent[0]["status"] == 200
+            body = b"".join(message.get("body", b"") for message in sent)
+            assert b"event: remote.authorization" in body
+            assert b"later output" not in body
+            assert sent[-1]["type"] == "http.response.body"
+            assert sent[-1].get("more_body", False) is False
+            assert broker.subscriber_count() == baseline
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
 def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
     from vibe.sse_broker import broker
     from vibe.ui_server import _show_events_stream
@@ -7147,7 +7338,7 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
-    _create_show_page("ses123", "public")
+    share_id = _create_show_page("ses123", "public")
     store = ShowSessionEventStore()
     try:
         event = store.append(
@@ -7166,7 +7357,7 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
         store.close()
 
     async def _collect_replay() -> str:
-        response = await _show_events_stream("ses123", public=True)
+        response = await _show_events_stream("ses123", public=True, public_share_id=share_id)
         iterator = response.body_iterator.__aiter__()
         chunks = []
         try:

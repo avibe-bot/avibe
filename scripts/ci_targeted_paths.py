@@ -18,6 +18,10 @@ BOUNDARIES = {
     }),
     # The wire comparison and its exception label exist only on pull requests.
     'engine-wire': frozenset({'vibe/model_hub_runtime/cliproxyapi_manifest.json'}),
+    'engine-publication': frozenset({
+        '.github/workflows/model-hub-engine-manifest.yml', 'scripts/model_hub_engine_manifest_publish.py',
+        'scripts/model_hub_engine_rehearsal.py',
+    }),
     'admission': frozenset({'vibe/binding_admission.py', 'vibe/personal_claims.py', 'core/agent_auth_service.py'}),
     'vault-policy': frozenset({'storage/vault_policy.py', 'storage/vault_service.py', 'storage/vault_protected.py', 'storage/vault_protected_hd.py', 'storage/vault_crypto.py', 'vibe/avault_authorization.py'}),
     'vault-window-macos': frozenset({'desktop/src-tauri/src/macos_vault_window.rs'}),
@@ -38,6 +42,9 @@ def matched_proofs(path: str) -> set[str]:
     if path.startswith(('ios/', 'packaging/iroh-apple/', 'vibe/data/',
                         'tests/fixtures/push/', 'tests/fixtures/live_activity/')):
         result.add('ios-app')
+    # This file first appears when a real engine update is proposed.
+    if path == 'patches/model-hub-engine-channel.json':
+        result.add('engine-publication')
     p = PurePosixPath(path)
     if p.parent.as_posix() == 'storage/alembic/versions' and p.suffix == '.py':
         result.add('migration')

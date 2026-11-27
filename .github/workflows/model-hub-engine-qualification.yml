@@ -35,7 +35,9 @@ env:
 jobs:
   build:
     name: build
-    if: github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master'
+    # A rehearsal has no publish authority. The trusted caller, not a branch
+    # name or a claim in its output, decides which exact revision is eligible.
+    if: github.repository == 'avibe-bot/avibe'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -85,7 +87,7 @@ jobs:
           name: model-hub-engine-untrusted-assets
           path: ${{ runner.temp }}/candidate-assets
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
           compression-level: 0
 
       - name: Upload build evidence
@@ -94,7 +96,7 @@ jobs:
           name: untrusted-rehearsal-evidence-build
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   # Each archive starts on its own platform, from an isolated runtime and state
   # directory, and must pass the health check Avibe itself applies.
@@ -207,7 +209,7 @@ jobs:
           name: untrusted-rehearsal-evidence-platform-smoke-${{ matrix.platform }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   # The whole hermetic Model Hub E2E, driven through the released wheel of the
   # minimum Avibe and of the current stable Avibe. The tests are that release
@@ -331,7 +333,7 @@ jobs:
           name: qualification-released-${{ matrix.role }}
           path: ${{ runner.temp }}/released/record
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Upload E2E evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -339,7 +341,7 @@ jobs:
           name: untrusted-rehearsal-evidence-released-avibe-e2e-${{ matrix.role }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   # The hosted passthrough, compared with every engine a machine may be running
   # when the candidate arrives: each release the signed index still lists, and
@@ -429,7 +431,7 @@ jobs:
           name: qualification-baselines
           path: ${{ runner.temp }}/baselines/baselines.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Upload hosted-wire evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -437,7 +439,7 @@ jobs:
           name: untrusted-rehearsal-evidence-hosted-wire
           path: ${{ runner.temp }}/evidence
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
 
   # This is a report assembler, not an authority. It never executes a
   # candidate or treats a report as authenticated; it merely makes missing
@@ -493,7 +495,7 @@ jobs:
       - name: Upload the untrusted rehearsal result
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-untrusted-rehearsal
+          name: ${{ github.run_attempt == 1 && 'model-hub-engine-untrusted-rehearsal' || format('model-hub-engine-untrusted-rehearsal-attempt-{0}', github.run_attempt) }}
           path: ${{ runner.temp }}/untrusted_rehearsal.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 3

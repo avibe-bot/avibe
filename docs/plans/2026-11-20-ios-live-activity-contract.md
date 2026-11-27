@@ -127,9 +127,9 @@ This table is the whole lifecycle. Every event has one row; "end" removes the ac
 
 ### 2.4 What a card shows
 
-- Shown: the Avibe mark, `agentName`, `sessionTitle` (one line, tail-truncated), the phase, and time. A live card shows the elapsed time (`Text(timerInterval:)` from `startedAt`, counted on the phone); every ended card (done, failed, stopped) shows the total time, `endedAt - startedAt`.
+- Shown: the Avibe mark, `agentName`, `sessionTitle` (one line, tail-truncated), the phase, and time. A live card shows the elapsed time (`Text(timerInterval:)` from `startedAt`, counted on the phone); a done or stopped card shows the total time, `endedAt - startedAt`; a failed card says only to open Avibe for the reason. The status is one line in every state.
 - Never shown: message text, tools, files, or the instance name.
-- Stale (`context.isStale`) on a working or needsYou card: the timer stops, and the card reads "May be out of date. Last confirmed working at {confirmedAt}". No timer keeps running for a state nobody confirmed.
+- Stale (`context.isStale`) on a working or needsYou card: the timer stops, and the card says it may be out of date since `confirmedAt`. No timer keeps running for a state nobody confirmed.
 - The words are in the design frames. Lock Screen and island strings live in the extension's xcstrings (zh, en). The alert keys `AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE` and `AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY` live in the App's `Localizable.xcstrings`.
 
 ## 3. Relay (avibe-backend)

@@ -21,17 +21,22 @@
 //!   earlier session, and a window already open is never rebuilt. Until an
 //!   instance has answered once, its session only asks (a "scout"): it
 //!   routes nothing and ends with the first answer;
-//! - where a route can be put on an open window (macOS 14 and later), an
-//!   instance that answered before still gets its client before its view is
-//!   created and its route before that view's first load. WebKit does not
-//!   use a route written while it has a connection to that host: not for
-//!   the next request, a reload or a new navigation, until every such
-//!   connection has closed (`examples/direct_webview_probe.rs` measures
-//!   it). So only a route that is there first carries the view, and only
-//!   then are its tunnel connections the listener's to hand over. An
-//!   instance that has not answered before is asked from its open view and
-//!   routed there; that view keeps the tunnel while its connections live,
-//!   and the windows opened from it later are routed as they are made.
+//! - where a route can be put on an open window (macOS 14 and later), every
+//!   instance that may have a session gets its client before its view is
+//!   created and its route before that view's first load, whether or not it
+//!   has answered before. WebKit does not use a route written while it has
+//!   a connection to that host: not for the next request, a reload or a new
+//!   navigation, until every such connection has closed
+//!   (`examples/direct_webview_probe.rs` measures it). So only a route that
+//!   is there first carries the view. Until a direct link is up the
+//!   listener carries the view on the tunnel itself, and those tunnel
+//!   connections are then the listener's to hand over. A view that was
+//!   made without a route all the same (no client could be started, or its
+//!   instance was not known yet) is asked from once it is open and routed
+//!   with the first answer; that view keeps the tunnel while its
+//!   connections live, and the windows opened from it later are routed as
+//!   they are made. A window whose browsing data did not take its route is
+//!   not counted as routed (`route_refused`).
 //!
 //! An instance whose choice is "the direct path and the relay only" has its
 //! own rules on top (`Only`), which the three constants below it time:
@@ -478,10 +483,14 @@ impl Wiring {
 
     /// Whether the instance view about to be created for `target` gets a
     /// route before its first load, so that a client must exist before it
-    /// does: wherever a window can be routed, for an instance that answered
-    /// before, and always for "the direct path and the relay only".
+    /// does. Where a route can be put on an open window, every instance that
+    /// may have a session: one that has never answered is carried on the
+    /// tunnel by its listener until it does, and its tunnel connections can
+    /// then be handed over. Where a route is given only at creation, an
+    /// instance that answered before, and always "the direct path and the
+    /// relay only".
     pub fn starts_at_creation(&self, target: &Target) -> bool {
-        self.permitted(target) && (self.reached(target) || self.only(target))
+        self.permitted(target) && (self.routing == Routing::Live || self.reached(target) || self.only(target))
     }
 
     /// A client exists for `target`. `runtime` is the published instance view
@@ -1240,6 +1249,17 @@ impl Wiring {
         self.sessions
             .iter()
             .any(|candidate| candidate.id == session && candidate.routed.iter().any(|label| label == window))
+    }
+
+    /// The browsing data of `window` did not take the session's route: the
+    /// window is not one the session routes. Its page is told the tunnel,
+    /// and what it was registered as with the session's listener is revoked.
+    /// It stays the session's window, so the session's next answer puts the
+    /// route on it again (`probed`), as on a window that was never routed.
+    pub fn route_refused(&mut self, session: u64, window: &str) {
+        if let Some(found) = self.sessions.iter_mut().find(|candidate| candidate.id == session) {
+            found.routed.retain(|label| label != window);
+        }
     }
 
     /// Whether no session routes `window` at this moment. Asked on the main

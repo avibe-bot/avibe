@@ -164,6 +164,7 @@ jobs:
         run: python3 scripts/ci_scope.py --portfolio-gate fast-gate
 
   sensitive-proof:
+    permissions: {contents: read, actions: read}
     needs: [changes, model-hub-hosted-wire, ui-browser-checks, windows-control-ipc, install-upgrade-shards, windows-install-smoke-runners, desktop-shell, ios-shell, manifest-consistency, unit-tests, install-upgrade-regression, windows-install-smoke]
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.portfolio != 'true' || needs.changes.outputs.sensitive == 'true')
     runs-on: ubuntu-latest
@@ -172,6 +173,37 @@ jobs:
       - env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: python3 scripts/ci_scope.py --portfolio-gate sensitive-proof
+      - name: Identify a proposed channel manifest (including deletion)
+        id: engine
+        env:
+          EVENT_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          base="${EVENT_BASE:-$GITHUB_SHA^1}"
+          git rev-parse "$base^{commit}" >> /dev/null
+          if git diff --quiet "$base" "$GITHUB_SHA" -- patches/model-hub-engine-channel.json; then exit 0; else test "$?" = 1; fi
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+          echo "base=$(git rev-parse "$base")" >> "$GITHUB_OUTPUT"
+      - name: Use the trusted base validator, not code from the proposed manifest tree
+        if: steps.engine.outputs.changed == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.engine.outputs.base }}
+          path: trusted-validator
+          persist-credentials: false
+      - name: Check out the fixed producer as data
+        if: steps.engine.outputs.changed == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 275e150316765a3b5f1e467b249ccdca08327832
+          path: frozen-producer
+          persist-credentials: false
+      - name: Validate designated rehearsal and installable assets before merge
+        if: steps.engine.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.engine.outputs.base }}
+        run: python3 -I trusted-validator/scripts/model_hub_engine_manifest_publish.py preflight --repo . --base "$BASE" --harness frozen-producer
 
   master-full-backstop:
     runs-on: ubuntu-latest

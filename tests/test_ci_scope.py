@@ -432,6 +432,7 @@ def test_named_files_and_manual_request_select_real_proofs():
         {'engine-wire'}, LINUX | {'model-hub-hosted-wire'},
     )
     assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell'}
+    assert selected(scope('patches/model-hub-engine-channel.json')) == ({'shared'}, LINUX | {'manifest-consistency'})
     assert selected(scope('storage/alembic/versions/new_revision.py'))[1] == LINUX | {'install-upgrade-shards'}
     assert selected(scope('ios/AvibeTests/MobileOnboardingTests.swift', 'ui/thread_bootstrap.ts'))[1] == LINUX | {'ios-shell'}
     assert selected(scope('.github/request-sensitive-checks.md'))[1] == LINUX | EXTRA

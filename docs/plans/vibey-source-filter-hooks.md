@@ -1,7 +1,7 @@
 # Vibey source filter hooks
 
-Status: **phase 1 implemented** (this branch); §5.5 gateway access for hooks is phase 2. Where the design notes below
-and the implementation differ, the "Implementation" section wins.
+Status: **implemented** (phase 1 in #4351, phase 2: gateway access for hooks, §5.5). Where the design notes below
+and the implementation differ, the "Implementation" sections win.
 
 ## Implementation (phase 1)
 
@@ -206,7 +206,15 @@ The run facts (attempts, usage, cost) are not part of the request (§6).
 - **Other languages later.** Other languages, such as a JavaScript hook, may be added on demand later with the same
   JSON protocol. This is not designed or implemented now.
 
-### 5.5 Gateway access for hooks (adopted by the owner 2026-11-27; not implemented)
+### 5.5 Gateway access for hooks (adopted by the owner 2026-11-27; implemented in phase 2)
+
+**Implementation (phase 2).** `ModelHubTurnGateway.hook_gateway_env` gives each hook run
+`AVIBE_GATEWAY_URL=<gateway>/vibey/v1` and a key: an untracked Vibey credential in its own process scope
+(`source-filter-hook:<random>`), minted when the run starts and retired (`retire_scope`) when it ends, on every path.
+On that key the gateway accepts only `POST chat/completions` (and the models list); it refuses other endpoints, the
+pin and turn headers, any tool that is not a function tool, and `web_search_options` (403). It owns no turn, so the
+hosted-tool endpoint refuses it too. The model is any id in Vibey's model menu, routed and recorded like any other
+Vibey request on the gateway; there is no per-call hook attribution on the tool record yet.
 
 This lets a hook ask a model for a judgement, for example "is this source trustworthy", through the local Model
 Hub gateway, without holding any provider key.

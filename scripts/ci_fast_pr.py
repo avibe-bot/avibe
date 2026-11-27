@@ -77,6 +77,8 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
         groups = {'ios', 'desktop'} if desktop else {'ios'}
         return groups, set(LINUX).union(*(PROOFS[g] for g in groups))
     groups = set().union(*(path_groups(p) for p in paths))
+    if 'engine-publication' in named:
+        groups.add('shared')
     if 'ios-app' in named:
         groups.add('ios')
     # Named inputs that the old path heuristic did not recognize in isolation.

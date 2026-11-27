@@ -19202,12 +19202,25 @@ async def _show_events_stream(
 
     from fastapi.responses import StreamingResponse
 
+    from core.show_pages import ShowPageStore
     from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT, broker
 
     def _event_visible(event_payload: dict[str, Any]) -> bool:
         return event_payload.get("session_id") == session_id
 
-    async def _authorization_state() -> str:
+    async def _authorization_state(page_store: ShowPageStore | None) -> str:
+        if public:
+            # Read the same persisted binding used by admission. Mutations can
+            # originate in the controller/CLI, outside this process's broker.
+            page = page_store.get(session_id) if page_store is not None else None
+            return (
+                "current"
+                if page is not None
+                and page.visibility == VISIBILITY_PUBLIC
+                and public_share_id is not None
+                and page.share_id == public_share_id
+                else "revoked"
+            )
         if remote_session_payload is None:
             return "current"
         identity = remote_session_identity or remote_session_payload
@@ -19224,11 +19237,13 @@ async def _show_events_stream(
     async def generate():
         sub_id, queue = broker.subscribe()
         replayed_ids: set[str] = set()
+        page_store = None
         try:
+            page_store = ShowPageStore(read_only=True) if public else None
             store = _show_session_event_store()
             try:
                 cursor = after_id
-                state = await _authorization_state()
+                state = await _authorization_state(page_store)
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
                     return
@@ -19241,7 +19256,7 @@ async def _show_events_stream(
                         yield _remote_authorization_sse_frame("revoked")
                     return
                 while True:
-                    state = await _authorization_state()
+                    state = await _authorization_state(page_store)
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
                         return
@@ -19250,6 +19265,11 @@ async def _show_events_stream(
                     if not events:
                         break
                     for event_payload in events:
+                        if public:
+                            state = await _authorization_state(page_store)
+                            if state != "current":
+                                yield _remote_authorization_sse_frame(state)
+                                return
                         if isinstance(event_payload.get("id"), str):
                             replayed_ids.add(event_payload["id"])
                         yield _sse_frame(
@@ -19268,7 +19288,7 @@ async def _show_events_stream(
                 store.close()
 
             while True:
-                state = await _authorization_state()
+                state = await _authorization_state(page_store)
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
                     return
@@ -19276,7 +19296,7 @@ async def _show_events_stream(
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
                     if event_type == SSE_BROKER_CLOSED_EVENT:
                         return
-                    state = await _authorization_state()
+                    state = await _authorization_state(page_store)
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
                         return
@@ -19318,7 +19338,7 @@ async def _show_events_stream(
                             ),
                         )
                 except asyncio.TimeoutError:
-                    state = await _authorization_state()
+                    state = await _authorization_state(page_store)
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
                         return
@@ -19327,6 +19347,8 @@ async def _show_events_stream(
             raise
         finally:
             broker.unsubscribe(sub_id)
+            if page_store is not None:
+                page_store.close()
 
     def _sse_frame(event_type: str, data: Any) -> str:
         event_id = data.get("id") if isinstance(data, dict) else None
