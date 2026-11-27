@@ -238,7 +238,7 @@ async fn run(changed_selection: bool) {
     let retained = RefreshOutcome::Retained {
         retry_before: Duration::from_secs(1),
     };
-    for reply in [Reply::NotReady, Reply::Failed, Reply::Refused(503)] {
+    for reply in [Reply::NotReady, Reply::Failed, Reply::TimedOut, Reply::Refused(503)] {
         assert_eq!(client.refresh_reply(|_| async { reply }).await, retained);
         assert!(!deadlines.has_changed().unwrap());
     }
@@ -346,13 +346,19 @@ async fn run(changed_selection: bool) {
         "{withdrawn:?}"
     );
     assert_eq!(last["path"], "lan", "{withdrawn:?}");
-    let counted = client.listener.access.usage.counted();
-    let on_lan = counted
-        .iter()
-        .find(|entry| entry["path"] == "lan")
-        .expect("a count on the LAN path");
-    assert!(on_lan["retired"].as_u64().unwrap() >= 1, "{on_lan}");
-    assert!(on_lan["direct"].as_u64().unwrap() >= 1, "{on_lan}");
+    // Exactly one, on the LAN path, also where new connections had left
+    // that path before the link went (the terminal accept error above).
+    // Summed: the expiry arm waits between the CONNECT and the withdrawal,
+    // and the count's clock is the real one, so a minute may end between.
+    assert_eq!(
+        (withdrawn.len(), &last["count"]),
+        (1, &serde_json::json!(1)),
+        "{withdrawn:?}"
+    );
+    let usage = &client.listener.access.usage;
+    let lan = Some(super::faults::PathWord::Lan);
+    assert_eq!((usage.total(lan, "retired"), usage.total(None, "retired")), (1, 1));
+    assert!(usage.total(lan, "direct") >= 1);
     assert_eq!(
         client.refresh_reply(|_| async { Reply::Failed }).await,
         RefreshOutcome::Retired

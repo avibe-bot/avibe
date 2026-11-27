@@ -169,8 +169,10 @@ pub enum Reply {
     Refused(u16),
     /// A service worker controls the document, or took control meanwhile.
     Controlled,
-    /// The network, the deadline, a redirect, an answer that is too large or
-    /// not text, or a reply that is not the script's.
+    /// The script's own deadline passed with no answer.
+    TimedOut,
+    /// The network, a redirect, an answer that is too large or not text, or
+    /// a reply that is not the script's.
     Failed,
 }
 
@@ -203,6 +205,7 @@ impl Reply {
             return match value.get("failure").and_then(serde_json::Value::as_str) {
                 Some("origin" | "csrf") => Reply::NotReady,
                 Some("controlled") => Reply::Controlled,
+                Some("timeout") => Reply::TimedOut,
                 _ => Reply::Failed,
             };
         }

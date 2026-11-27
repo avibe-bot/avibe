@@ -7,7 +7,8 @@
 //! The transport's own words only (`Stage`, `FaultCode`), the kind of path, a
 //! duration and a count: no address, host, identifier or error text. The
 //! last few are kept, equal ones in a row as one with a count. They are
-//! taken for a request and given back if the instance did not answer it.
+//! taken for a request and given back if the instance did not answer it:
+//! an entry arrives at least once.
 use super::{
     transport::{Fault, FaultCode, Stage},
     SelectedPath,
@@ -53,7 +54,8 @@ pub(super) struct LegFault {
     path: PathWord,
     /// The leg ran with only the direct path and the relay allowed.
     strict: bool,
-    /// How long that stage ran; for a withdrawn link, how long it lived.
+    /// How long that stage alone ran; for a withdrawn link, how long it
+    /// lived.
     ms: u64,
     /// How many equal entries in a row this one stands for.
     count: u64,
@@ -149,7 +151,7 @@ mod tests {
             })
         );
         assert_eq!(taken[0].json().as_object().unwrap().len(), 6);
-        // Taken once: nothing is sent twice.
+        // Taken once: nothing is in two requests unless it is given back.
         assert!(faults.take().is_empty());
         for (path, word) in [
             (None, "none"),

@@ -692,7 +692,7 @@ fn instance_answered(reply: &Reply) -> bool {
     match reply {
         Reply::Ready(_) | Reply::Controlled => true,
         Reply::Refused(status) => (400..500).contains(status) && !matches!(status, 408 | 429),
-        Reply::NotReady | Reply::Failed | Reply::SelectionChanged => false,
+        Reply::NotReady | Reply::TimedOut | Reply::Failed | Reply::SelectionChanged => false,
     }
 }
 

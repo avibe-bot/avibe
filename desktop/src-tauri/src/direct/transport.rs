@@ -96,6 +96,15 @@ impl FaultCode {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Fault(pub(super) Stage, pub(super) FaultCode);
+/// A fault, and how long the stage it names had run when it ended there:
+/// that stage alone, not what came before it or the clean-up after.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Timed(pub(super) Fault, pub(super) Duration);
+/// The stage a probe is in, and when it entered it on the link's clock.
+struct Step {
+    stage: Stage,
+    since: Duration,
+}
 
 pub(super) trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
@@ -185,6 +194,10 @@ pub(super) struct Link {
     pub offer: Offer,
     pub plan: Selection,
     commits: Mutex<Commits>,
+    /// The last path the grant permitted on this connection. It stays when
+    /// the link stops taking new connections: it is what a withdrawal is
+    /// reported under.
+    accepted: Mutex<Option<SelectedPath>>,
     pub(super) clock: Clock,
     deadline: tokio::sync::watch::Sender<Duration>,
 }
@@ -246,7 +259,10 @@ impl Link {
     pub(super) fn judged(&self, paths: iroh::endpoint::PathList<'_>) -> Result<SelectedPath, FaultCode> {
         let paths = paths.iter().map(|p| (p.is_selected(), p.remote_addr().clone()));
         match self.offer.judge(self.conn.remote_id(), paths) {
-            Verdict::Accepted(path) => Ok(path),
+            Verdict::Accepted(path) => {
+                *self.accepted.lock().unwrap() = Some(path);
+                Ok(path)
+            }
             Verdict::Unselected => Err(FaultCode::PathUnselected),
             Verdict::Refused(class) => Err(FaultCode::refused(class)),
         }
@@ -256,6 +272,10 @@ impl Link {
             return None;
         }
         self.selected_in(self.conn.paths())
+    }
+    /// The kind of path this link was last on, whether or not it still is.
+    pub(super) fn last_path(&self) -> Option<SelectedPath> {
+        *self.accepted.lock().unwrap()
     }
     pub(super) fn check_path(&self, stage: Stage) -> Result<(), Fault> {
         if self.remaining().is_zero() {
@@ -277,17 +297,25 @@ impl Link {
         offer: Offer,
         host: &Authority,
         clock: Clock,
-    ) -> Result<Arc<Self>, Fault> {
-        let remaining = offer.until.saturating_sub(clock.now());
+    ) -> Result<Arc<Self>, Timed> {
+        let begun = clock.now();
+        let remaining = offer.until.saturating_sub(begun);
         if remaining.is_zero() {
-            return Err(Fault(Stage::Dial, FaultCode::Expired));
+            return Err(Timed(Fault(Stage::Dial, FaultCode::Expired), Duration::ZERO));
         }
         let addr = offer.bootstrap();
         let until = Instant::now() + remaining.min(Duration::from_secs(5));
-        let conn = timeout_at(until, ep.connect(addr, ALPN))
-            .await
-            .map_err(|_| Fault(Stage::Dial, FaultCode::Timeout))?
-            .map_err(|_| Fault(Stage::Dial, FaultCode::Other))?;
+        let conn = match timeout_at(until, ep.connect(addr, ALPN)).await {
+            Ok(Ok(conn)) => conn,
+            failed => {
+                let code = if failed.is_err() {
+                    FaultCode::Timeout
+                } else {
+                    FaultCode::Other
+                };
+                return Err(Timed(Fault(Stage::Dial, code), clock.now().saturating_sub(begun)));
+            }
+        };
         let link = Arc::new(Self {
             clock,
             deadline: tokio::sync::watch::channel(offer.until).0,
@@ -295,21 +323,31 @@ impl Link {
             offer,
             plan: Selection::default(),
             commits: Mutex::default(),
+            accepted: Mutex::default(),
         });
-        let mut stage = Stage::Open;
-        let _probe = timeout_at(until, link.open_stage(host, &mut stage))
-            .await
-            .map_err(|_| Fault(stage, FaultCode::Timeout))??;
-        Ok(link)
+        let mut at = Step {
+            stage: Stage::Open,
+            since: link.clock.now(),
+        };
+        let fault = match timeout_at(until, link.open_stage(host, &mut at)).await {
+            Ok(Ok(_probe)) => return Ok(link),
+            Ok(Err(fault)) => fault,
+            Err(_) => Fault(at.stage, FaultCode::Timeout),
+        };
+        Err(Timed(fault, link.clock.now().saturating_sub(at.since)))
     }
     pub(super) async fn open(&self, host: &Authority) -> Option<Stream> {
         self.open_detailed(host).await.ok()
     }
     pub(super) async fn open_detailed(&self, host: &Authority) -> Result<Stream, Fault> {
-        let mut stage = Stage::Open;
-        self.open_stage(host, &mut stage).await
+        let mut at = Step {
+            stage: Stage::Open,
+            since: self.clock.now(),
+        };
+        self.open_stage(host, &mut at).await
     }
-    async fn open_stage(&self, host: &Authority, stage: &mut Stage) -> Result<Stream, Fault> {
+    async fn open_stage(&self, host: &Authority, at: &mut Step) -> Result<Stream, Fault> {
+        let stage = &mut at.stage;
         self.check_path(*stage)?;
         let (mut send, mut recv) = self
             .conn
@@ -318,6 +356,7 @@ impl Link {
             .map_err(|_| Fault(*stage, FaultCode::ConnectionEnded))?;
         self.check_path(*stage)?;
         *stage = Stage::Connect;
+        at.since = self.clock.now();
         // AVDT1 is private to sidecar→ingress. Never include browser proxy
         // headers, a local admission token or any application-layer credentials.
         send.write_all(&host.direct_head())

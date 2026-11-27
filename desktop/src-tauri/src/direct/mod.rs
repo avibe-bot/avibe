@@ -88,7 +88,7 @@ use offer::Offer;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use transport::Link;
-use transport::{Fault, FaultCode, Stage};
+use transport::{Fault, FaultCode, Stage, Timed};
 
 /// Listener location only. Each routed window supplies its own registration.
 pub struct Route<'a> {
@@ -200,7 +200,8 @@ impl Client {
             .await
             .ok()
             .flatten();
-        self.apply(answer.as_deref(), sent).await.is_ok()
+        let asked = self.clock.now().saturating_sub(sent);
+        self.apply(answer.as_deref(), sent, asked).await.is_ok()
     }
 
     /// A missing reply is not a withdrawal. Preserve only an already usable
@@ -219,8 +220,10 @@ impl Client {
     /// The request also carries this client's report for the instance's
     /// log: the legs that failed and the links that were withdrawn since the
     /// last answered request, and which leg carried the windows'
-    /// connections in each minute that is over. Each is sent once: what a
-    /// request did not deliver is kept for the next.
+    /// connections in each minute that is over. What a request did not
+    /// deliver is kept for the next: an entry reaches the instance at least
+    /// once, and twice only when the instance took a request whose answer
+    /// was then lost.
     async fn refresh_reply_detailed<F>(
         &mut self,
         fetch: impl FnOnce(rendezvous::Asked) -> F,
@@ -240,6 +243,7 @@ impl Client {
             },
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), fetch(asked)).await;
+        let answered = self.clock.now();
         // Delivered only when the instance answered the request itself.
         if !matches!(result, Ok(rendezvous::Reply::Ready(_))) {
             self.faults.restore(faults);
@@ -247,13 +251,12 @@ impl Client {
         }
         // The kind of path the refresh was made on, before its outcome.
         let path = self.path_word();
-        let (outcome, fault) = self.settle(result, sent).await;
-        if let Some(fault) = fault {
-            let ran = self.clock.now().saturating_sub(sent);
+        let (outcome, failed) = self.settle(result, sent, answered).await;
+        if let Some(Timed(fault, ran)) = failed {
             self.faults
                 .record(fault, path, self.listener.access.policy.direct_only(), ran);
         }
-        (outcome, fault)
+        (outcome, failed.map(|Timed(fault, _)| fault))
     }
 
     /// The kind of direct path new connections prefer now.
@@ -268,37 +271,45 @@ impl Client {
         &mut self,
         result: Result<rendezvous::Reply, tokio::time::error::Elapsed>,
         sent: Duration,
-    ) -> (RefreshOutcome, Option<Fault>) {
+        answered: Duration,
+    ) -> (RefreshOutcome, Option<Timed>) {
         use rendezvous::Reply;
         use FaultCode::*;
+        // A fault of the request itself ran for as long as the request did.
+        let asked = answered.saturating_sub(sent);
         let code = match result {
             Ok(Reply::Ready(body)) => {
-                return match self.apply(Some(&body), sent).await {
+                return match self.apply(Some(&body), sent, asked).await {
                     Ok(()) => (RefreshOutcome::Renewed, None),
                     Err(reason) => (RefreshOutcome::Retired, Some(reason)),
                 }
             }
-            Err(_) => Timeout,
+            // The outer deadline, or the adapter's own a second before it.
+            Err(_) | Ok(Reply::TimedOut) => Timeout,
             Ok(Reply::NotReady) => NotReady,
             Ok(Reply::Failed) => Other,
             Ok(Reply::Refused(408 | 429 | 500..=599)) => Status,
             Ok(reply) => {
                 let code = match reply {
                     Reply::SelectionChanged => {
-                        if let Some(task) = self.withdraw(false) {
+                        if let Some(task) = self.withdraw(false, Superseded) {
                             let _ = task.await;
                         }
                         Superseded
                     }
                     other => {
-                        self.retire().await;
-                        match other {
+                        let code = match other {
                             Reply::Controlled | Reply::Refused(401 | 403) => Denied,
                             _ => Refused,
-                        }
+                        };
+                        self.retire(code).await;
+                        code
                     }
                 };
-                return (RefreshOutcome::Retired, Some(Fault(Stage::Rendezvous, code)));
+                return (
+                    RefreshOutcome::Retired,
+                    Some(Timed(Fault(Stage::Rendezvous, code), asked)),
+                );
             }
         };
         let remaining = self
@@ -309,14 +320,16 @@ impl Client {
             .map(|l| l.remaining())
             .unwrap_or_default();
         let disposition = if remaining.is_zero() {
-            self.retire().await;
+            // The request only failed to renew it: a link with nothing left
+            // is withdrawn for its own loss, which `withdraw` reads from it.
+            self.retire(Expired).await;
             RefreshOutcome::Retired
         } else {
             RefreshOutcome::Retained {
                 retry_before: (remaining / 2).min(Duration::from_secs(5)),
             }
         };
-        (disposition, Some(Fault(Stage::Rendezvous, code)))
+        (disposition, Some(Timed(Fault(Stage::Rendezvous, code), asked)))
     }
 
     /// The route describes the proxy, not direct-path readiness. Its port
@@ -363,18 +376,21 @@ impl Client {
         }
     }
 
-    fn withdraw(&mut self, involuntary: bool) -> Option<JoinHandle<()>> {
+    /// `reason` is why a link that still had its path is withdrawn:
+    /// `superseded` only for a replacement, a changed selection or the end
+    /// of the session. A link that had already lost its path says that loss
+    /// instead, as its monitor would have had it run first.
+    fn withdraw(&mut self, involuntary: bool, reason: FaultCode) -> Option<JoinHandle<()>> {
         let _writer = self.status_writer.lock().unwrap();
         if let Some(l) = self.links.send_replace(None) {
             // Withdraw immediately; a zero deadline also wakes the monitor.
             let closed = l.claim_loss();
-            // The kind of path the link was on, while it can still say; else
-            // the one last published for it.
-            let path = l
-                .selected_path()
-                .map_or(self.path_word(), |path| faults::PathWord::of(Some(path)));
+            let code = l.check_path(Stage::Handover).err().map_or(reason, |lost| lost.1);
+            // The kind of path the link was last on, whether or not new
+            // connections still preferred it.
+            let path = faults::PathWord::of(l.last_path());
             l.retire();
-            let fault = Fault(Stage::Handover, FaultCode::Superseded);
+            let fault = Fault(Stage::Handover, code);
             Withdrawn {
                 faults: self.faults.clone(),
                 usage: self.listener.access.usage.clone(),
@@ -390,14 +406,18 @@ impl Client {
         }
         self.monitor.take()
     }
-    async fn retire(&mut self) {
-        if let Some(task) = self.withdraw(true) {
+    async fn retire(&mut self, reason: FaultCode) {
+        if let Some(task) = self.withdraw(true, reason) {
             let _ = task.await;
         }
     }
     /// Only the native isolated-world adapter may supply a completion. No
     /// command or message handler accepts a rendezvous answer from a page.
-    async fn apply(&mut self, answer: Option<&str>, sent: Duration) -> Result<(), Fault> {
+    ///
+    /// `asked` is how long the request took. A failure says how long its own
+    /// stage ran: the request for an answer that is no offer, nothing for a
+    /// check, the bind or the dial for those.
+    async fn apply(&mut self, answer: Option<&str>, sent: Duration, asked: Duration) -> Result<(), Timed> {
         let Some(offer) = answer.and_then(|body| {
             Offer::parse(
                 body,
@@ -408,33 +428,41 @@ impl Client {
                 self.clock.now(),
             )
         }) else {
-            self.retire().await;
-            return Err(Fault(
-                Stage::Rendezvous,
-                answer.map_or(FaultCode::InvalidOffer, unusable_answer),
-            ));
+            let code = answer.map_or(FaultCode::InvalidOffer, unusable_answer);
+            self.retire(code).await;
+            return Err(Timed(Fault(Stage::Rendezvous, code), asked));
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
             return Ok(());
         }
         // Retire previous authority before starting a replacement. Never use a
         // stale result to make a new stream while waiting for the next probe.
-        self.retire().await;
+        self.retire(FaultCode::Superseded).await;
         if !self.listener.is_alive() {
-            return Err(Fault(Stage::Handover, FaultCode::ListenerClosed));
+            return Err(Timed(Fault(Stage::Handover, FaultCode::ListenerClosed), Duration::ZERO));
         }
-        if self.clock.now() >= offer.until {
-            return Err(Fault(Stage::Dial, FaultCode::Expired));
+        let begun = self.clock.now();
+        if begun >= offer.until {
+            return Err(Timed(Fault(Stage::Dial, FaultCode::Expired), Duration::ZERO));
         }
         // A non-renewable grant gets a fresh endpoint. In particular an old
         // relay map or iroh peer-address cache cannot cross a policy change.
-        let endpoint = tokio::time::timeout(
-            offer.until.saturating_sub(self.clock.now()),
+        let bound = tokio::time::timeout(
+            offer.until.saturating_sub(begun),
             transport::endpoint_builder(self.key.clone(), offer.relay.as_ref()).bind(),
         )
-        .await
-        .map_err(|_| Fault(Stage::Dial, FaultCode::Timeout))?
-        .map_err(|_| Fault(Stage::Dial, FaultCode::Other))?;
+        .await;
+        let endpoint = match bound {
+            Ok(Ok(endpoint)) => endpoint,
+            failed => {
+                let code = if failed.is_err() {
+                    FaultCode::Timeout
+                } else {
+                    FaultCode::Other
+                };
+                return Err(Timed(Fault(Stage::Dial, code), self.clock.now().saturating_sub(begun)));
+            }
+        };
         self.probe_detailed(endpoint, offer).await
     }
 
@@ -443,13 +471,14 @@ impl Client {
         self.probe_detailed(endpoint, offer).await.is_ok()
     }
 
-    async fn probe_detailed(&mut self, endpoint: Endpoint, offer: Offer) -> Result<(), Fault> {
+    async fn probe_detailed(&mut self, endpoint: Endpoint, offer: Offer) -> Result<(), Timed> {
         let drain = EndpointDrain::new(endpoint.clone());
         let link = match Link::dial_detailed(&endpoint, offer, &self.host, self.clock.clone()).await {
             Ok(link) => link,
-            Err(fault) => {
+            // Its duration was taken where it failed, before this drain.
+            Err(failed) => {
                 drain.close().await;
-                return Err(fault);
+                return Err(failed);
             }
         };
         let check = if self.listener.is_alive() {
@@ -460,7 +489,8 @@ impl Client {
         if let Err(fault) = check {
             link.retire();
             drain.close().await;
-            return Err(fault);
+            // A check, not a wait.
+            return Err(Timed(fault, Duration::ZERO));
         }
         self.publish(link, drain);
         Ok(())
@@ -526,20 +556,15 @@ impl Client {
                 });
                 if removed {
                     let fault = Fault(Stage::Handover, reason);
-                    // The kind of path the link was on, while it can still
-                    // say; else the one last published for it.
-                    let before = status.borrow().preferred;
-                    let path = link.selected_path().or(match before {
-                        PreferredPath::Direct(path) => Some(path),
-                        PreferredPath::Tunnel => None,
-                    });
                     Withdrawn {
                         faults,
                         usage,
                         strict: policy.direct_only(),
                         lived: link.clock.now().saturating_sub(published),
                     }
-                    .record(fault, faults::PathWord::of(path));
+                    // The kind of path the link was last on: by now it
+                    // has none, and new connections may have left it before.
+                    .record(fault, faults::PathWord::of(link.last_path()));
                     PathStatus::publish(&status, None, closed);
                 }
             }
@@ -588,7 +613,7 @@ impl Drop for Client {
     fn drop(&mut self) {
         self.listener.retire();
         // Detach rather than abort: the signalled monitor and drain own shutdown.
-        drop(self.withdraw(false));
+        drop(self.withdraw(false, FaultCode::Superseded));
     }
 }
 
@@ -657,6 +682,65 @@ mod diagnosis_tests {
         assert_eq!(fifth["leg_faults"][0]["strict"], true);
     }
 
+    /// A fault's duration is its own stage's. The request's time is the
+    /// rendezvous stage's alone: a later stage does not inherit it.
+    #[tokio::test]
+    async fn a_fault_says_how_long_its_own_stage_ran() {
+        use rendezvous::Reply;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let mut client = Client::new("desk-app.avibe.bot", "fixture".into()).await.unwrap();
+        let millis = Arc::new(AtomicU64::new(10_000));
+        let now = millis.clone();
+        client.clock = Clock(Arc::new(move || Duration::from_millis(now.load(Ordering::SeqCst))));
+        let peer = SecretKey::generate().public();
+        let offer = serde_json::json!({
+            "version": 1, "status": "ready", "hostname": "desk-app.avibe.bot", "instance_id": "fixture",
+            "generation": "a", "issued_at": 10, "expires_at": 300, "alpn": "avibe-direct/1",
+            "endpoint": {"id": peer.to_string(), "addresses": [{"kind": "lan", "address": "192.168.1.4:345"}]},
+            "client": {"endpoint_id": client.key.public().to_string(), "admitted_until": 300},
+        })
+        .to_string();
+        let unavailable = r#"{"version":1,"instance_id":"fixture","hostname":"desk-app.avibe.bot","status":"unavailable","reason":"not_running","retry_after_seconds":60}"#;
+        // Each request takes as long as its row says before it is answered.
+        for (took, reply, stage, code, ms) in [
+            // An answer that is no offer: the request's own time.
+            (
+                3_000,
+                Reply::Ready(unavailable.into()),
+                "rendezvous",
+                "not_ready_not_running",
+                3_000,
+            ),
+            // The adapter's own deadline is a time-out, as the outer one is.
+            (4_000, Reply::TimedOut, "rendezvous", "timeout", 4_000),
+            (1_500, Reply::Failed, "rendezvous", "other", 1_500),
+            // A good offer after a slow request, with the listener ended:
+            // what failed is a check, and it took no time.
+            (3_000, Reply::Ready(offer), "handover", "listener_closed", 0),
+        ] {
+            if stage == "handover" {
+                client.listener.retire();
+            }
+            let clock = millis.clone();
+            let outcome = client
+                .refresh_reply(|_| async move {
+                    clock.fetch_add(took, Ordering::SeqCst);
+                    reply
+                })
+                .await;
+            // No link is up: nothing is retained, whatever failed.
+            assert_eq!(outcome, RefreshOutcome::Retired);
+            // Taken here, so that the next request carries nothing of it.
+            let recorded: Vec<_> = client.faults.take().iter().map(faults::LegFault::json).collect();
+            assert_eq!(
+                recorded,
+                [serde_json::json!({
+                    "stage": stage, "code": code, "path": "none", "strict": false, "ms": ms, "count": 1,
+                })]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn refresh_keeps_disposition_and_returns_only_classified_failures() {
         use rendezvous::Reply;
@@ -688,6 +772,7 @@ mod diagnosis_tests {
                 FaultCode::InvalidOffer,
             ),
             (Reply::NotReady, FaultCode::NotReady),
+            (Reply::TimedOut, FaultCode::Timeout),
             (Reply::Refused(403), FaultCode::Denied),
             (Reply::Refused(503), FaultCode::Status),
             (Reply::SelectionChanged, FaultCode::Superseded),

@@ -139,6 +139,20 @@ async fn toggling_preserves_streams_and_cutover_fences_even_a_late_public_open()
         h.set_direct_only(false);
         let mut reopened = connect_as(&c, &b, 200).await;
         echo(&mut reopened).await;
+        // For the instance's log: the tunnel carried three. The one fenced
+        // at the cut-over is no failed direct leg, since none was tried
+        // for it; the one refused in direct-only is, and says so.
+        let usage = &c.listener.access.usage;
+        let total = |key| usage.total(None, key);
+        assert_eq!(
+            (
+                total("tunnel"),
+                total("direct"),
+                total("direct_failed"),
+                total("strict")
+            ),
+            (3, 0, 1, 1)
+        );
     })
     .await
     .unwrap();

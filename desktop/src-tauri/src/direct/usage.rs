@@ -4,13 +4,15 @@
 //! (docs/plans/remote-direct-rendezvous.md section 2).
 //!
 //! Counted where the listener decides each authenticated CONNECT (direct,
-//! the tunnel, or refused), and where a link is withdrawn. Counts and fixed
+//! the tunnel, or a direct leg that was tried and gave nothing), and where a
+//! link is withdrawn. Counts and fixed
 //! words only: no address, host, identifier or wall time. A minute is taken
 //! for a request once it is over and given back if the instance did not
 //! answer; the oldest are dropped past `KEPT`.
 //!
 //! What this desktop does not send yet is zero or `none` in the entry: the
-//! race's timings, the hand-overs, and why a connection was not raced. A
+//! race's counts and timings, the hand-overs, and why a connection was not
+//! raced, except `strict`. A
 //! window that is not routed through the listener is not seen here at all;
 //! the instance's own count of requests by arrival path is the number that
 //! sees it.
@@ -30,8 +32,12 @@ const MAX: u64 = i32::MAX as u64;
 struct Counts {
     direct: u64,
     tunnel: u64,
-    /// Authenticated CONNECTs answered `502`: no leg carried them.
-    refused: u64,
+    /// Authenticated CONNECTs answered `502` after a direct leg was tried
+    /// for them: alone, or beside the tunnel on a usable link.
+    failed: u64,
+    /// Those decided with only the direct path and the relay allowed,
+    /// carried or not.
+    strict: u64,
     retired: u64,
     /// Why links were withdrawn in this minute, in the order first seen.
     retired_for: Vec<(FaultCode, u64)>,
@@ -65,8 +71,8 @@ impl Entry {
             "direct": bounded(self.counts.direct),
             "tunnel": bounded(self.counts.tunnel),
             "raced": 0, "direct_won": 0, "tunnel_won": 0,
-            "no_direct": 0, "sticky": 0, "strict": 0, "tunnel_only": 0,
-            "direct_failed": bounded(self.counts.refused),
+            "no_direct": 0, "sticky": 0, "strict": bounded(self.counts.strict), "tunnel_only": 0,
+            "direct_failed": bounded(self.counts.failed),
             "direct_timed_out": 0,
             "direct_ms": 0, "tunnel_ms": 0,
             "handover_asked": 0, "handover_done": 0, "handover_refused": 0,
@@ -98,14 +104,22 @@ impl Usage {
         change(minutes.entry((now, path)).or_default());
         Self::drop_old(&mut minutes, now);
     }
-    pub(super) fn direct(&self, path: PathWord) {
-        self.count(path, |counts| counts.direct += 1);
+    /// `strict`: decided with only the direct path and the relay allowed.
+    pub(super) fn direct(&self, path: PathWord, strict: bool) {
+        self.count(path, |counts| {
+            counts.direct += 1;
+            counts.strict += u64::from(strict);
+        });
     }
     pub(super) fn tunnel(&self, path: PathWord) {
         self.count(path, |counts| counts.tunnel += 1);
     }
-    pub(super) fn refused(&self, path: PathWord) {
-        self.count(path, |counts| counts.refused += 1);
+    /// A direct leg was tried and the CONNECT was answered `502`.
+    pub(super) fn direct_failed(&self, path: PathWord, strict: bool) {
+        self.count(path, |counts| {
+            counts.failed += 1;
+            counts.strict += u64::from(strict);
+        });
     }
     pub(super) fn retired(&self, path: PathWord, code: FaultCode) {
         self.count(path, |counts| {
@@ -149,23 +163,26 @@ impl Usage {
         }
         Self::drop_old(&mut minutes, now);
     }
-    /// Everything counted so far, the minute still counting included, as
-    /// it would be sent now. Nothing is taken.
+    /// One count as it would be sent, summed over every minute counted so
+    /// far, the one still counting included: on one kind of path, or on
+    /// all. A test's connections may fall either side of a minute's end.
+    /// Nothing is taken.
     #[cfg(test)]
-    pub(super) fn counted(&self) -> Vec<serde_json::Value> {
+    pub(super) fn total(&self, path: Option<PathWord>, key: &str) -> u64 {
         let now = self.minute();
         let minutes = self.minutes.lock().unwrap();
         minutes
             .iter()
+            .filter(|((_, on), _)| path.is_none_or(|path| path == *on))
             .map(|(&(minute, path), counts)| {
-                Entry {
+                let entry = Entry {
                     minute,
                     path,
                     counts: counts.clone(),
-                }
-                .json(now)
+                };
+                entry.json(now)[key].as_u64().expect("a count")
             })
-            .collect()
+            .sum()
     }
     /// Minutes too old to send, then the oldest past `KEPT`.
     fn drop_old(minutes: &mut BTreeMap<(u64, PathWord), Counts>, now: u64) {
@@ -197,10 +214,11 @@ mod tests {
     #[test]
     fn a_minute_is_taken_once_it_is_over_with_exactly_the_instances_keys() {
         let (usage, seconds) = usage();
-        usage.direct(PathWord::Relay);
+        usage.direct(PathWord::Relay, false);
+        usage.direct(PathWord::Relay, true);
         usage.tunnel(PathWord::Relay);
         usage.tunnel(PathWord::Relay);
-        usage.refused(PathWord::Relay);
+        usage.direct_failed(PathWord::Relay, true);
         usage.retired(PathWord::Relay, FaultCode::Superseded);
         usage.retired(PathWord::Relay, FaultCode::PathRefusedCgnat);
         usage.retired(PathWord::Relay, FaultCode::PathRefusedCgnat);
@@ -208,7 +226,10 @@ mod tests {
         // Nothing while the minute is still counting.
         assert!(usage.take().is_empty());
         seconds.fetch_add(60, Ordering::SeqCst);
-        usage.direct(PathWord::Lan);
+        usage.direct(PathWord::Lan, false);
+        // Summed over the minutes, the one still counting included.
+        assert_eq!(usage.total(None, "direct"), 3);
+        assert_eq!(usage.total(Some(PathWord::Relay), "direct"), 2);
         let taken = usage.take();
         assert_eq!(
             taken.iter().map(|entry| entry.path).collect::<Vec<_>>(),
@@ -219,9 +240,9 @@ mod tests {
             entry,
             serde_json::json!({
                 "client": "desktop", "age_min": 1, "path": "relay",
-                "direct": 1, "tunnel": 2,
+                "direct": 2, "tunnel": 2,
                 "raced": 0, "direct_won": 0, "tunnel_won": 0,
-                "no_direct": 0, "sticky": 0, "strict": 0, "tunnel_only": 0,
+                "no_direct": 0, "sticky": 0, "strict": 2, "tunnel_only": 0,
                 "direct_failed": 1, "direct_timed_out": 0,
                 "direct_ms": 0, "tunnel_ms": 0,
                 "handover_asked": 0, "handover_done": 0, "handover_refused": 0,
@@ -266,7 +287,7 @@ mod tests {
         }
         assert_eq!(total, KEPT);
         // A minute older than the instance accepts is dropped unsent.
-        usage.direct(PathWord::Relay);
+        usage.direct(PathWord::Relay, false);
         seconds.fetch_add(60 * (MAX_AGE + 2), Ordering::SeqCst);
         assert!(usage.take().is_empty());
     }

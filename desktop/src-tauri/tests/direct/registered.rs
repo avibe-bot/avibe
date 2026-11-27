@@ -53,13 +53,13 @@ async fn each_window_presents_its_own_registration_and_has_its_own_connections()
         echo(&mut of_show).await;
         assert!(one_quiet_or_busy(handover.window_census(&show)));
         assert!(one_quiet_or_busy(handover.window_census(&view)));
-        // Both in the minute's count for the instance's log, with the one
-        // the fixture made: the tunnel carried them, with no direct path.
-        let counted = client.listener.access.usage.counted();
-        assert_eq!(counted.len(), 1);
-        assert_eq!(counted[0]["path"], "none");
-        assert_eq!(counted[0]["tunnel"], 3);
-        assert_eq!(counted[0]["direct"], 0);
+        // Both in the count for the instance's log, with the one the fixture
+        // made: the tunnel carried them, with no direct path. Summed, since
+        // the three may fall either side of a minute's end.
+        let usage = &client.listener.access.usage;
+        assert_eq!(usage.total(Some(super::faults::PathWord::None), "tunnel"), 3);
+        assert_eq!(usage.total(None, "tunnel"), 3);
+        assert_eq!(usage.total(None, "direct") + usage.total(None, "direct_failed"), 0);
 
         // A page's hand-over is asked with its own window's registration.
         // With no direct link up there is nothing to move to, and nothing

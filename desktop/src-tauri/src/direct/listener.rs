@@ -158,6 +158,10 @@ impl Listener {
                 let paths = status.clone();
                 clients.spawn(async move {
                     let mut failed = false;
+                    // Whether a direct leg was tried for this CONNECT: alone
+                    // (direct-only), or beside the tunnel on a usable link.
+                    // Set where the open decides, read where it is counted.
+                    let (alone, beside) = (AtomicBool::new(false), AtomicBool::new(false));
                     // Counted under the kind of direct path new connections
                     // prefer when the CONNECT is decided.
                     let decided = |what: Decided| {
@@ -165,14 +169,22 @@ impl Listener {
                             PreferredPath::Direct(path) => Some(path),
                             PreferredPath::Tunnel => None,
                         });
+                        let alone = alone.load(Ordering::Relaxed);
                         match what {
-                            Decided::Direct => usage.direct(path),
+                            Decided::Direct => usage.direct(path, alone),
                             Decided::Public => usage.tunnel(path),
-                            Decided::Refused => usage.refused(path),
+                            // A failed direct leg only where one was tried.
+                            // With no usable link the tunnel was the only
+                            // leg, and its failure is not the direct path's.
+                            Decided::Failed if alone || beside.load(Ordering::Relaxed) => {
+                                usage.direct_failed(path, alone)
+                            }
+                            Decided::Failed => {}
                         }
                     };
                     serve(socket, &h, &keys, decided, || async {
                         let Some(ticket) = policy.sample() else {
+                            alone.store(true, Ordering::Relaxed);
                             let host = &h;
                             let opened = strict::open(links.clone(), &clock, budget, |l| async move {
                                 let stream = l.open(host).await?;
@@ -185,6 +197,7 @@ impl Listener {
                         let fallback = async { dial(h.clone(), port).await.map(|s| Backend::Public(s, ticket)) };
                         match link {
                             Some(l) if l.usable() => {
+                                beside.store(true, Ordering::Relaxed);
                                 l.plan
                                     .choose(
                                         async { l.open(&h).await.map(|s| Backend::Direct(s, l.clone())) },
@@ -255,12 +268,14 @@ impl Backend<Arc<Link>> {
         }
     }
 }
-/// What became of one authenticated CONNECT, for the minute's count.
+/// What became of one authenticated CONNECT, for the minute's count. One
+/// whose tunnel leg was ready and then fenced is answered `502` as well and
+/// is not counted: no leg failed.
 enum Decided {
     Direct,
     Public,
-    /// Answered `502`: no backend, or a public leg fenced.
-    Refused,
+    /// Answered `502`: no leg gave a backend.
+    Failed,
 }
 async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
@@ -301,7 +316,7 @@ async fn serve<F: Future<Output = Option<Backend>>>(
     grant
         .until_revoked(async {
             let Some(backend) = open().await else {
-                decided(Decided::Refused);
+                decided(Decided::Failed);
                 let _ = browser
                     .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                     .await;
@@ -317,7 +332,8 @@ async fn serve<F: Future<Output = Option<Backend>>>(
                         decided(Decided::Public);
                         copy.serve(browser, s, &data[end..]).await;
                     } else {
-                        decided(Decided::Refused);
+                        // Fenced by a cut-over after it was ready: in no
+                        // count, since no leg failed.
                         let _ = browser
                             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                             .await;
@@ -372,24 +388,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
-        // Counted in its minute for the instance's log: no leg carried it,
-        // and there was no direct path.
-        let counted = l.access.usage.counted();
-        assert_eq!(counted.len(), 1);
-        assert_eq!(
-            (
-                &counted[0]["path"],
-                &counted[0]["direct"],
-                &counted[0]["tunnel"],
-                &counted[0]["direct_failed"]
-            ),
-            (
-                &serde_json::json!("none"),
-                &serde_json::json!(0),
-                &serde_json::json!(0),
-                &serde_json::json!(1)
-            )
-        );
+        // Not a failed direct leg in the instance's log: there was no usable
+        // link, so the tunnel was the only leg tried, and nothing carried it.
+        let usage = &l.access.usage;
+        for key in ["direct", "tunnel", "direct_failed", "strict"] {
+            assert_eq!(usage.total(None, key), 0, "{key}");
+        }
     }
     #[tokio::test]
     async fn observed_denial_fails_authenticated_connect_despite_pending_lan_success() {
@@ -439,6 +443,52 @@ mod tests {
             .unwrap();
         worker.await.unwrap();
         assert_eq!(reply, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+    }
+    /// A tunnel leg that was ready and then fenced by a cut-over is answered
+    /// `502` like a failure, and is none: it is in no count.
+    #[tokio::test]
+    async fn a_fenced_public_leg_is_answered_502_and_counted_as_nothing() {
+        use std::sync::atomic::AtomicUsize;
+        let host = Authority::managed("desk-app.avibe.bot").unwrap();
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut browser = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
+        let (accepted, _) = socket.accept().await.unwrap();
+        // The tunnel's leg, ready; then the cut-over, before it is committed.
+        let public = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
+        let policy = SessionPolicy::default();
+        let ticket = policy.sample().unwrap();
+        assert_eq!(policy.close_public(), 0);
+        let keys = Windows::default();
+        let authorization = basic(&keys.credential("test-window").unwrap());
+        let decisions = Arc::new(AtomicUsize::new(0));
+        let counted = decisions.clone();
+        let worker = tokio::spawn(async move {
+            serve(
+                accepted,
+                &host,
+                &keys,
+                |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                },
+                || async { Some(Backend::Public(public, ticket)) },
+            )
+            .await;
+        });
+        browser
+            .write_all(
+                format!("CONNECT desk-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: {authorization}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut reply = Vec::new();
+        timeout(Duration::from_secs(3), browser.read_to_end(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        worker.await.unwrap();
+        assert_eq!(reply, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+        assert_eq!(decisions.load(Ordering::SeqCst), 0);
     }
     #[tokio::test(start_paused = true)]
     async fn temporary_accept_errors_back_off_and_terminal_errors_are_returned() {
