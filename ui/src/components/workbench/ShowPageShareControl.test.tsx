@@ -1133,6 +1133,25 @@ describe('ShowPageShareControl native share and export', () => {
     };
     afterEach(() => DESKTOP.forEach((name) => Reflect.deleteProperty(window, name)));
 
+    it('offers export when the Show frame becomes visible after the popover opens', async () => {
+      const invoke = installDesktop('show-window');
+      await openControl();
+      expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+
+      const frame = mountShowFrame();
+      // The loading body mounts before it becomes eligible for capture.
+      frame.style.pointerEvents = 'none';
+      await act(async () => { fireEvent.load(frame); });
+      expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+      frame.style.pointerEvents = 'auto';
+
+      expect(await screen.findByRole('button', { name: 'Share PDF' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Share image' })).toBeTruthy();
+      expect(screen.getByText('Share this Show Page')).toBeTruthy();
+      expect(invoke).not.toHaveBeenCalled();
+      expectNoWrites();
+    });
+
     it('shares only the link from the Workbench', async () => {
       const invoke = installDesktop('workbench');
       mountShowFrame();
