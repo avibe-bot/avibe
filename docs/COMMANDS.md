@@ -882,19 +882,17 @@ Important options:
 - `--message`
 - `--message-file`
 - `--shell`
-- `--on-failure {none,agent,agent-on-repeat}`
+- `--on-failure {none,agent}`
 - `--timeout <seconds>`
 - `--cwd <dir>`
 - `--timezone`
 
-A command task (`--shell` or a trailing `-- <argv>`) runs with no Agent turn and
-takes no session, scope, or agent flags unless an Agent failure policy is set.
-`--on-failure agent-on-repeat` is for recurring commands: the first failure stays in Run history; the second consecutive matching failure starts one Agent turn. Further matches are silent. A success clears the incident and a different failure starts a new one. Matching uses the command, exit status, and last nonempty stderr line; scheduler timeouts are a separate class. Choose a maintenance Session with `--session-id`.
+A command runs without an Agent turn. By default a recurring command reports the second consecutive matching failure once, to its creating Session or explicit `--session-id`. If no maintainer is available, a failure notice takes its place. A successful Run clears the incident; a changed error starts a new pair. One-shot failures are reported immediately. Explicit `none` or `agent` reports every failure as before. Existing task policies are not rewritten.
 `--timeout` bounds each command run (default 21600 seconds, `0` = no timeout).
 `--cwd` is where the command runs; with `--on-failure agent` bound to an existing
 Session it means only that, and the escalation Session keeps its own working
 directory. With `--create-session` / `--create-session-per-run` it places that
-Session too. Without it, a Session-bound command follows that Session's directory
+Session too. Without it, an automatic recurring command bound to an existing maintainer keeps its invocation directory; an explicitly escalating Session-bound command follows that Session's directory
 — read live at fire time — and every other command records the directory you ran
 `vibe task add` from. See `docs/CLI.md` for the full rules.
 

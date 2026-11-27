@@ -9702,10 +9702,9 @@ class ScheduledTaskService:
         # RAISES on a disabled one, and a failed ``at`` task is disabled by the very
         # stamp that authorises this turn.
         escalation_request = None
-        # A one-shot cannot wait for a second scheduled fire. If an older client
-        # edits a recurring task into a one-shot, report its first failure.
-        repeat = task.on_failure == "agent-on-repeat" and task.schedule_type == "cron"
-        if error and task.on_failure in ("agent", "agent-on-repeat"):
+        repeat = task.on_failure == "auto" and task.schedule_type == "cron"
+        has_maintainer = bool(task.session_id or task.session_key or task.session_policy == "create_per_run")
+        if error and (task.on_failure == "agent" or (repeat and has_maintainer)):
             escalation_request = self.request_store.build_hook_send(
                 session_key=task.session_key or "",
                 session_id=task.session_id,
@@ -9847,7 +9846,7 @@ class ScheduledTaskService:
         """
 
         lines: list[str] = []
-        if task.on_failure == "agent-on-repeat":
+        if task.on_failure == "auto":
             lines.append("Triage this recurring command failure. Contact the user only if a decision or permission is needed.")
         stored_message = (task.prompt or "").strip()
         if stored_message:

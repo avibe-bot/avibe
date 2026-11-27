@@ -685,7 +685,7 @@ vibe task remove <task-id>
 - 用 `--cron` / `--at` 控制定时方式
 - 以及 `--name`、`--timezone`、`--message-file` 等参数
 - 用 `--shell` 或写在 `--` 之后的 argv 创建不触发 Agent turn 的定时命令任务，
-  可搭配 `--on-failure {none,agent,agent-on-repeat}`、按次执行的 `--timeout`
+  可搭配 `--on-failure {none,agent}`、按次执行的 `--timeout`
   （默认 21600 秒，`0` 表示不限制），以及指定命令执行目录的 `--cwd`
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
@@ -695,13 +695,9 @@ vibe task remove <task-id>
 IM 频道或话题，请用 `--create-session`（或 `--create-session-per-run`）配合
 `--scope-id` 创建。
 
-纯命令任务（`--on-failure none`，即默认值）不会套用上面这条调用方 Session 默认，
-也不接受 session、scope 或 agent 相关参数。执行成功时完全静默；执行失败会记录一条
-持久化的失败通知，并在通知中写明命令与退出码。若使用
-`--on-failure agent --message '<处理说明>'`，失败会改为触发一次携带失败报告的 Agent
-turn，并由该 turn 取代这次执行的失败通知。
+新建周期命令不需要传失败处理参数。第一次失败只记入运行历史；同一错误连续出现第二次，Avibe 会交给创建任务的会话，也可以用 `--session-id` 指定维护会话。没有维护会话或交接失败时，改发失败通知。之后同错不重复报告；运行成功后清除记录，换一种错误则重新计数。一次性命令失败立即通知。
 
-周期命令可以选 `--on-failure agent-on-repeat`：第一次失败只记录在运行历史里；同一错误连续出现第二次时，通知维护 Agent 一次，之后不重复提醒。成功后重新计数，不同错误另算。匹配依据是命令、退出码和最后一行非空标准错误；调度器超时单独归类。可用 `--session-id` 指定维护会话。
+显式指定 `--on-failure none` 仍然每次失败都发通知；`--on-failure agent` 仍然每次都启动 Agent。已有任务保留原策略：旧版本没有区分省略参数和显式指定 `none`。
 
 `vibe task update` 可以修改命令任务的
 `--shell`、argv、`--timeout` 或 `--cwd`，但在 message 形态与 command 形态之间切换、
@@ -718,7 +714,7 @@ Session：
   同时决定这个 Session 的目录，也就是升级 turn 会和命令跑在同一个目录。如果希望
   Session 继承目录，请改用 `--same-scope` / `--scope-id` 指定 scope 并省略 `--cwd`。
 
-不传该参数时，绑定了 Session 的命令会跟随那个 Session 的目录（该目录在触发时实时
+不传该参数时，采用默认失败策略且绑定已有维护会话的周期命令保留创建时的目录。显式选 `agent` 并绑定已有会话的命令会跟随该会话的目录（该目录在触发时实时
 读取，因此在那个会话里执行 `/setcwd` 会让任务换个地方运行），其他命令则记录你执行
 `vibe task add` 时所在的目录。对 message 任务，`--cwd` 仍然用于放置它创建的
 Session，且在目标 Session 已存在时仍然会被拒绝。

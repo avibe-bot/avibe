@@ -646,8 +646,8 @@ describe('TaskDetail command task', () => {
     // Not gated on the KIND: an escalation turn is routed by exactly these
     // fields, and a command bound to a conversation delivers its failure notice
     // there, so hiding them for every command would drop real answers.
-    for (const policy of ['agent', 'agent-on-repeat'] as const) {
-      const escalates = detail(task({ shell_command: 'make test', metadata: { on_failure: policy } }));
+    for (const policy of ['agent', 'auto'] as const) {
+      const escalates = detail(task({ shell_command: 'make test', schedule_type: 'cron', session_id: 'maintainer', metadata: { on_failure: policy } }));
       expect(escalates).toContain(`>${i18n.t(`harness.onFailure.${policy}`)}<`);
       expect(escalates).toContain(`>${i18n.t('harness.detail.agent')}<`);
       expect(escalates).toContain(`>${i18n.t('harness.detail.delivery')}<`);

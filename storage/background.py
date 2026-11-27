@@ -4229,8 +4229,7 @@ class SQLiteBackgroundTaskStore:
                         conn.execute(insert(incident).values(definition_id=values["id"], **facts))
                     else:
                         conn.execute(update(incident).where(match_task).values(**facts))
-            if report:
-                assert run_payload is not None
+            if report and run_payload is not None:
                 run_values = self._run_values(run_payload)
                 _pin_run_to_definition_agent(conn, run_values, agent_name=values.get("agent_name"))
                 enqueue_run_in_connection(conn, run_values)
@@ -4238,7 +4237,11 @@ class SQLiteBackgroundTaskStore:
                 # Bind the notice decision to the actual command Run, never to the
                 # definition or a hypothetical escalation. A refused transaction
                 # leaves the ordinary user notice intact.
-                assert run_payload and expected_uncanceled_run_id
+                assert expected_uncanceled_run_id
+                if report and run_payload is None:
+                    # No maintenance Session: the normal terminal failure notice
+                    # is the report. Do not suppress it or invent an Agent turn.
+                    return True
                 key, value = (("escalation_run_id", run_payload["id"]) if report else
                               ("quiet_command_run_id", expected_uncanceled_run_id))
                 result = conn.execute(update(agent_runs).where(

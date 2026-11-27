@@ -5688,7 +5688,7 @@
     "onFailure": {
       "none": "Notice only (no Agent)",
       "agent": "Escalate to an Agent",
-      "agent-on-repeat": "Notify the Agent once after two matching failures in a row"
+      "auto": "Report the second matching failure once"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",

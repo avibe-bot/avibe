@@ -238,11 +238,15 @@ run_type. The escalation turn is a second row — see D4.
 
 #### Recurring commands: one handoff per incident
 
-`--on-failure agent-on-repeat` is opt-in at creation. The first failure is visible
-as a failed Run, not a notification. A second matching failure queues one Agent
-turn on the task's normal binding. A successful command clears the incident;
-changing the error starts a new pair. Every execution still has its own Run.
-The default notice policy and `agent` on every failure are unchanged.
+New recurring commands use the creating Session by default, or an explicitly
+selected maintenance Session. The first failure is visible as a failed Run,
+not a notification. A second matching failure queues one maintenance turn or,
+if there is no bound Session, owes one ordinary user notice. Further matching
+failures remain in Run history. A successful Run clears the incident and a
+different error starts a new pair. One-shots report immediately. No new CLI
+option is needed; explicit `none` and `agent` still report each failure.
+Historical CLI rows stored `none` even when omitted. Do not infer that it was
+implicit or silently replace a user's choice on upgrade.
 
 The fingerprint includes the command, timeout outcome, exit status and last
 nonempty line of captured stderr. For a supervisor error without a line or

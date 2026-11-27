@@ -1303,11 +1303,9 @@ def _task_add_examples_text() -> str:
     return dedent(
         """\
         A message task stores --message and sends it to the target Session on each run.
-        A command task (--shell, or a command after '--') runs with no Agent turn. A success is
-          silent; a failure records a notice, or with --on-failure agent starts one Agent turn
-          with the failure and --message. Recurring commands can use --on-failure agent-on-repeat
-          to start one Agent turn after two matching failures. Only Agent failure policies take
-          Session, scope, or Agent flags.
+        A command task (--shell, or a command after '--') runs with no Agent turn.
+        Recurring commands report the second matching failure once, to --session-id or the
+          creating Session, otherwise by notice. One-shot failures notify immediately.
         Write cron weekdays as names (mon ... sun): numbers are rejected, because Avibe reads
           0 as Monday and crontab(5) reads it as Sunday.
 
@@ -4638,26 +4636,20 @@ def _task_add(args, invocation: _ServiceInvocation) -> dict:
             help_command="vibe task add --help",
         )
         requested_on_failure = getattr(args, "on_failure", None)
-        effective_on_failure = requested_on_failure or "none"
-        # A command task that escalates keeps the whole Session/Agent flow below,
-        # because its failure notice runs a real Agent turn. A PURE command task has
-        # no Session at all, so every Session-shaped input is refused instead of
-        # silently stored.
-        is_pure_command = has_command and effective_on_failure == "none"
+        schedule_type = "cron" if args.cron else "at"
+        automatic = has_command and requested_on_failure is None and schedule_type == "cron"
+        effective_on_failure = "auto" if automatic else requested_on_failure or "none"
+        # A terminal-created recurring command need not invent an Agent or Session.
+        # Its second matching failure takes the ordinary failure-notice route.
+        has_owner = bool(_default_session_id_from_caller(caller_context) or _explicit_flag_names(args, _TASK_SESSION_FLAG_ARGS))
+        is_pure_command = has_command and (effective_on_failure == "none" or (automatic and not has_owner))
         _validate_task_action_matrix(
             args,
             has_command=has_command,
             requested_on_failure=requested_on_failure,
-            effective_on_failure=effective_on_failure,
+            effective_on_failure="none" if is_pure_command else effective_on_failure,
             help_command="vibe task add --help",
         )
-        schedule_type = "cron" if args.cron else "at"
-        if schedule_type == "at" and effective_on_failure == "agent-on-repeat":
-            raise TaskCliError(
-                "--on-failure agent-on-repeat needs a recurring command", code="repeat_failure_requires_cron",
-                hint="Use --cron, or use --on-failure agent for a one-shot command.",
-                help_command="vibe task add --help",
-            )
         if is_pure_command:
             _reject_session_flags_for_command_task(args, help_command="vibe task add --help")
             # Deliberately BEFORE any caller default is applied: inside an Avibe Agent
@@ -4743,6 +4735,9 @@ def _task_add(args, invocation: _ServiceInvocation) -> dict:
                 invocation_cwd=invocation.cwd,
                 invocation_home=invocation.home,
             )
+            if automatic and not getattr(args, "cwd", None) and session_policy == "existing":
+                # Naming (or inheriting) the maintainer must not move a relative command.
+                cwd = _invocation_directory(invocation.cwd, help_command="vibe task add --help")
             agent_resolution = _resolve_agent_target(
                 agent_name=getattr(args, "agent", None),
                 session_id=session_id,
@@ -5241,7 +5236,10 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
         # to be legal beside a command (``message_without_consumer``). Rejecting it for
         # every command task forbade the exact shape the add path blesses, so the
         # guidance could only be reworded by deleting and recreating the task.
-        if task.has_command and message_flags and task.on_failure == "none":
+        unbound_command = task.has_command and (task.on_failure == "none" or (
+            task.on_failure == "auto" and not (task.session_policy or task.session_id or task.session_key)
+        ))
+        if unbound_command and message_flags:
             raise TaskCliError(
                 "this task runs a command, so its message inputs cannot be changed",
                 code="task_mode_immutable",
@@ -5273,10 +5271,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
                     "requested_on_failure": requested_on_failure,
                 },
             )
-        if task.on_failure == "agent-on-repeat" and getattr(args, "at", None):
-            raise TaskCliError("A repeat-failure task needs a recurring schedule", code="repeat_failure_requires_cron",
-                               hint="Keep --cron, or create a separate one-shot task.", help_command="vibe task update --help")
-        if task.has_command and task.on_failure == "none":
+        if unbound_command:
             return _task_update_pure_command(args, store, task, invocation, expected_state=expected_state)
 
         if getattr(args, "reset_delivery", False) and (
@@ -21236,9 +21231,9 @@ def build_parser():
     task_add_parser.add_argument("--shell", metavar="CMD", help="Command task: one shell command string")
     task_add_parser.add_argument(
         "--on-failure",
-        choices=["none", "agent", "agent-on-repeat"],
+        choices=["none", "agent"],
         default=None,
-        help="Command task failure: notice only, Agent on every failure, or Agent once on the second matching failure",
+        help="Override the default: notice on every failure (none), or an Agent turn on every failure (agent)",
     )
     task_add_parser.add_argument(
         "--timeout",
@@ -21286,7 +21281,7 @@ def build_parser():
     task_update_parser.add_argument("--shell", metavar="CMD", help="Replace the command; or pass one after '--'")
     task_update_parser.add_argument(
         "--on-failure",
-        choices=["none", "agent", "agent-on-repeat"],
+        choices=["none", "agent"],
         default=None,
         help=argparse.SUPPRESS,
     )

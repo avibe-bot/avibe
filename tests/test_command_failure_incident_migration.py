@@ -1,4 +1,4 @@
-"""The opt-in incident table must not rewrite tasks that predate it."""
+"""Adding the incident table must not rewrite existing task policies."""
 import sqlite3
 from contextlib import closing
 

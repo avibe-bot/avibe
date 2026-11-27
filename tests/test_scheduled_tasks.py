@@ -18226,7 +18226,7 @@ def test_repeat_failure_reports_second_match_once_then_rearms(tmp_path, monkeypa
     store = ScheduledTaskStore()
     task = _escalation_command_task(
         store, tmp_path, shell_command='read reason < reason; [ "$reason" = ok ] || { echo "$reason" >&2; exit 7; }',
-        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_report"), on_failure="agent-on-repeat",
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_report"), on_failure="auto",
     )
     report_count = 0
     for reason, should_report in [
@@ -18251,7 +18251,7 @@ def test_repeat_failure_late_stop_does_not_count_or_replace_an_incident(tmp_path
     store = ScheduledTaskStore()
     task = _escalation_command_task(
         store, tmp_path, shell_command='cat reason >&2; exit 7',
-        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_stop"), on_failure="agent-on-repeat",
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_stop"), on_failure="auto",
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
     real_mark = store.mark_task_result
@@ -18279,7 +18279,7 @@ def test_repeat_failure_only_a_settled_success_clears_the_incident(tmp_path, mon
     store = ScheduledTaskStore()
     task = _escalation_command_task(
         store, tmp_path, shell_command='read status < status; exit "$status"',
-        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_recovery"), on_failure="agent-on-repeat",
+        session_id=_bare_session_row(workdir=tmp_path, anchor="repeat_recovery"), on_failure="auto",
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
     for code, stop, expected_reports in [
@@ -18317,6 +18317,18 @@ def test_repeat_failure_only_a_settled_success_clears_the_incident(tmp_path, mon
             assert stopped
             assert service.request_store.get_run(queued.id)["status"] == ("canceled" if stop == "interrupt" else "succeeded")
         assert len(_escalation_runs(store)) == expected_reports, (code, stop)
+
+
+def test_repeat_failure_without_maintainer_owes_one_user_notice(tmp_path, monkeypatch):
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 8", on_failure="auto")
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    for owes_notice in (False, True, False):
+        run = _fire_command_task(service, store.get_task(task.id))
+        assert run["status"] == "failed"
+        assert bool(store.sqlite_backend.owed_failure_notice(run["id"])) is owes_notice
+        assert not _escalation_runs(store)
 
 
 def _queued_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
@@ -18683,7 +18695,7 @@ def test_a_failed_on_failure_agent_command_fire_queues_exactly_one_escalation(
     )
 
 
-@pytest.mark.parametrize("policy", ["agent", "agent-on-repeat"])
+@pytest.mark.parametrize("policy", ["agent", "auto"])
 def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
     tmp_path: Path, monkeypatch, policy,
 ) -> None:
@@ -18711,7 +18723,7 @@ def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
         on_failure=policy,
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
-    if policy == "agent-on-repeat":
+    if policy == "auto":
         first = _fire_command_task(service, task)
         assert not _escalation_runs(store) and store._sqlite.owed_failure_notice(first["id"]) is None
 
@@ -20934,7 +20946,7 @@ def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(
     )
 
 
-@pytest.mark.parametrize("policy", ["agent", "agent-on-repeat"])
+@pytest.mark.parametrize("policy", ["agent", "auto"])
 def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
     tmp_path: Path, monkeypatch, policy,
 ) -> None:
@@ -20971,7 +20983,7 @@ def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
         store, tmp_path, shell_command="exit 7", session_id=session_id, on_failure=policy,
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
-    if policy == "agent-on-repeat":
+    if policy == "auto":
         first = _fire_command_task(service, task)
         assert not _escalation_runs(store) and store.sqlite_backend.owed_failure_notice(first['id']) is None
 

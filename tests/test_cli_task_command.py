@@ -371,8 +371,8 @@ def test_task_add_help_states_task_kinds_and_cron_weekday_names(capsys) -> None:
     text = " ".join(capsys.readouterr().out.split())
     assert "A message task stores --message and sends it to the target Session on each run." in text
     assert "A command task (--shell, or a command after '--') runs with no Agent turn." in text
-    assert "with --on-failure agent starts one Agent turn" in text
-    assert "agent-on-repeat" in text
+    assert "second matching failure once" in text
+    assert "agent-on-repeat" not in text
     assert "Write cron weekdays as names (mon ... sun): numbers are rejected" in text
     assert "vibe task add --cron '0 9 * * mon-fri' --message" in text
 
@@ -4060,12 +4060,13 @@ def test_task_add_rejects_on_failure_without_command(monkeypatch) -> None:
     assert payload["code"] == "on_failure_requires_command"
 
 
-def test_repeat_failure_policy_rejects_one_shot(monkeypatch):
+def test_one_shot_command_without_override_keeps_immediate_notice(tmp_path, capsys, monkeypatch):
     _bare_terminal_caller(monkeypatch)
-    args = _parse_task_add(["--at", "2030-01-01T12:00:00Z", "--shell", "false", "--on-failure", "agent-on-repeat"])
-    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-    assert result == 1
-    assert payload["code"] == "repeat_failure_requires_cron"
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(["--at", "2030-01-01T12:00:00Z", "--shell", "false"])
+    with patch.object(lent, "task_store", store):
+        assert cli.cmd_task_add(args) == 0
+    assert json.loads(capsys.readouterr().out)["definition"]["on_failure"] == "none"
 
 
 def test_task_add_rejects_timeout_without_command(monkeypatch) -> None:
@@ -4133,7 +4134,7 @@ def test_task_add_rejects_session_flags_for_pure_command_task(
     monkeypatch, flag_argv: list[str], flag_name: str
 ) -> None:
     _bare_terminal_caller(monkeypatch)
-    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", *flag_argv])
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", "--on-failure", "none", *flag_argv])
 
     result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
@@ -4159,7 +4160,7 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
     _agent_shell_caller(monkeypatch)
     db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory)
     store = _command_task_store(tmp_path)
-    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh"])
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", "--on-failure", "none"])
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
@@ -4180,12 +4181,13 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
     assert definition["metadata"]["created_by"]["caller"]["session_id"] == "sesCaller"
 
 
-@pytest.mark.parametrize("policy", ["agent", "agent-on-repeat"])
+@pytest.mark.parametrize("policy,target", [("agent", None), (None, None), (None, "sesMaintainer")])
 def test_task_add_escalating_command_task_binds_caller_session(
-    tmp_path: Path, capsys, monkeypatch, sqlite_schema_db_factory, policy,
+    tmp_path: Path, capsys, monkeypatch, sqlite_schema_db_factory, policy, target,
 ) -> None:
     _agent_shell_caller(monkeypatch)
-    db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory)
+    db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory, session_id=target or "sesCaller")
+    monkeypatch.chdir(tmp_path)
     store = _command_task_store(tmp_path)
     args = _parse_task_add(
         [
@@ -4193,8 +4195,8 @@ def test_task_add_escalating_command_task_binds_caller_session(
             "0 3 * * *",
             "--shell",
             "./scripts/sync.sh",
-            "--on-failure",
-            policy,
+            *(["--on-failure", policy] if policy else []),
+            *(["--session-id", target] if target else []),
             "--message",
             "The nightly sync failed. Diagnose it.",
         ]
@@ -4211,11 +4213,13 @@ def test_task_add_escalating_command_task_binds_caller_session(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     definition = payload["definition"]
-    assert definition["session_id"] == "sesCaller"
+    assert definition["session_id"] == (target or "sesCaller")
+    if policy is None:
+        assert Path(definition["cwd"]).resolve() == tmp_path.resolve()
     assert definition["session_policy"] == "existing"
     assert definition["shell_command"] == "./scripts/sync.sh"
     assert definition["message"] == "The nightly sync failed. Diagnose it."
-    assert definition["metadata"]["on_failure"] == policy
+    assert definition["metadata"]["on_failure"] == (policy or "auto")
     assert definition["kind"] == "command"
     assert "session_default_notice" not in payload
 
@@ -4438,12 +4442,12 @@ def test_task_add_pure_shell_command_persists_command_fields(
     assert definition["timeout_seconds"] == 0
     assert "message" not in definition
     assert definition["cwd"] == str(tmp_path)
-    assert definition["metadata"]["on_failure"] == "none"
+    assert definition["metadata"]["on_failure"] == "auto"
     assert "session_workdir" not in definition["metadata"]
 
     stored = store.get_task(definition["id"])
     assert stored.has_command is True
-    assert stored.on_failure == "none"
+    assert stored.on_failure == "auto"
     assert stored.shell_command == "./scripts/sync.sh"
     assert stored.timeout_seconds == 0
 

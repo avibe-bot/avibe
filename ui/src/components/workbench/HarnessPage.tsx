@@ -1343,7 +1343,9 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
   const { t } = useTranslation();
   const isCommand = taskIsCommand(task);
   const commandPreview = isCommand ? taskCommandPreview(task) : '';
-  const escalates = isCommand && taskOnFailure(task) !== 'none';
+  const failurePolicy = taskOnFailure(task);
+  const escalates = isCommand && (failurePolicy === 'agent' || (failurePolicy === 'auto' &&
+    Boolean(task.session_id || task.session_key || task.session_policy === 'create_per_run')));
   const routesSomewhere =
     !isCommand ||
     escalates ||
@@ -1436,7 +1438,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           block below mean "only when this fails". */}
       {isCommand && (
         <DetailField label={t('harness.detail.onFailure')}>
-          <span className="text-[12px] text-foreground">{t(`harness.onFailure.${taskOnFailure(task)}`)}</span>
+          <span className="text-[12px] text-foreground">{t(`harness.onFailure.${failurePolicy}`)}</span>
         </DetailField>
       )}
       {routesSomewhere && (

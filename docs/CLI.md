@@ -879,7 +879,7 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
 - `--shell` / trailing `-- <argv>` for a scheduled command with no Agent turn,
-  with `--on-failure {none,agent,agent-on-repeat}`, a per-run `--timeout` (default 21600
+  with `--on-failure {none,agent}`, a per-run `--timeout` (default 21600
   seconds, 0 = none), and `--cwd` for the directory the command runs in
 
 One-shot `--at` Tasks tolerate up to five minutes of scheduler lateness, including
@@ -896,14 +896,9 @@ target. Explicit `--session-id` and session creation flags still win. To target
 an IM channel or thread that has no Session yet, create one with
 `--create-session` (or `--create-session-per-run`) and `--scope-id`.
 
-A pure command task (`--on-failure none`, the default) skips that caller-session
-default and takes no session, scope, or agent flags. Successful runs are silent;
-a failed run records a durable failure notice naming the command and its exit
-code. With `--on-failure agent --message '<instructions>'` the failure instead
-starts one Agent turn carrying the failure report, and that turn replaces the
-notice for the run.
+For a new recurring command, no failure flag is needed. The first failure stays in Run history. The second consecutive matching failure is handed to the creating Session, or the maintainer named by `--session-id`. With no maintainer, or if the handoff fails, Avibe uses a failure notice. Further matches do not repeat the report. Success resets the count; a different failure starts a new pair. One-shot commands notify immediately.
 
-`--on-failure agent-on-repeat` is for recurring commands: the first failure stays in Run history; the second consecutive matching failure starts one Agent turn. Further matches are silent. A success clears the incident and a different failure starts a new one. Matching uses the command, exit status, and last nonempty stderr line; scheduler timeouts are a separate class. Choose a maintenance Session with `--session-id`.
+Explicit `--on-failure none` sends a notice on every failure; `--on-failure agent` starts a turn on every failure. Existing tasks keep their stored policy. Older versions recorded `none` even when the flag was omitted.
 
 `vibe task update` can change a command task's `--shell`,
 argv, `--timeout`, or `--cwd`, but switching a task between message and command
@@ -922,7 +917,7 @@ definition also *creates* a Session:
   scope instead (`--same-scope` / `--scope-id`) and omit `--cwd` if you want the
   Session to inherit its directory.
 
-Without the flag, a Session-bound command follows that Session's directory —
+Without the flag, a recurring command using the default failure handling keeps its invocation directory when bound to an existing maintainer. With explicit `--on-failure agent`, a Session-bound command follows that Session's directory —
 read live at fire time, so `/setcwd` on that conversation relocates the job —
 and every other command records the directory you ran `vibe task add` from. For
 a message task `--cwd` still places the Session it creates, and is still refused
