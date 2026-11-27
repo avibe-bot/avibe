@@ -120,7 +120,7 @@ export function installPageFetchCounting(): void {
       done();
       throw error;
     }
-    // How this request arrived, as the instance said on its answer.
+    // How this request arrived, where the instance said so on its answer.
     noteRequestVia(order, response.headers.get('X-Avibe-Via'));
     return countedUntilBodyEnds(response, done);
   };

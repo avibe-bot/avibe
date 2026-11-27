@@ -5,8 +5,10 @@
 // Two connections speak, because the live event stream is a connection of its own:
 // - the stream, in its own handshake (`via` in `/api/events`' `connected` frame). Cleared when the
 //   stream closes and answered again by the next one;
-// - the page's requests, on each answer (`X-Avibe-Via`, read by the page's own `fetch`). The word of
-//   the latest request that has been answered is kept until a later one says otherwise.
+// - the page's requests, on the answers that carry it (`X-Avibe-Via`, read by the page's own
+//   `fetch`; the instance puts it only on answers no cache may keep, the session check that begins
+//   every connect of the stream among them). The word of the latest such request is kept until a
+//   later one says otherwise.
 //
 // What the page shows and follows is both together (`pageVia`): `direct` only when the stream and
 // the latest request both say so, `other` as soon as either does.
