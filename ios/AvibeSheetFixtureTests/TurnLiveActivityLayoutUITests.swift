@@ -194,11 +194,19 @@ final class VoiceLiveActivityLayoutUITests: XCTestCase {
         add(tree)
         XCTAssertEqual(result, .completed, "The expanded voice island is not on screen: \(last)")
         guard let clock, let title, let send else { return }
+        // The clock's frame is its text's, no wider than its widest value
+        // needs. A timer of unbounded width fills the trailing region (118 pt
+        // on an iPhone 18 Pro, 11-28) and draws at that region's leading
+        // edge, off-centre above the title; its frame there says nothing of
+        // where the digits are.
+        XCTAssertLessThanOrEqual(clock.frame.width, 72, "clock \(clock.frame)")
         // To the right of the title, and at the island's trailing side: its
         // middle right of the Send button's, which fills the right half of
-        // the island's width. A clock standing above the title fails both.
+        // the island's width.
         XCTAssertGreaterThanOrEqual(clock.frame.minX, title.frame.maxX, "clock \(clock.frame), title \(title.frame)")
         XCTAssertGreaterThan(clock.frame.midX, send.frame.midX, "clock \(clock.frame), Send \(send.frame)")
+        // And at the island's trailing end: as far right as the Send button reaches, near enough.
+        XCTAssertGreaterThan(clock.frame.maxX, send.frame.maxX - 12, "clock \(clock.frame), Send \(send.frame)")
     }
 
     private enum Kind { case clock, title, send }

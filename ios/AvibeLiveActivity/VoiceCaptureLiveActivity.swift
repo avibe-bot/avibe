@@ -22,8 +22,10 @@ struct VoiceCaptureLiveActivity: Widget {
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
+                    // The region is wider than the clock: it sits at its trailing end.
                     VoiceCaptureClock(state: context.state)
                         .font(.title3.monospacedDigit())
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.center) {
