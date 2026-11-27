@@ -377,6 +377,7 @@ class FakeAcpServer:
                 sys.stderr.flush()
                 os._exit(2)
             if text == "wait_cancel":
+                self._send_update(sid, {"sessionUpdate": "usage_update", "used": 100, "size": 128000})
                 self._send_text(sid, "working")
                 await cancel_event.wait()
                 return self._send_result(req_id, {"stopReason": "cancelled"})

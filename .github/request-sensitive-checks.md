@@ -1,1 +1,1 @@
-Run the macOS and Windows desktop checks to compile the updated Cargo dependencies and verify that desktop iroh 1.5.0 connects to the released sidecar.
+Run desktop-shell: this PR changes the Desktop's direct listener (desktop/src-tauri/src/direct/listener.rs), which only that job builds and tests, on macOS and Windows.

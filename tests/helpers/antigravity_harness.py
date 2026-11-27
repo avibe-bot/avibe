@@ -271,6 +271,7 @@ class FakeController:
     runtime_ownership: FakeOwnershipProvider = field(default_factory=FakeOwnershipProvider)
     emitted: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
     token_notes: list[tuple[Any, int]] = field(default_factory=list)
+    token_noted: asyncio.Event = field(default_factory=asyncio.Event)
     token_totals: dict[str, int] = field(default_factory=dict)
     primary_platform: str = "slack"
 
@@ -293,6 +294,7 @@ class FakeController:
         return [e for e in self.emitted if e[0] == message_type]
 
     def note_session_tokens(self, context: Any, *, total: int) -> None:
+        self.token_noted.set()
         self.token_notes.append((context, total))
         self.token_totals[f"{context.channel_id}:{context.thread_id or context.channel_id}"] = int(total)
 
@@ -361,6 +363,26 @@ class AntigravityHarness:
     controller: FakeController
     agent: Any
 
+    turns: list[asyncio.Task] = field(default_factory=list)
+
+    def start_turn(self, request: AgentRequest) -> asyncio.Task:
+        # A lost protocol event must unwind the test even if both peers are waiting.
+        # This is a deadlock guard for the whole turn, not a readiness deadline.
+        task = asyncio.create_task(asyncio.wait_for(self.agent.handle_message(request), timeout=60))
+        self.turns.append(task)
+        return task
+
+    async def wait_for_signal(self, signal: asyncio.Event, turn: asyncio.Task) -> None:
+        waiter = asyncio.create_task(signal.wait())
+        try:
+            await asyncio.wait((waiter, turn), return_when=asyncio.FIRST_COMPLETED)
+            if turn.done():
+                await turn  # Surface unexpected failure rather than waiting for a missing signal.
+                raise AssertionError(f"Turn finished before checkpoint: {self.controller.events('result')}")
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
     def launches(self) -> list[dict[str, Any]]:
         return read_jsonl(self.launch_log)
 
@@ -372,7 +394,12 @@ class AntigravityHarness:
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        await self.agent.shutdown_runtime()
+        try:
+            await self.agent.shutdown_runtime()
+        finally:
+            for task in self.turns:
+                task.cancel()
+            await asyncio.gather(*self.turns, return_exceptions=True)
 
 
 def make_agent_harness(
@@ -443,7 +470,9 @@ def _run_acp(cfg: dict[str, Any], state_file: Path, rpc_log: Path | None, auth_m
     server_cfg.setdefault("authMethods", _AUTH_DEFAULT_METHODS)
     if auth_mode:
         server_cfg.setdefault("configOptions", _AUTH_DEFAULT_CONFIG_OPTIONS)
-    asyncio.run(_AuditingServer(state_file=state_file, config=server_cfg).run())
+    # Concurrent peers can opt out of the single-writer JSON fixture.
+    peer_state = None if server_cfg.get("inMemoryState") else state_file
+    asyncio.run(_AuditingServer(state_file=peer_state, config=server_cfg).run())
     return 0
 
 

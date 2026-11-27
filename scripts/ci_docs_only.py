@@ -104,6 +104,7 @@ class Scope(NamedTuple):
     paths: tuple[str, ...] = ()
     routable: bool = False
     verified_paths: tuple[str, ...] = ()  # Complete event range, including both rename sides and executable files.
+    verified_checkout: str = ''  # Immutable Git object used for that diff, not an event-supplied revision.
 
 
 def full(reason: str, windows_control_ipc: bool) -> Scope:
@@ -310,7 +311,9 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
             entries.append((meta[4], meta[0][1:], meta[1], name.decode("utf-8")))
         routable = event_name in {"pull_request", "merge_group"} and targets_default_branch(event_name, event)
         result = scope_of(entries, routable)
-        return result._replace(verified_paths=tuple(p for *_, p in entries) if routable else ())
+        if routable:
+            return result._replace(verified_paths=tuple(p for *_, p in entries), verified_checkout=checked_out_sha)
+        return result
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not print Git stderr, event payloads or arbitrary commit data.
         # Conservatively select the Windows job when classification cannot prove

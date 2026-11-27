@@ -1,6 +1,6 @@
 //! The proxy recognizes one configured managed origin. It never forwards the
 //! browser's proxy headers. Bytes after the head still belong to the browser.
-const HEAD_LIMIT: usize = 4096;
+pub(super) const HEAD_LIMIT: usize = 4096;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Authority(String);
