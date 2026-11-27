@@ -2,7 +2,7 @@
 //! bytes stay buffered until a candidate is committed; there is no retry on
 //! any error after the 200. Drop/abort owns and cancels all accepted sockets.
 use super::{
-    connect::{parse_connect, Authority, Head},
+    connect::{parse_connect, Authority, Head, HEAD_LIMIT},
     credentials::Windows,
     faults::PathWord,
     public,
@@ -149,10 +149,14 @@ impl Listener {
                     continue;
                 }
                 if clients.len() >= SERVED {
-                    // Told so, where it was dropped unanswered: a window
-                    // whose route allows it then goes to the host by itself.
-                    // Past as many refusals at once, dropped as before.
-                    if refusals.len() < SERVED {
+                    // On macOS it is told so, where it was dropped
+                    // unanswered: a window whose route allows it then goes
+                    // to the host by itself. Past as many refusals at once,
+                    // dropped as before. Elsewhere it is still dropped: a
+                    // WebView2 goes on to the host after a connection that
+                    // ends without an answer, and not after a `502`
+                    // (`webview_windows::route_argument`).
+                    if cfg!(target_os = "macos") && refusals.len() < SERVED {
                         refusals.spawn(refuse(socket));
                     }
                     continue;
@@ -250,17 +254,26 @@ const SERVED: usize = 64;
 const BAD_GATEWAY: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n";
 
 /// Answers a connection the listener has no room for, without reading what
-/// it asked: `502`, as when no leg gives a backend, which a route that
-/// allows failover takes as leave to go to the host itself. The answer is
-/// sent and its end marked before the request is read out, so the close
-/// that follows does not reset the connection ahead of the answer. Nothing
-/// is authenticated, counted or opened for it.
+/// it asked: `502`, as when no leg gives a backend, which a WKWebView whose
+/// route allows failover takes as leave to go to the host itself. The
+/// answer is sent and its end marked before the request is read out, so the
+/// close that follows does not reset the connection ahead of the answer.
+/// What is read out is bounded in time and in bytes (one request head and no
+/// more): a peer that goes on sending is cut off. Nothing is authenticated,
+/// counted or opened for it.
 async fn refuse(mut browser: TcpStream) {
     let _ = timeout(Duration::from_secs(2), async {
         browser.write_all(BAD_GATEWAY).await.ok()?;
         browser.shutdown().await.ok()?;
         let mut rest = [0; 1024];
-        while browser.read(&mut rest).await.ok()? != 0 {}
+        let mut left = HEAD_LIMIT + 4;
+        while left > 0 {
+            let read = browser.read(&mut rest).await.ok()?;
+            if read == 0 {
+                break;
+            }
+            left = left.saturating_sub(read);
+        }
         Some(())
     })
     .await;
@@ -424,8 +437,10 @@ mod tests {
             assert_eq!(usage.total(None, key), 0, "{key}");
         }
     }
-    /// A listener with no room answers `502` and closes, where it used to
-    /// close without a word; and it has room again once connections end.
+    /// A listener with no room answers `502` and closes on macOS, where it
+    /// used to close without a word; elsewhere it still closes without one,
+    /// which is what a WebView2 goes on to the host after. Either way it has
+    /// room again once connections end.
     #[tokio::test]
     async fn a_connection_beyond_what_the_listener_serves_is_answered_502() {
         let host = Authority::managed("desk-app.avibe.bot").unwrap();
@@ -443,13 +458,20 @@ mod tests {
         // One more, with a request it has already sent in full.
         let unauthenticated = format!("CONNECT {}:443 HTTP/1.1\r\n\r\n", host.host());
         let mut beyond = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
-        beyond.write_all(unauthenticated.as_bytes()).await.unwrap();
+        // (Where it is dropped at once, the request may not go out at all.)
+        let sent = beyond.write_all(unauthenticated.as_bytes()).await;
         let mut answer = Vec::new();
-        timeout(Duration::from_secs(2), beyond.read_to_end(&mut answer))
+        let ended = timeout(Duration::from_secs(2), beyond.read_to_end(&mut answer))
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(answer, BAD_GATEWAY);
+        if cfg!(target_os = "macos") {
+            sent.unwrap();
+            ended.unwrap();
+            assert_eq!(answer, BAD_GATEWAY);
+        } else {
+            // Ended or reset, with nothing said.
+            assert_eq!(answer, b"");
+        }
         // It was not read as a request: nothing is counted for it.
         for key in ["direct", "tunnel", "direct_failed", "strict"] {
             assert_eq!(l.access.usage.total(None, key), 0, "{key}");
@@ -460,13 +482,14 @@ mod tests {
         timeout(Duration::from_secs(2), async {
             loop {
                 let mut next = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
-                next.write_all(unauthenticated.as_bytes()).await.unwrap();
+                let _ = next.write_all(unauthenticated.as_bytes()).await;
                 let mut answer = Vec::new();
-                next.read_to_end(&mut answer).await.unwrap();
+                let _ = next.read_to_end(&mut answer).await;
                 if answer.starts_with(b"HTTP/1.1 407 ") {
                     break;
                 }
-                assert_eq!(answer, BAD_GATEWAY);
+                // Still full: refused as above.
+                assert!(answer == BAD_GATEWAY || answer.is_empty(), "{answer:?}");
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
