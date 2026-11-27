@@ -169,13 +169,18 @@ def test_task_update_arm_state(state, flag, value, armed, capsys):
         store.load()
     if state == "fired_zone_edit":
         zone_args = cli.build_parser().parse_args(["task", "update", task.id, "--timezone", "Asia/Tokyo"])
-        assert cli.cmd_task_update(zone_args) == 0
-        assert json.loads(capsys.readouterr().out)["definition"]["retirement_reason"] == "schedule_consumed"
+        result, error = _capture_stderr_json(cli.cmd_task_update, zone_args)
+        assert result == 1 and error["code"] == "task_schedule_retired"
+        owner = store.get_task(task.id)
+        generation = scheduled_tasks.TaskExecutionStore().get_run(owner.last_run_id)["metadata"]["task_schedule_consumed"]
+        assert store.mark_task_result(task.id, error=None, expected_schedule_generation=generation,
+                                      expected_terminal_run_id=owner.last_run_id)
     if state.endswith("ui_paused"):
         assert store.sqlite_backend.set_definition_enabled(task.id, False, definition_type="scheduled")
     elif "paused" in state:
         store.set_enabled(task.id, False)
-    args = cli.build_parser().parse_args(["task", "update", task.id, flag, value])
+    extra = ["--timezone", "Asia/Tokyo"] if state == "fired_zone_edit" else []
+    args = cli.build_parser().parse_args(["task", "update", task.id, flag, value, *extra])
     if value.startswith("2000-"):
         status, error = _capture_stderr_json(cli.cmd_task_update, args)
         assert status == 1 and error["code"] == "invalid_run_at"

@@ -5243,7 +5243,7 @@ def cmd_task_update(args):
 
 def _task_update(args, invocation: _ServiceInvocation) -> dict:
     from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
-    from storage.background import DefinitionWriteConflict
+    from storage.background import DefinitionWriteConflict, TaskScheduleRetired
 
     stores = invocation.stores
     reserved_session_id: Optional[str] = None
@@ -5723,12 +5723,18 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
             help_command="vibe task update --help",
             details={"task_id": getattr(args, "task_id", exc.definition_id)},
         ) from exc
-    except Exception:
+    except Exception as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task update failed before its Session reservation was adopted",
             )
+        if isinstance(exc, TaskScheduleRetired):
+            raise TaskCliError(
+                "Cannot rewrite the recorded time of a retired one-shot.", code=exc.code,
+                hint="Pass a new future --at or --cron to replace the schedule.",
+                help_command="vibe task update --help",
+            ) from exc
         raise
 
 

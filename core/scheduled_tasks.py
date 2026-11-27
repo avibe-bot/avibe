@@ -123,6 +123,7 @@ from storage.background import (
     TASK_PAUSED_AFTER_CONSUMPTION,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
+    TaskScheduleRetired,
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
     TASK_LAST_RESULT_STATUS_METADATA_KEY,
     SweptRun,
@@ -1922,12 +1923,17 @@ class ScheduledTaskStore:
         if schedule_changed and previous_schedule[0] == schedule_type == "at" and task.retired_at:
             # A different display zone (or ISO spelling) is not a new fire.
             try:
-                schedule_changed = (
+                same_instant = (
                     resolve_run_at(previous_schedule[1], previous_schedule[2]).timestamp()
-                    != resolve_run_at(run_at, timezone_name).timestamp()
+                    == resolve_run_at(run_at, timezone_name).timestamp()
                 )
             except (ValueError, TypeError, KeyError):
                 pass  # Permit replacement of an invalid legacy schedule.
+            else:
+                if same_instant:
+                    # The consuming Run owns the original strings as well as the instant.
+                    # Do not invalidate its queued execution, terminal stamp, or history.
+                    raise TaskScheduleRetired(task.id)
         if schedule_changed:
             if consumed_only and (schedule_type, run_at) != previous_schedule[:2] and compute_next_run_at(
                 enabled=True, schedule_type=schedule_type, cron=cron, run_at=run_at, timezone_name=timezone_name,
