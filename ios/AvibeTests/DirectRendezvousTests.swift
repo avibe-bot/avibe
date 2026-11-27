@@ -564,6 +564,47 @@ final class DirectRendezvousTests: XCTestCase {
         )
     }
 
+    /// The account of which leg carried the pages' connections rides on the
+    /// same request: at most ten entries, each as `DirectPathUse` wrote it,
+    /// after the other reports; and no field when there are none.
+    func testTheRequestReportsPathUseWithinTheInstancesLimit() throws {
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        let clock = DirectPathUseTestClock()
+        let use = DirectPathUse(seconds: { clock.now })
+        let scope = DirectPathUse.Scope(store: UUID(), host: "instance-one.example")
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], pathUse: use.pending(for: scope)),
+            head + "}"
+        )
+        for _ in 0..<12 {
+            use.connection(
+                DirectPathUseConnection(carrier: .tunnel, plan: .raced, readyMs: 80), scope: scope, path: .relay
+            )
+            clock.now += 60
+        }
+        let reports = use.pending(for: scope)
+        XCTAssertEqual(reports.count, 10)
+        let body = DirectRendezvous.requestBody(
+            clientEndpointID: client,
+            listenerFaults: [failure(.deadline)],
+            slowStoreRemovalsMs: [1_200],
+            pathUse: reports + reports
+        )
+        XCTAssertEqual(
+            body,
+            head + ",\"listener_faults\":[{\"step\":\"deadline\",\"code\":0,\"background_seconds\":0}]"
+                + ",\"slow_store_removals_ms\":[1200]"
+                + ",\"path_use\":[" + reports.map(\.json).joined(separator: ",") + "]}"
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        let entries = try XCTUnwrap(object["path_use"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 10)
+        // Oldest first, and no wall time: only how long ago.
+        XCTAssertEqual(entries.first?["age_min"] as? Int, 12)
+        XCTAssertEqual(entries.last?["age_min"] as? Int, 3)
+        XCTAssertEqual(entries.first?["tunnel_won"] as? Int, 1)
+    }
+
     /// `listener_faults` is what the instance accepts and nothing more: at
     /// most five entries, the newest, each with exactly a step (one it
     /// knows), a code and the seconds away, all within its bounds; no time,
