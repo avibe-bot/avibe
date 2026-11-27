@@ -166,39 +166,24 @@ const signalWithDeadline = (
     `Request exceeded its ${deadlineMs}ms deadline`,
     'TimeoutError',
   );
-  const deadlineController = new AbortController();
-  const deadlineTimer = globalThis.setTimeout(() => {
-    deadlineController.abort(deadlineReason);
-  }, deadlineMs);
-  if (!callerSignal) {
-    return {
-      signal: deadlineController.signal,
-      isOwnDeadline: (reason) => reason === deadlineReason,
-      dispose: () => globalThis.clearTimeout(deadlineTimer),
-    };
-  }
-
-  const composedController = new AbortController();
-  let disposed = false;
-  const dispose = () => {
-    if (disposed) return;
-    disposed = true;
-    globalThis.clearTimeout(deadlineTimer);
-    callerSignal.removeEventListener('abort', abortFromCaller);
-    deadlineController.signal.removeEventListener('abort', abortFromDeadline);
-  };
-  const abortFromCaller = () => abortFrom(callerSignal);
-  const abortFromDeadline = () => abortFrom(deadlineController.signal);
-  const abortFrom = (source: AbortSignal) => {
+  const controller = new AbortController();
+  // One signal owns the race: AbortController retains the first reason. The
+  // winning source disposes both its timer and the caller listener at once.
+  const abort = (reason: unknown) => {
     dispose();
-    composedController.abort(
-      source.reason ?? new DOMException('request aborted', 'AbortError'),
-    );
+    controller.abort(reason);
   };
-  callerSignal.addEventListener('abort', abortFromCaller, { once: true });
-  deadlineController.signal.addEventListener('abort', abortFromDeadline, { once: true });
+  const abortFromCaller = () => abort(
+    callerSignal?.reason ?? new DOMException('request aborted', 'AbortError'),
+  );
+  const deadlineTimer = globalThis.setTimeout(() => abort(deadlineReason), deadlineMs);
+  const dispose = () => {
+    globalThis.clearTimeout(deadlineTimer);
+    callerSignal?.removeEventListener('abort', abortFromCaller);
+  };
+  callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
   return {
-    signal: composedController.signal,
+    signal: controller.signal,
     isOwnDeadline: (reason) => reason === deadlineReason,
     dispose,
   };

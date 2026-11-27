@@ -44,3 +44,5 @@ after `npm run build` with `npx playwright test --config
 playwright.dependencies.config.ts`. `PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH` may select
 an existing compatible WebKit installation; the default uses Playwright's pinned
 browser. The fixtures only answer reads and reject production/external traffic.
+
+The deadline helper uses one AbortController for both cancellation sources; its first reason wins and either winner releases the timer and caller listener. This retains the WebKit fix while removing redundant controller/listener machinery from the shared first-load chunk. Expanded component, hook, and deadline validation covers 75 tests.
