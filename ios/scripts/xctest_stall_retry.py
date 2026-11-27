@@ -64,7 +64,7 @@ _BOOTSTRAP = re.compile(
 # fixture's bootstrap wait. Any other first failure (an assertion, a thrown
 # error) stands whatever the log shows around it.
 _ERROR = ": error: -["
-_ERROR_OF = re.compile(r": error: -\[\w+\.(?P<cls>\w+) (?P<method>\w+)\]")
+_ERROR_OF = re.compile(r": error: -\[(?P<target>\w+)\.(?P<cls>\w+) (?P<method>\w+)\]")
 _WAIT_RAN_OUT = re.compile(
     r"Asynchronous wait failed: Exceeded timeout|The condition did not become true within"
 )
@@ -139,6 +139,12 @@ def stalled_failures(lines: list[str], max_tests: int, *, selected: bool = False
         error_of = _ERROR_OF.search(line)
         if selected:
             record = _ACTIONS_STAMP.sub("", line).strip()
+            # A diagnostic belongs to the currently running method, not to a
+            # name found somewhere in the finished bundle. Check even after
+            # the first timeout: later in-window fallout is allowed, but a
+            # late or cross-bundle assertion is an independent failure.
+            if error_of and (current is None or error_of.groups() != (current.target, current.cls, current.method)):
+                return [], "XCTest error outside its own method execution"
             if _DRIVER_ERROR.match(record) or (not error_of and _FILE_ERROR.search(record)):
                 return [], f"independent xcodebuild error: {record}"
             if _SELECTED_END.fullmatch(record):
@@ -166,7 +172,7 @@ def stalled_failures(lines: list[str], max_tests: int, *, selected: bool = False
                 current = _Case(case["target"], case["cls"], case["method"])
             elif case["event"] == "failed":
                 name = f"{case['cls']}.{case['method']}"
-                if current is None or current.name != name:
+                if current is None or current.name != name or (selected and current.target != case["target"]):
                     return [], f"{name} failed outside its own lines"
                 failed.append(current)
                 current = None

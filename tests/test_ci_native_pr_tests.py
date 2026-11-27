@@ -343,6 +343,8 @@ def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
     ("green", 1), ("stall", 2), ("normal assertion", 1), ("budget exhausted", 1),
     ("driver error", 1), ("unattributed file error", 1), ("suite mention", 1), ("early suite end", 1),
     ("truncated driver", 1), ("extra failure", 1), ("missing contract", 1), ("rerun skipped", 2),
+    ("before method", 1), ("after method", 1), ("after suite", 1), ("after driver", 1),
+    ("other running method", 1), ("wrong target assertion", 1), ("same method follow-on", 2),
     ("wrong bundle", 2), ("rerun red", 2), ("extra rerun case", 2),
 ])
 def test_selected_execution_recovers_only_the_stalled_method(tmp_path, monkeypatch, capfd, mode, calls):
@@ -355,6 +357,23 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
 ** TEST EXECUTE FAILED **
 """
     end = "Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310."
+    follow_on = f"Fixture.swift:23: error: {case} : XCTAssertTrue failed"
+    terminal = f"Test Case '{case}' failed (61 seconds)."
+    if mode == "before method":
+        log = follow_on + "\n" + log
+    elif mode == "after method":
+        log = log.replace(end, follow_on + "\n" + end)
+    elif mode == "after suite":
+        log = log.replace(end, end + "\n" + follow_on)
+    elif mode == "after driver":
+        log += follow_on + "\n"
+    elif mode == "other running method":
+        other = "-[AvibeTests.CommonTests testAlways]"
+        log = log.replace(end, f"Test Case '{other}' started.\n{follow_on}\nTest Case '{other}' passed.\n{end}")
+    elif mode in ("wrong target assertion", "same method follow-on"):
+        if mode == "wrong target assertion":
+            follow_on = follow_on.replace("AvibeTests.", "UnrelatedTests.")
+        log = log.replace(terminal, follow_on + "\n" + terminal)
     if mode == "driver error":
         log += "xcodebuild: error: Failed to collect test diagnostics: the test host disconnected.\n"
     elif mode == "unattributed file error":
@@ -398,7 +417,7 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(subprocess, "check_output", receipt)
     args = (["xcodebuild"], TARGET, [TARGET], {COMMON, PHONE}, [], env, tmp_path, 0 if mode == "budget exhausted" else 3)
-    if mode in ("green", "stall"):
+    if mode in ("green", "stall", "same method follow-on"):
         assert execute_tests(*args) == calls - 1
     else:
         with pytest.raises((ValueError, subprocess.CalledProcessError)):
