@@ -69,6 +69,7 @@ logger = logging.getLogger(__name__)
 
 CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
 RUN_LAST_ACTIVITY_METADATA_KEY = "last_activity_at"
+TASK_PAUSED_AFTER_CONSUMPTION = "paused_after_consumption"
 TASK_RETIREMENT_SCHEDULE_CONSUMED = "schedule_consumed"
 TASK_RETIREMENT_SCHEDULE_MISSED = "schedule_missed"
 TASK_SCHEDULE_CONSUMED_METADATA_KEY = "task_schedule_consumed"
@@ -295,7 +296,7 @@ def compute_next_run_at(
             if not run_at:
                 return None
             instant = resolve_run_at(run_at, timezone_name)
-            if instant <= now:
+            if instant.timestamp() <= now.timestamp():
                 # A one-shot whose time has already passed has no next run.
                 return None
             trigger = DateTrigger(run_date=instant)
@@ -740,6 +741,7 @@ class DefinitionWriteExpectation:
     #: definition carried no reclaim snapshot.
     snapshot_captured_at: Optional[str] = None
     agent_binding_revision: Optional[str] = None
+    paused_after_consumption: Optional[str] = None
 
     @classmethod
     def from_read(
@@ -758,6 +760,7 @@ class DefinitionWriteExpectation:
             deleted_at=str(deleted_at) if deleted_at else None,
             snapshot_captured_at=reclaim_snapshot_marker(metadata),
             agent_binding_revision=definition_agent_binding_revision(metadata),
+            paused_after_consumption=(metadata.get(TASK_PAUSED_AFTER_CONSUMPTION) if isinstance(metadata, dict) else None),
         )
 
 
@@ -826,6 +829,11 @@ def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
 
     return [
         unchanged_text(run_definitions.c.session_id, expect.session_id),
+        unchanged_text(
+            case((func.json_valid(run_definitions.c.metadata_json) == 1,
+                  func.json_extract(run_definitions.c.metadata_json, f"$.{TASK_PAUSED_AFTER_CONSUMPTION}"))),
+            expect.paused_after_consumption,
+        ),
         run_definitions.c.enabled == (1 if expect.enabled else 0),
         unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
         unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
@@ -3703,6 +3711,13 @@ class SQLiteBackgroundTaskStore:
                 # orphan-owner block after the SELECT and before this UPDATE.
                 reserve_write_lock(conn)
             values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
+            # Pausing an already consumed one-shot changes intent, not its run history.
+            if not enabled:
+                values["metadata_json"] = case(
+                    (run_definitions.c.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED,
+                     func.json_set(run_definitions.c.metadata_json, f"$.{TASK_PAUSED_AFTER_CONSUMPTION}", "paused")),
+                    else_=run_definitions.c.metadata_json,
+                )
             if enabled:
                 # Resuming may start a new lifecycle, and the old one must stop
                 # deciding the row's state when it does. The rule needs to know

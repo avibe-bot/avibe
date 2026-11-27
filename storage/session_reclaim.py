@@ -317,9 +317,12 @@ def reclaim_bound_definitions(
     # A scheduled Task is managed by its creating Session for projection, but
     # teardown must also reclaim Tasks whose execution target is the Session being
     # removed. Otherwise an owner-targeted Task can keep firing into a dead target.
+    from storage.agent_session_rows import reserve_write_lock
     from storage.background import (
         ORPHANED_TASK_OWNER_METADATA_KEY,
         TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        TASK_PAUSED_AFTER_CONSUMPTION,
+        TASK_RETIREMENT_SCHEDULE_CONSUMED,
         definition_owner_session_id,
         scheduled_definition_reclaimable_by_session_expression,
     )
@@ -335,17 +338,24 @@ def reclaim_bound_definitions(
         ),
     )
 
+    # Most Sessions have no definitions. Keep this probe read-only, but never
+    # base a pause or metadata write on it: a scheduler fire or schedule edit
+    # can win before teardown acquires the writer reservation.
+    live = (definition_binding, run_definitions.c.deleted_at.is_(None))
+    if conn.execute(select(run_definitions.c.id).where(*live).limit(1)).first() is None:
+        return summary
+    reserve_write_lock(conn)
     rows = (
         conn.execute(
             select(
                 run_definitions.c.id,
                 run_definitions.c.definition_type,
                 run_definitions.c.enabled,
+                run_definitions.c.retirement_reason,
                 run_definitions.c.session_id,
                 run_definitions.c.metadata_json,
             )
-            .where(definition_binding)
-            .where(run_definitions.c.deleted_at.is_(None))
+            .where(*live)
         )
         .mappings()
         .all()
@@ -382,6 +392,9 @@ def reclaim_bound_definitions(
                 "owner_session_id": sid,
             }
             metadata_changed = True
+        if mode == RECLAIM_PAUSE and row["retirement_reason"] == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            metadata[TASK_PAUSED_AFTER_CONSUMPTION] = "paused"
+            metadata_changed = True
         if metadata_changed:
             values["metadata_json"] = _dump_json(metadata)
         changed = False
@@ -396,23 +409,7 @@ def reclaim_bound_definitions(
             values["last_error"] = effective_reason
             counters.append("paused")
             changed = True
-        # The TWO predicates below RE-ASSERT what the SELECT above decided, because
-        # that read reserves nothing. pysqlite emits no ``BEGIN`` for a bare SELECT, so
-        # the write lock is taken at the first DML: on the hard-delete path
-        # (``_delete_agent_session_rows``) the reclaim helper is reached after only
-        # reads -- a resolved two-part scope key never upserts -- so a second
-        # connection can commit between the read and this statement.
-        # ``archive_session`` writes first and is serialised, but the shared helper
-        # cannot depend on which caller it is under.
-        #
-        # WHAT A BARE ``id`` MATCH LOSES: the user repoints this task / watch to
-        # another Session (``upsert_scheduled_task``, a full-row UPDATE) or deletes it
-        # inside the window. This statement then pauses or soft-deletes a definition
-        # that is now bound to a DIFFERENT, live session, and overwrites its
-        # ``session_settings_snapshot`` with the settings of the session it no longer
-        # belongs to -- so a later ``create_once`` rebind carries the wrong model
-        # forward. Both re-asserted: the binding this reclaim was decided for, and the
-        # live ``deleted_at`` state.
+        # Keep the live binding explicit in the UPDATE as well as in the locked read.
         current_binding = (
             run_definitions.c.session_id == sid
             if row["definition_type"] == "watch"
