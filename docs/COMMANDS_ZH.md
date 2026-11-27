@@ -768,13 +768,12 @@ vibe task add (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <ar
 - `--cwd <目录>`
 - `--timezone`
 
-命令任务（`--shell` 或写在 `--` 之后的 argv）执行时不会触发任何 Agent turn，
-除非设置了 `--on-failure agent`，否则不接受 session、scope 或 agent 相关参数。
+命令执行时不启动 Agent。新建周期命令默认在同一错误连续出现第二次时报告一次，交给创建任务的会话，或 `--session-id` 指定的维护会话。没有维护者或交接失败时，改发失败通知。成功后清除记录，不同错误重新计数。一次性任务失败立即通知。显式指定 `none` 或 `agent` 仍按每次失败处理；已有任务的策略不自动变更。
 `--timeout` 限制每次命令执行的时长（默认 21600 秒，`0` 表示不限制）。
 `--cwd` 指定命令的执行目录；当 `--on-failure agent` 绑定到已存在的 Session 时，
 它只作用于命令，升级 Session 保留自己的工作目录；配合 `--create-session` /
 `--create-session-per-run` 时，它同时决定新建 Session 的目录。不传该参数时，
-绑定了 Session 的命令会跟随那个 Session 的目录（触发时实时读取），其他命令则记录
+采用默认策略且绑定已有维护会话的周期命令保留创建时的目录；显式选 `agent` 并绑定已有会话的命令会跟随该会话的目录（触发时实时读取），其他命令则记录
 你执行 `vibe task add` 时所在的目录。完整规则见 `docs/CLI.md`。
 
 ### `vibe task update`

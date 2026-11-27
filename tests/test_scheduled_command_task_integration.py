@@ -169,7 +169,7 @@ def test_cli_created_command_task_runs_with_no_agent_turn(
 
     task = _store(tmp_path).list_tasks()[0]
     assert task.has_command, "the CLI-written definition is not seen as a command task"
-    assert task.on_failure == "none", f"on_failure did not survive: {task.on_failure!r}"
+    assert task.on_failure == "auto", f"the default did not survive CLI persistence: {task.on_failure!r}"
     assert not task.session_id and not task.session_key, (
         "a pure command task was given an Agent session; it must have none"
     )
