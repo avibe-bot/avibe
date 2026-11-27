@@ -1598,9 +1598,9 @@ final class AppModel: ObservableObject {
             signposter.emitEvent("runtime open stage", "\(String(describing: new.phase), privacy: .public)")
             // The first frame that uncovers the instance (`ColdStartTimings`).
             if new.phase == .showingCachedLive {
-                ColdStartTimings.shared.firstVisible(.cached)
+                ColdStartTimings.shared.firstVisible(.cached, instanceID: new.runtime.instance.id)
             } else if new.phase == .documentLoaded {
-                ColdStartTimings.shared.firstVisible(.live)
+                ColdStartTimings.shared.firstVisible(.live, instanceID: new.runtime.instance.id)
             }
         }
         if new.phase == .documentLoaded || new.phase == .failed,
@@ -1633,7 +1633,7 @@ final class AppModel: ObservableObject {
             )
         {
             Self.coldStartSignposter.emitEvent("opened before the session check")
-            ColdStartTimings.shared.openingRestoredInstance()
+            ColdStartTimings.shared.openingRestoredInstance(runtime.instance.id)
             openRuntime(runtime)
             let check = Self.coldStartSignposter.beginInterval("session check")
             let checked = try? await sessionCoordinator.refresh()
@@ -1666,7 +1666,10 @@ final class AppModel: ObservableObject {
                 opensOffline: hasUsableCachedPage(for:)
             ) {
                 sessionCoordinator.deactivateAccountSurface()
-                ColdStartTimings.shared.openingRestoredInstance()
+                // A launch from a tap or a shortcut is no restored open.
+                if pendingInstanceOpen == nil {
+                    ColdStartTimings.shared.openingRestoredInstance(runtime.instance.id)
+                }
                 openRuntime(runtime)
                 // Opened although listed offline (only for its cached page):
                 // the confirmed listing applies as after an open-first.
