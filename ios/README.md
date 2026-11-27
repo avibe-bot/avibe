@@ -1618,8 +1618,24 @@ build uses it), the deferred removal of fixture stores (it acts only on WebKit's
 ## TestFlight
 
 PR builds never sign or upload. `.github/workflows/ios-testflight.yml` is the
-only signing path, started by hand (`gh workflow run ios-testflight.yml`, or
-Actions → ios-testflight → Run workflow) and only from `master`. In one job it:
+only signing path, started by hand and only from `master`, with the exact
+commit to build:
+
+```sh
+gh workflow run ios-testflight.yml --ref master -f source_sha=<full 40-character master SHA>
+```
+
+(or Actions → ios-testflight → Run workflow, with `source_sha`). Its `source`
+job proves that commit before anything signs or uploads, and the build stops
+if it can't: the SHA must be full-length and on `master`, its own full master
+CI run must be green by the release backstop's rule
+(`scripts/ci_release_backstop.py`: a master `lint` run for exactly that SHA,
+`push` or `workflow_dispatch`, whose latest attempt succeeded; a cancelled or
+unfinished run never counts), and that run's `ios-shell / simulator` job must
+have succeeded. It prints the run and attempt it trusted
+(`scripts/testflight_source_gate.py`). A merge to `master` after the dispatch
+changes nothing: the build checks out the proven commit and confirms it. Then,
+in one job, it:
 
 1. runs `npm ci`, `npm run build:mobile`, the license notice generation, and
    the bundle verification;
