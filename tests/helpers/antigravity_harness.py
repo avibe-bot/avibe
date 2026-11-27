@@ -366,7 +366,9 @@ class AntigravityHarness:
     turns: list[asyncio.Task] = field(default_factory=list)
 
     def start_turn(self, request: AgentRequest) -> asyncio.Task:
-        task = asyncio.create_task(self.agent.handle_message(request))
+        # A lost protocol event must unwind the test even if both peers are waiting.
+        # This is a deadlock guard for the whole turn, not a readiness deadline.
+        task = asyncio.create_task(asyncio.wait_for(self.agent.handle_message(request), timeout=60))
         self.turns.append(task)
         return task
 
