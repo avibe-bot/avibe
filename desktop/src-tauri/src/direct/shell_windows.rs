@@ -59,7 +59,8 @@ pub fn ask(
     });
 }
 
-/// Routing here is given at creation: nothing is installed later.
+/// Routing here is given at creation: nothing is installed later, and
+/// nothing is told of it.
 pub fn install(
     _: &AppHandle,
     _: String,
@@ -67,6 +68,7 @@ pub fn install(
     _: Material,
     _: WindowRegistration,
     _: impl Fn() -> bool + Send + 'static,
+    _: impl FnOnce(bool) + Send + 'static,
 ) {
 }
 

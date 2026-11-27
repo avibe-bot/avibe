@@ -58,7 +58,7 @@ export const SettingsExperimentalPage: React.FC = () => {
   return (
     <SettingsPageShell
       activeTab="experimental"
-      title={t('settings.experimental.title')}
+      title={t('settings.sections.experimental')}
       subtitle={t('settings.experimental.subtitle')}
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface shadow-elevation-0">
@@ -76,8 +76,8 @@ export const SettingsExperimentalPage: React.FC = () => {
           </span>
           {status && (
             status.enabled
-              ? <Badge variant="success" className="shrink-0">{t('settings.experimental.on')}</Badge>
-              : <Badge variant="secondary" className="shrink-0">{t('settings.experimental.off')}</Badge>
+              ? <Badge variant="success" className="shrink-0">{t('devices.capability.stateOn')}</Badge>
+              : <Badge variant="secondary" className="shrink-0">{t('settings.general.appLock.off')}</Badge>
           )}
           <ChevronRight className="size-4 shrink-0 text-muted" />
         </Link>
@@ -99,9 +99,9 @@ const HookRow: React.FC<{ file: string; hook: SourceFilterHook }> = ({ file, hoo
         {failed ? (
           <Badge variant="destructive"><TriangleAlert className="size-3" />{t('settings.experimental.sourceFilter.lastFailed')}</Badge>
         ) : hook.found ? (
-          <Badge variant="success"><Check className="size-3" />{t('settings.experimental.sourceFilter.found')}</Badge>
+          <Badge variant="success"><Check className="size-3" />{t('common.found')}</Badge>
         ) : (
-          <Badge variant="secondary">{t('settings.experimental.sourceFilter.notFound')}</Badge>
+          <Badge variant="secondary">{t('common.notFound')}</Badge>
         )}
       </div>
       {failed && hook.last_failure && (
@@ -131,7 +131,7 @@ export const SettingsSourceFilterPage: React.FC = () => {
         className="inline-flex w-fit items-center gap-1.5 text-[12px] font-medium text-muted hover:text-foreground"
       >
         <ArrowLeft className="size-3.5" />
-        {t('settings.experimental.title')}
+        {t('settings.sections.experimental')}
       </Link>
       <SettingsPageShell
         activeTab="experimental"
