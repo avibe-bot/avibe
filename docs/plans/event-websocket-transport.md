@@ -73,3 +73,47 @@ matrix, reconnect/cursor replay, switching origins, close cleanup, and denial /
 revocation / viewer filtering through the shared authorization path. Main owns
 an independent different-family security review before Merge-ready. Signed
 Desktop acceptance is deferred. Never operate the active installed app windows.
+
+## Implementation evidence (2026-11-27)
+
+The Avibe branch was rebased to `0a01fa4af8`. Show SDK PR #79 is
+`e6e3aaed494e142000a28fca2727e2f9be9a0525`. The paired fixture records source and
+artifact SHA256 values, so its pre-commit provenance remains tied to the exact
+transport bytes tested.
+
+- 18 focused Runtime integration tests cover HTTP hook denial, exact Origin,
+  viewer filtering, real session revocation, private/public cursor replay,
+  session separation, client-message rejection, broker cleanup, capabilities,
+  and real TLS direct-ingress admission (anonymous rejected; cookie accepted).
+- 77 UI tests cover negotiation/denial/closing/switching plus the existing
+  ApiContext reconnect, heartbeat, catch-up, local-store and snapshot owners.
+- The production-compiled UI/SDK fixture passes 28 Chromium/WebKit scenarios.
+  Across both families, all three SSE compatibility combinations hold an
+  ordinary HTTP/1.1 fetch for 2005.5–2232 ms, until one occupied slot closes.
+  With eight new/new WS sources, Workbench fetches take 0.9–3.8 ms in Chromium
+  and 2–3 ms in WebKit; SDK fetches take 0.8–1.4 ms and 2–3 ms respectively.
+  WS denial never downgrades; SDK reconnect retains after_id; switching and
+  disposal prevent late delivery or retries. Every cleanup reaches zero streams.
+- The opt-in `tests/test_event_websocket_browser.py` runs the compiled real
+  clients against actual isolated Runtime routes, SQLite Show events and a
+  real ephemeral uvicorn listener. Four UI plus four SDK streams coexist;
+  persisted Chinese/emoji events replay after the supplied cursor; ordinary
+  `/api/session` reads take 6.5–8.2 ms in Chromium 156 and 8–13 ms in WebKit 27.2.
+  Closing all pages releases every broker subscription.
+- `npm run build`, UI lint/typecheck and changed-Python Ruff pass. The unsigned
+  headless engines are test evidence; no installed/signed Desktop was operated.
+
+Evidence is in the owner's `2026-11-27-desktop-full-acceptance/findings/`:
+`event-transport-browser-results.json`, individual `event-transport/*.json`,
+`event-real-runtime-browser.txt`, `event-python-regression.txt`, and
+`event-ui-regression.txt`.
+
+### First-load budget
+
+Unmodified master `fee3ce6063` measures home 624,602 B and chat 927,841 B, against
+624,640 / 927,744 B allowances (master already exceeds chat by 97 B). This PR
+on `0a01fa4af8` measures 625,575 / 928,804 B: +973 / +963 B for the shared
+transport/negotiation/parser, which is needed on the first screen. The separate
+budget gate exceeds its unchanged limits by 935 / 1,060 B. Main owns resolution
+of the baseline/allowance; this lane does not raise it or hide immediately used
+code behind an asynchronous import. PR #4365 is independent and not stacked.
