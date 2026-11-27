@@ -579,6 +579,8 @@ export interface ComposerHandle {
    *  it on a new paragraph. False, changing nothing, while the box is disabled,
    *  sending, or voice capture owns the draft. */
   restoreUnsent: (unsent: UnsentSubmission) => boolean;
+  /** Whether ``restoreUnsent`` would take a message now. */
+  canRestoreUnsent: () => boolean;
   /** Take a restored message back out of the box once the conversation shows
    *  it after all, only while the box holds exactly it. True when it emptied. */
   withdrawUnsent: (unsent: UnsentSubmission) => boolean;
@@ -2136,6 +2138,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // after the text the user is meant to edit.
       seedFocusRef.current = true;
     },
+    canRestoreUnsent: () => !(disabledRef.current || pendingRef.current || voiceDraftLocked()),
     restoreUnsent: ({ text, attachments: unsent }: UnsentSubmission) => {
       if (disabledRef.current || pendingRef.current || voiceDraftLocked()) return false;
       const typed = valueRef.current;

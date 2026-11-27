@@ -1858,7 +1858,7 @@ export const ChatPage: React.FC = () => {
      *  moved on meanwhile: try again shortly, or on the next change. */
     retry: boolean;
     /** Sends already looked for through older history and not found there: a
-     *  retry checks only the latest window and the queue for them. */
+     *  retry reads only the instance's latest rows and queue for them. */
     unheld: Set<string>;
     /** The one scheduled retry, and how many reads in a row have failed (its backoff). */
     timer: number | null;
@@ -1930,14 +1930,17 @@ export const ChatPage: React.FC = () => {
         });
         if (unsent.length === 0) return;
         if (stale()) return tryAgain();
+        // While the composer cannot take a message (voice owns the draft), wait for
+        // it here, without asking the instance anything.
+        if (!composerRef.current!.canRestoreUnsent()) return tryAgain();
         // Whether the instance holds a send is read from the instance, not from the
         // window on screen (a deep link may show an older stretch): its latest rows
-        // and queue, then older pages back to a little before the oldest send (the
-        // device's clock may differ from the instance's). A send already looked for
-        // this way is checked again only against what the page shows.
+        // and queue, every pass, then older pages back to a little before the oldest
+        // send (the device's clock may differ from the instance's), once per send.
         const shown = new Set(heldClientIdsRef.current!.ids);
-        const unread = unsent.filter((send) => !shown.has(send.clientId) && !current.unheld.has(send.clientId));
-        if (unread.length > 0) {
+        const unmatched = unsent.filter((send) => !shown.has(send.clientId));
+        const unread = unmatched.filter((send) => !current.unheld.has(send.clientId));
+        if (unmatched.length > 0) {
           const note = (rows: WorkbenchMessage[]) => {
             for (const row of rows) {
               const clientId = clientMessageIdOf(row);
@@ -1952,7 +1955,7 @@ export const ChatPage: React.FC = () => {
           note(tail.messages);
           note(queued.queued ?? []);
           const since = Math.min(...unread.map((send) => send.sentAt)) - RESTORE_CLOCK_SKEW_MS;
-          let cursor = tail.next_before_id ?? null;
+          let cursor = unread.length > 0 ? tail.next_before_id ?? null : null;
           let oldest = tail.messages[0];
           for (let page = 0; cursor && page < RESTORE_MAX_OLDER_PAGES; page += 1) {
             if (unread.every((send) => shown.has(send.clientId))) break;

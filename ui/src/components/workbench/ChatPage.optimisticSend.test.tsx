@@ -63,6 +63,7 @@ const mocks = vi.hoisted(() => ({
   composer: null as ComposerProps | null,
   // What the composer's handle does when the page gives back an unanswered send.
   restoreUnsent: vi.fn((_unsent: unknown) => true),
+  canRestoreUnsent: vi.fn(() => true),
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
 }));
 
@@ -171,6 +172,7 @@ vi.mock('./Composer', async () => {
       mocks.composer = props;
       useImperativeHandle(props.ref, () => ({
         restoreUnsent: (unsent: unknown) => mocks.restoreUnsent(unsent),
+        canRestoreUnsent: () => mocks.canRestoreUnsent(),
         withdrawUnsent: () => false,
       }));
       const [instance] = useState(() => {
@@ -340,6 +342,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   setLocalSnapshotPrincipal('local');
   mocks.readerPrincipal = null;
+  mocks.restoreUnsent.mockReset().mockReturnValue(true);
+  mocks.canRestoreUnsent.mockReset().mockReturnValue(true);
   mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
     mocks.events = events;
@@ -382,19 +386,23 @@ afterEach(async () => {
 });
 
 describe('ChatPage optimistic send', () => {
-  it('tries a restore the busy composer refused again, without waiting for the conversation to change', async () => {
+  const storeUnsent = () => window.localStorage.setItem(`avibe.unacknowledged-send.v1.${SESSION}:c-1`, JSON.stringify({
+    version: 1, sessionId: SESSION, clientId: 'c-1', principal: 'local', text: 'never answered', attachments: [], sentAt: Date.now(),
+  }));
+  const unsentKept = () => Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'));
+
+  it('waits for a busy composer without asking the instance, then gives the send back', async () => {
     // Voice capture owning the draft, say: nothing else in the chat may change
-    // once it ends, so the page cannot wait for a transcript or queue update.
-    window.localStorage.setItem(`avibe.unacknowledged-send.v1.${SESSION}:c-1`, JSON.stringify({
-      version: 1, sessionId: SESSION, clientId: 'c-1', principal: 'local', text: 'never answered', attachments: [], sentAt: Date.now(),
-    }));
-    mocks.restoreUnsent.mockReturnValueOnce(false);
+    // once it ends, so the page checks again on its own, and only asks the
+    // instance once the composer can take the message.
+    storeUnsent();
+    mocks.canRestoreUnsent.mockReturnValueOnce(false).mockReturnValueOnce(false);
     mocks.readerPrincipal = 'local';
     // The chat has older history; the send is not in it.
-    const olderReads: unknown[] = [];
+    const reads: unknown[] = [];
     const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
     mocks.api.listSessionMessages.mockImplementation(async (_id: string, params: { tail?: boolean }) => {
-      olderReads.push(params);
+      reads.push(params);
       return params.tail
         ? { messages: [latest], next_after_id: null, next_before_id: 'm1' }
         : { messages: [], next_after_id: null, next_before_id: null };
@@ -402,12 +410,34 @@ describe('ChatPage optimistic send', () => {
     mount();
     await act(async () => live.resolve({ ...bootstrap([latest]), next_before_id: 'm1' }));
 
-    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(2), { timeout: 3000 });
-    // The instance is read once (its latest rows, then older ones); the retry only asks the composer again.
-    expect(olderReads).toEqual([expect.objectContaining({ tail: true }), expect.objectContaining({ beforeId: 'm1' })]);
+    await waitFor(() => expect(mocks.canRestoreUnsent).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(reads).toEqual([]);
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1), { timeout: 3000 });
     expect(mocks.restoreUnsent).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'never answered' }));
-    expect(Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'))).toEqual([]);
+    expect(reads).toEqual([expect.objectContaining({ tail: true }), expect.objectContaining({ beforeId: 'm1' })]);
+    expect(unsentKept()).toEqual([]);
+  });
+
+  it('asks the instance again before a refused restore is retried', async () => {
+    // Refused once; meanwhile the instance took the original send, which a chat
+    // shown on an older stretch would never draw.
+    storeUnsent();
+    mocks.restoreUnsent.mockReturnValueOnce(false);
+    mocks.readerPrincipal = 'local';
+    let taken = false;
+    const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
+    mocks.api.listSessionMessages.mockImplementation(async () => ({
+      messages: taken ? [latest, message('m2', 'never answered', { type: 'user', metadata: { client_message_id: 'c-1' } })] : [latest],
+      next_after_id: null,
+      next_before_id: null,
+    }));
+    mount();
+    await act(async () => live.resolve(bootstrap([latest])));
+
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
+    taken = true;
+    await waitFor(() => expect(unsentKept()).toEqual([]), { timeout: 3000 });
+    expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a typed send on the device until it is answered, and leaves a spoken one to its voice take', async () => {
