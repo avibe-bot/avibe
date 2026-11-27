@@ -3247,31 +3247,28 @@ def add_public_show_representation_vary(response: Response) -> Response:
 # remote session was accepted as current, and only what the instance counted
 # for it. Not an address, and nothing a client did not already choose.
 #
-# Never on an answer a cache may give again without asking the instance (an
-# avatar, a static file): replayed after the client changed paths, or by a
-# shared cache to another client, the word would be about a request the
-# instance never saw.
+# Only on an answer that itself says ``no-store``: one no cache may keep, so
+# the word cannot be given again for a request the instance never saw (after
+# the client changed paths, or by a shared cache to another client). Opting
+# in by that directive, not out by a list of what makes an answer reusable:
+# a lifetime, a validator added after this hook, or a policy forwarded from
+# a Show runtime can then never carry it. The page's session check, which
+# begins every stream, is such an answer.
 REQUEST_VIA_HEADER = "X-Avibe-Via"
-_REUSABLE_CACHE_DIRECTIVES = ("max-age", "s-maxage", "immutable", "public")
+_QUOTED_HEADER_VALUE = re.compile(r'"[^"]*"')
 
 
-def _answer_may_be_reused(response: Response) -> bool:
-    """A cache may give this answer again without asking the instance."""
-    cache_control = response.headers.get("Cache-Control", "").lower()
-    if "no-store" in cache_control or "no-cache" in cache_control:
-        return False
-    # An explicit lifetime, or one a cache may work out for itself.
-    return (
-        any(directive in cache_control for directive in _REUSABLE_CACHE_DIRECTIVES)
-        or "Expires" in response.headers
-        or "Last-Modified" in response.headers
-    )
+def _answer_is_never_stored(response: Response) -> bool:
+    """The answer carries an actual ``no-store`` directive."""
+    # A quoted argument (``no-cache="Set-Cookie"``) is not a directive.
+    directives = _QUOTED_HEADER_VALUE.sub("", response.headers.get("Cache-Control", "")).split(",")
+    return any(directive.split("=", 1)[0].strip().lower() == "no-store" for directive in directives)
 
 
 @app.after_request
 def add_request_via_header(response: Response) -> Response:
     via = getattr(g, "remote_request_via", None)
-    if via is not None and not _answer_may_be_reused(response):
+    if via is not None and _answer_is_never_stored(response):
         response.headers[REQUEST_VIA_HEADER] = via
     return response
 
