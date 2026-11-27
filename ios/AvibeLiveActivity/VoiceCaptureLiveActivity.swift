@@ -259,22 +259,40 @@ struct VoiceCaptureGlyph: View {
     }
 }
 
+/// The take's time, drawn trailing in a slot as wide as its widest value
+/// (`0:00`, in the same font: the timer stops at `timerCap`, five minutes).
+/// A timer's text has no bounded width of its own: unbounded, it filled the
+/// expanded island's trailing region and stood off-centre above the title
+/// (11-26); fixed at its ideal size it lays a card out infinitely wide (the
+/// Turn card's black block, 11-26).
 struct VoiceCaptureClock: View {
     let state: VoiceCaptureAttributes.ContentState
 
     var body: some View {
         if state.phase == .listening {
-            // Stops at the cap: a timer never runs on for a take no one holds.
-            Text(
-                timerInterval: state.startedAt...state.startedAt.addingTimeInterval(VoiceCaptureShown.timerCap),
-                countsDown: false
-            )
+            slot {
+                // Stops at the cap: a timer never runs on for a take no one holds.
+                Text(
+                    timerInterval: state.startedAt...state.startedAt.addingTimeInterval(VoiceCaptureShown.timerCap),
+                    countsDown: false
+                )
+            }
         } else if let endedAt = state.endedAt, state.phase == .sending {
-            Text(Duration.seconds(endedAt.timeIntervalSince(state.startedAt)),
-                 format: .time(pattern: .minuteSecond))
+            slot {
+                Text(Duration.seconds(endedAt.timeIntervalSince(state.startedAt)),
+                     format: .time(pattern: .minuteSecond))
+            }
         } else {
             EmptyView()
         }
+    }
+
+    private func slot(_ time: () -> Text) -> some View {
+        Text(verbatim: "0:00").hidden()
+            .overlay(alignment: .trailing) {
+                time().multilineTextAlignment(.trailing).lineLimit(1)
+            }
+            .monospacedDigit()
     }
 }
 
