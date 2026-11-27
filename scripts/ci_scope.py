@@ -278,15 +278,19 @@ def main() -> int:
         advisory_ios = heavy_routes(scope)['ios-shell'] if mode == 'PR' else 'skip'
         dispatch = plan['jobs']
         groups = set()
+        native_receipt = ''
         if portfolio:
-            from scripts.ci_fast_pr import selected
+            from scripts.ci_fast_pr import native_path_receipt, selected
             groups, chosen = selected(scope)
+            if 'ios-shell' in chosen:
+                native_receipt = native_path_receipt(os.environ['GITHUB_SHA'], scope.verified_paths)
             dispatch = {job: 'run' if job in chosen else 'skip' for job in PRODUCERS}
             advisory_ios = 'skip'  # selected native PR paths call the real required job instead
         shards = unit_shards(portfolio)
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a", encoding="utf-8") as stream:
+                stream.write(f"native_path_receipt={native_receipt}\n")
                 stream.write(f"advisory_ios={advisory_ios}\n")
                 stream.write(f"portfolio={str(portfolio).lower()}\nsensitive={str(bool(groups)).lower()}\n")
                 stream.write(f"unit_shards={json.dumps(shards)}\nunit_total=[{len(shards)}]\n")

@@ -586,7 +586,10 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     )
     assert set(workflow[True]) == {"workflow_call"}
     inputs = workflow[True]["workflow_call"]["inputs"]
-    assert set(inputs) == {"fast-native"}
+    assert set(inputs) == {"fast-native", "native-path-receipt"}
+    assert inputs['native-path-receipt']['type'] == 'string'
+    assert _jobs()['changes']['outputs']['native_path_receipt'] == '${{ steps.scope.outputs.native_path_receipt }}'
+    assert _jobs()['ios-shell']['with']['native-path-receipt'] == '${{ needs.changes.outputs.native_path_receipt }}'
     assert inputs["fast-native"]["type"] == "boolean" and inputs["fast-native"]["default"] is False
     assert _jobs()["ios-shell"]["with"]["fast-native"] == (
         "${{ github.event_name == 'pull_request' && needs.changes.outputs.portfolio == 'true' }}"
@@ -646,6 +649,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert steps.index(prepare_selector) < prepare_index
     fast_script = fast_step['run']
     assert 'source "$RUNNER_TEMP/native-pr-python/bin/activate"' in fast_script
+    assert fast_step['env']['NATIVE_PATH_RECEIPT'] == '${{ inputs.native-path-receipt }}'
     assert fast_step['name'] == 'Compile the app and run the native PR contracts'
     assert not fast_step.get('continue-on-error') and 'set -euo pipefail' in fast_script
     assert 'python3 -m scripts.ci_native_pr_tests' in fast_script

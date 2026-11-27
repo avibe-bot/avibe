@@ -13,7 +13,8 @@ import subprocess
 import tempfile
 import time
 
-from scripts.ci_docs_only import classify
+from scripts.ci_docs_only import git
+from scripts.ci_fast_pr import native_path_receipt
 
 SCHEMES = {"AvibeTests": "Avibe", "AvibeSheetFixtureTests": "AvibeSheetFixture"}
 CONTRACTS = {
@@ -229,12 +230,27 @@ def verify_membership(target, sources, derived):
         raise ValueError(f"{target}: touched sources missing from the compiler file list: {needed - compiled}")
 
 
+def verified_merge_paths(root, expected):
+    """Recompute the Linux classifier's exact merge diff without replaying the event on Mac."""
+    merge = git(root, 'rev-parse', 'HEAD').decode().strip()
+    parents = git(root, 'show', '-s', '--format=%P', merge).decode().split()
+    if len(parents) != 2:
+        raise ValueError('Native PR checkout is not a two-parent merge')
+    base = parents[0]
+    raw = git(root, 'diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv',
+              '--ignore-submodules=none', base, merge, '--')
+    if not raw.endswith(b'\0'):
+        raise ValueError('Empty or incomplete native PR diff')
+    paths = tuple(raw[:-1].decode().split('\0'))
+    if native_path_receipt(merge, paths) != expected:
+        raise ValueError('Native PR checkout or paths do not match the changes job')
+    return base, paths
+
+
 def main():
     env = os.environ
-    scope = classify(
-        env["GITHUB_EVENT_NAME"], json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text()), env["GITHUB_SHA"], Path.cwd()
-    )
-    changes = changed_sources(scope.verified_paths, Path.cwd(), "HEAD^1")
+    base, paths = verified_merge_paths(Path.cwd(), env['NATIVE_PATH_RECEIPT'])
+    changes = changed_sources(paths, Path.cwd(), base)
     for target, scheme in SCHEMES.items():
         sources = changes.get(target, [])
         if not sources and target != "AvibeTests":

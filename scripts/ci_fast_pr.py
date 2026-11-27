@@ -1,6 +1,7 @@
 """Fixed Linux PR portfolio plus the union of path-specific native/contract proofs."""
 from __future__ import annotations
 
+import hashlib
 import re
 
 from scripts.ci_docs_only import Scope, WINDOWS_CONTROL_IPC_PATHS
@@ -22,6 +23,13 @@ PROOFS = {
 EXTRA = frozenset().union(*PROOFS.values())
 IDENTITY = re.compile(r'auth|sign.?in|log.?in|log.?out|sign.?out|admission|onboard|pairing|binding|passkey|credential|remote.?access|device.?(?:claim|trust)|access.?token', re.I)
 SHARED = re.compile(r'(^|/)([^/]*\.lock|package-lock\.json|pnpm-lock\.yaml|requirements[^/]*\.txt|pyproject\.toml|package\.json|cargo\.toml|go\.mod|go\.sum|package\.resolved|tsconfig[^/]*\.json|vite\.config\.[^/]+|conftest\.py|\.pre-commit-config\.yaml|dockerfile[^/]*)$', re.I)
+
+
+def native_path_receipt(merge: str, paths: tuple[str, ...]) -> str:
+    """Bind the classifier's complete path set to its immutable synthetic merge."""
+    if not re.fullmatch(r'[a-f0-9]{40}', merge) or not paths:
+        raise ValueError('Missing verified native PR range')
+    return hashlib.sha256('\0'.join((merge, *sorted(paths))).encode()).hexdigest()
 
 
 def path_groups(path: str) -> set[str]:

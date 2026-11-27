@@ -3,6 +3,10 @@ name: ios-shell
 on:
   workflow_call:
     inputs:
+      native-path-receipt:
+        description: Digest of the exact synthetic merge and paths verified by the caller's changes job
+        type: string
+        default: ''
       fast-native:
         description: Build the app and exercise the named native PR contracts instead of the full simulator suite
         type: boolean
@@ -140,6 +144,8 @@ jobs:
 
       - name: Compile the app and run the native PR contracts
         if: inputs.fast-native
+        env:
+          NATIVE_PATH_RECEIPT: ${{ inputs.native-path-receipt }}
         run: |
           set -euo pipefail
           source "$RUNNER_TEMP/native-pr-python/bin/activate"

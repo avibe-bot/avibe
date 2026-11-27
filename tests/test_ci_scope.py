@@ -332,6 +332,21 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     assert {k for k, v in json.loads(routed['dispatch_jobs']).items() if v == 'run'} == LINUX | extras
     assert json.loads(routed['unit_shards']) == list(range(24))
     assert routed['advisory_ios'] == 'skip'
+    assert outputs['native_path_receipt'] == ''
+    if 'ios-shell' in extras:
+        from scripts.ci_fast_pr import native_path_receipt
+        from scripts.ci_native_pr_tests import verified_merge_paths
+        shallow = tmp_path / 'native-worker'
+        subprocess.run(['git', 'clone', '--depth=2', repo.as_uri(), str(shallow)], check=True)
+        assert verified_merge_paths(shallow, routed['native_path_receipt']) == (event['pull_request']['base']['sha'], (path,))
+        for stale in ('', native_path_receipt('1' * 40, (path,)), native_path_receipt(sha, ('wrong/path',))):
+            with pytest.raises(ValueError, match='do not match'):
+                verified_merge_paths(shallow, stale)
+        subprocess.run(['git', 'checkout', '--detach', 'HEAD^2'], cwd=shallow, check=True)
+        with pytest.raises(ValueError, match='two-parent merge'):
+            verified_merge_paths(shallow, routed['native_path_receipt'])
+    else:
+        assert routed['native_path_receipt'] == ''
     output.unlink()
     result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
