@@ -344,6 +344,8 @@ public key and sequence floor, along with confirmation of signer custody. Never 
 private key or an export of the signing store in Git. Installing the publication tools
 does not publish an index or commission a client.
 
+For signer setup, run `scripts/model_hub_engine_signing_key.py` from a trusted checkout with `python3 -I`; use `--dry-run` to exercise the steps without changing GitHub (discard its public key). Run it alone: no one else writes this secret meanwhile. GitHub’s environment-secret API can create or update, not atomically create only. Use a repository admin login with classic `repo` scope or fine-grained **Environments: write**, not `admin:org`. If the key is lost or leaked, generate a new key with a new key ID, explicitly replace the signing bundle, and ship the new public root in a new Avibe release. Old installations keep trusting the old root until they upgrade; there is no overlap between roots.
+
 After commissioning, merging **one file**, `patches/model-hub-engine-channel.json`, to
 protected `master` authorizes an update. Its `payload` is a complete channel payload:
 repository, channel, sequence, fixed `issued_at`, installable releases (each with its
