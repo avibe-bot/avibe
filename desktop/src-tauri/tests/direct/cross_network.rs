@@ -1,6 +1,6 @@
 use super::{
     connect::Authority,
-    offer::Offer,
+    offer::{Offer, Verdict},
     path::TrialRelay,
     AddressFamily::{Ipv4, Ipv6},
     SelectedPath::{Lan, Punched, Relay},
@@ -108,7 +108,7 @@ fn bootstrap_and_authenticated_migration_have_distinct_authority() {
     for addr in [
         "127.0.0.1:80",
         "169.254.1.2:80",
-        "100.64.0.1:80",
+        "198.18.0.1:80",
         "192.0.2.1:80",
         "224.0.0.1:80",
         "[fe80::1]:80",
@@ -132,4 +132,104 @@ fn bootstrap_and_authenticated_migration_have_distinct_authority() {
     ] {
         assert!(parse(json!([{"kind":kind,"address":addr}]), Value::Null).is_none());
     }
+}
+
+/// Two computers on one overlay network (a tailnet), or behind one carrier's
+/// NAT, reach each other in IPv4 shared address space. iroh selects that
+/// path as soon as it answers; the link then names it a local one instead of
+/// ending. Nothing there is ever dialled first.
+#[test]
+fn a_selected_path_in_shared_address_space_is_a_local_one() {
+    let peer = SecretKey::from_bytes(&[2; 32]).public();
+    let wrong = SecretKey::from_bytes(&[3; 32]).public();
+    let ip = |a: &str| TransportAddr::Ip(a.parse().unwrap());
+    let home = "https://aps1-1.relay.n0.iroh.link./";
+    let relayed = parse(json!([]), json!({"policy":"public-trial-v1","url":home})).unwrap();
+    let wide = parse(json!([{"kind":"ipv6","address":"[2606:4700::1]:123"}]), Value::Null).unwrap();
+    let only_lan = parse(json!([{"kind":"lan","address":"10.1.1.2:123"}]), Value::Null).unwrap();
+    for offer in [&relayed, &wide] {
+        // The whole of 100.64.0.0/10 and no more: the addresses on either
+        // side of it are public ones, and stay hole-punched.
+        for (addr, kind) in [
+            ("100.63.255.255:80", Punched(Ipv4)),
+            ("100.64.0.0:80", Lan(Ipv4)),
+            ("100.100.1.2:4433", Lan(Ipv4)),
+            ("100.127.255.255:80", Lan(Ipv4)),
+            ("100.128.0.0:80", Punched(Ipv4)),
+        ] {
+            assert_eq!(offer.selected(peer, &ip(addr)), Some(kind), "{addr}");
+            // Only on the peer the grant names.
+            assert_eq!(offer.selected(wrong, &ip(addr)), None, "{addr}");
+        }
+        assert_eq!(offer.selected(peer, &ip("100.64.0.1:0")), None);
+        // The other classes without a name stay refused.
+        for addr in [
+            "198.18.0.1:80",
+            "169.254.1.2:80",
+            "[64:ff9b::6440:1]:80",
+            "[::ffff:100.64.0.1]:80",
+        ] {
+            assert_eq!(offer.selected(peer, &ip(addr)), None, "{addr}");
+        }
+    }
+    // A grant for listed local addresses alone carries only those.
+    assert_eq!(only_lan.selected(peer, &ip("100.64.0.1:80")), None);
+    // No offer makes such an address one to dial: it is not listed under any
+    // kind, and an offer of nothing else is no offer.
+    for kind in ["lan", "ipv4", "ipv6"] {
+        let listed = json!([{"kind":kind,"address":"100.64.0.1:80"}]);
+        assert!(parse(listed.clone(), Value::Null).is_none(), "{kind}");
+        let offer = parse(listed, json!({"policy":"public-trial-v1","url":home})).unwrap();
+        assert_eq!(offer.bootstrap().ip_addrs().count(), 0, "{kind}");
+    }
+}
+
+/// A link is judged by the path iroh has selected, which is the one that
+/// carries its data. A candidate that is open and not selected never ends a
+/// link whose selected path is accepted; a selected path the grant does not
+/// permit is refused whatever else is open, the relay included.
+#[test]
+fn a_link_is_judged_by_its_selected_path_alone() {
+    let ip = |a: &str| TransportAddr::Ip(a.parse().unwrap());
+    let home = "https://aps1-1.relay.n0.iroh.link./";
+    let relay = || TransportAddr::Relay(home.parse().unwrap());
+    let offer = parse(json!([]), json!({"policy":"public-trial-v1","url":home})).unwrap();
+    let judge = |paths: Vec<(bool, TransportAddr)>| offer.judge(offer.id, paths);
+
+    assert_eq!(judge(vec![(true, relay())]), Verdict::Accepted(Relay));
+    // A refused candidate beside the selected relay, or beside a selected
+    // local path: the link stays as it is.
+    for refused in ["198.18.0.1:80", "169.254.1.2:80", "[64:ff9b::1]:80"] {
+        assert_eq!(
+            judge(vec![(false, ip(refused)), (true, relay())]),
+            Verdict::Accepted(Relay),
+            "{refused}"
+        );
+        assert_eq!(
+            judge(vec![(true, ip("10.1.1.2:80")), (false, ip(refused)), (false, relay())]),
+            Verdict::Accepted(Lan(Ipv4)),
+            "{refused}"
+        );
+        // Selected, it carries the data: refused, though the relay is open.
+        assert_eq!(
+            judge(vec![(false, relay()), (true, ip(refused))]),
+            Verdict::Refused,
+            "{refused}"
+        );
+    }
+    // The selection moves from the relay to a path in shared address space:
+    // the link goes on, as a local one.
+    assert_eq!(
+        judge(vec![(false, relay()), (true, ip("100.100.1.2:4433"))]),
+        Verdict::Accepted(Lan(Ipv4))
+    );
+    // Nothing selected is not a refusal.
+    assert_eq!(
+        judge(vec![(false, relay()), (false, ip("10.1.1.2:80"))]),
+        Verdict::Unselected
+    );
+    assert_eq!(judge(Vec::new()), Verdict::Unselected);
+    // Another peer's path is refused, whatever its address.
+    let other = SecretKey::from_bytes(&[3; 32]).public();
+    assert_eq!(offer.judge(other, vec![(true, relay())]), Verdict::Refused);
 }
