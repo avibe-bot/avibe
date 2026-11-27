@@ -107,7 +107,7 @@ def _binary_identity(configured: str) -> tuple[str, dict[str, Any]]:
     return resolved, {"path": real, "stat": [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]}
 
 
-def global_config_files() -> list[Path]:
+def _global_config_files() -> list[Path]:
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     config_dir = (Path(xdg_config_home).expanduser() if xdg_config_home else Path.home() / ".config") / "opencode"
     candidates = [
@@ -137,6 +137,13 @@ def _user_config_digest(path: Path) -> Optional[str]:
     return _digest(payload)
 
 
+def _stable_auth_entry(entry):
+    """Ignore only the fields rewritten by a token refresh, not the account."""
+    if isinstance(entry, dict) and entry.get("type") == "oauth":
+        return {key: value for key, value in entry.items() if key not in _VOLATILE_OAUTH_FIELDS}
+    return entry
+
+
 def _credential_digest(path: Path) -> Optional[str]:
     raw = _file_bytes(path)
     if raw is None:
@@ -147,15 +154,7 @@ def _credential_digest(path: Path) -> Optional[str]:
         return hashlib.sha256(raw).hexdigest()
     if not isinstance(entries, dict):
         return hashlib.sha256(raw).hexdigest()
-    normalized = {
-        provider_id: (
-            {key: value for key, value in entry.items() if key not in _VOLATILE_OAUTH_FIELDS}
-            if isinstance(entry, dict) and entry.get("type") == "oauth"
-            else entry
-        )
-        for provider_id, entry in entries.items()
-    }
-    return _digest(normalized)
+    return _digest({provider_id: _stable_auth_entry(entry) for provider_id, entry in entries.items()})
 
 
 @dataclass(frozen=True, eq=False)
@@ -186,7 +185,7 @@ def read_launch_inputs(binary: str, renew_epoch: int, settings: Any = None) -> O
         binary_identity=binary_identity,
         renew_epoch=renew_epoch,
         caller_context_path=server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"],
-        user_config={str(path): _user_config_digest(path) for path in global_config_files()},
+        user_config={str(path): _user_config_digest(path) for path in _global_config_files()},
         credentials=_credential_digest(get_opencode_auth_path()),
     )
 

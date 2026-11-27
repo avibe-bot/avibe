@@ -155,9 +155,10 @@ def inventory_scope(backend: str, config, *, cwd: str | None = None) -> NativeSc
 
             value = account_cache_identity(settings)
         elif backend == "opencode":
-            from modules.agents.opencode.picker_inventory import identity
+            from modules.agents.opencode.picker_inventory import binding
 
-            value = identity(config, cwd or config.runtime.default_cwd)
+            bound = binding(config, cwd)
+            return NativeScope(*bound, backend) if bound else None
         else:
             return None
         return NativeScope(value, value, backend) if value else None
