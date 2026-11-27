@@ -479,11 +479,8 @@ async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(t
     monkeypatch.setattr(agy_agent_module, "_STOP_CANCEL_GRACE_SECONDS", 0.2)
     async with make_agent_harness(tmp_path) as h:
         stop_req = make_request(message="wait_cancel", workdir=h.workdir)
-        turn_task = asyncio.create_task(h.agent.handle_message(stop_req))
-        for _ in range(100):
-            if h.agent.runtime_has_active_turns():
-                break
-            await asyncio.sleep(0.02)
+        turn_task = h.start_turn(stop_req)
+        await h.wait_for_signal(h.controller.token_noted, turn_task)
         assert h.agent.runtime_has_active_turns()
         sess = h.agent._sessions[stop_req.composite_session_id]
         if blocked_drain:
@@ -704,7 +701,8 @@ async def test_idle_eviction_respects_runtime_ownership_and_renewal(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_sibling_runtime_isolation_and_running_agents_end(tmp_path: Path) -> None:
-    async with make_agent_harness(tmp_path) as h:
+    # These peers run concurrently; this test needs no cross-process resume store.
+    async with make_agent_harness(tmp_path, server_config={"inMemoryState": True}) as h:
         req_a = make_request(message="hello-a", workdir=h.workdir, base_session_id="slack_thread_A", session_key="slack::channel::C1")
         req_b = make_request(message="hello-b", workdir=h.workdir, base_session_id="slack_thread_B", session_key="slack::channel::C2")
         await asyncio.gather(h.agent.handle_message(req_a), h.agent.handle_message(req_b))
@@ -717,6 +715,7 @@ async def test_sibling_runtime_isolation_and_running_agents_end(tmp_path: Path) 
         override_key = f"slack_override_key:{h.workdir}"
         req_ov = make_request(message="hello-override", workdir=h.workdir, base_session_id="slack_thread_override", session_key="slack::channel::C3", platform_specific={"backend_composite_session_id": override_key})
         await h.agent.handle_message(req_ov)
+        assert "echo:hello-override" in h.controller.events("result")[-1][1]
         sess_ov = h.agent._sessions[override_key]
         assert h.agent.runtime_activation_identity_for_request(req_ov) == sess_ov.activation
         assert _resolve_live_state(h.controller, backend="antigravity", session_id=None, composite_key=override_key, base_session_id="slack_thread_override") == "idle"
@@ -776,8 +775,8 @@ async def test_pre_tool_text_flushes_as_narration_before_end_turn_without_duplic
 
         sess.client.session_prompt = _scripted_prompt  # type: ignore[method-assign]
 
-        turn_task = asyncio.create_task(h.agent.handle_message(make_request(message="multi-step", workdir=h.workdir)))
-        await asyncio.wait_for(paused_after_tool.wait(), timeout=5.0)
+        turn_task = h.start_turn(make_request(message="multi-step", workdir=h.workdir))
+        await h.wait_for_signal(paused_after_tool, turn_task)
 
         # Pre-tool narration is immediate; the single tool row waits for completion.
         assert [(kind, text) for kind, text, _ in h.controller.emitted] == [
@@ -787,7 +786,7 @@ async def test_pre_tool_text_flushes_as_narration_before_end_turn_without_duplic
         assert h.controller.events("result") == []
 
         resume_prompt.set()
-        await asyncio.wait_for(turn_task, timeout=5.0)
+        await turn_task
 
         results = h.controller.events("result")
         assert len(results) == 1
@@ -915,11 +914,8 @@ async def _start_steer_chain(h):
     # Exercise the same synchronous identity lookup that on_native_start performs.
     observed = []
     h.controller.agent_service.mark_runtime_turn_started = lambda *_a, **_kw: observed.append(h.agent.steering_native_turn_id(target))
-    task = asyncio.create_task(h.agent.handle_message(req))
-    async def wait_started():
-        while not h.controller.token_notes:
-            await asyncio.sleep(0.01)
-    await asyncio.wait_for(wait_started(), 5)
+    task = h.start_turn(req)
+    await h.wait_for_signal(h.controller.token_noted, task)
     session = h.agent._sessions[req.composite_session_id]
     return req, target, task, session, observed
 
@@ -965,7 +961,7 @@ async def test_native_steer_chain_accepts_without_settling_superseded_prompt(tmp
             assert h.agent.steering_native_turn_id(target) == observed[0]
             assert not task.done() and h.controller.events("result") == []
         await _chain_control(session, "finish")
-        await asyncio.wait_for(task, 3)
+        await task
         assert len(h.controller.events("result")) == 1
         assert h.controller.events("result")[0][1] == "FIRST BANANA"
         assert len(h.controller.events("toolcall")) == 1
@@ -989,11 +985,11 @@ async def test_native_steer_without_matching_active_chain_does_not_write(tmp_pat
             request = _chain_steer(h, target, native_id="wrong-chain" if state == "mismatch" else None)
             if state == "settled":
                 await _chain_control(session, "finish")
-                await asyncio.wait_for(task, 3)
+                await task
             receipt = await h.agent.steer_active_turn(request, target)
             if state == "mismatch":
                 await _chain_control(session, "finish")
-                await asyncio.wait_for(task, 3)
+                await task
         assert receipt.outcome == (SteerOutcome.REFUSED if state == "mismatch" else SteerOutcome.NOT_ACTIVE)
         if state == "mismatch":
             assert receipt.reason == "native_turn_mismatch"
@@ -1008,7 +1004,7 @@ async def test_stop_steered_chain_settles_once_and_late_superseded_error_is_igno
         receipt = await h.agent.steer_active_turn(_chain_steer(h, target), target)
         assert receipt.outcome == SteerOutcome.UNKNOWN
         assert await h.agent.handle_stop(req)
-        await asyncio.wait_for(task, 3)
+        await task
         results = list(h.controller.events("result"))
         assert len(results) == 1 and results[0][2]["output"].settled_by == SETTLED_BY_STOPPED
         await _chain_control(session, "late_error")
@@ -1032,7 +1028,7 @@ async def test_unknown_steer_reconciles_receipt_without_resending_even_after_set
         # Retrying an attempt id observes its evidence instead of resending the text.
         assert (await h.agent.steer_active_turn(request, target)).outcome == SteerOutcome.ACCEPTED
         await _chain_control(session, "finish")
-        await asyncio.wait_for(task, 3)
+        await task
         assert h.agent.reconciliation_steer_target(reconcile) == target
         assert (await h.agent.reconcile_steer_attempt(reconcile, target)).outcome == SteerOutcome.ACCEPTED
         assert len(h.rpcs("session/prompt")) == 2
@@ -1075,7 +1071,7 @@ async def test_complete_latest_reply_wins_concurrent_stop(tmp_path, steered, rep
         if not reply_after_stop:
             await _chain_control(session, "chunk", text="finished answer")
         assert await h.agent.handle_stop(req)
-        await asyncio.wait_for(task, 3)
+        await task
         results = h.controller.events("result")
         assert len(results) == 1 and results[0][1] == "finished answer"
         assert results[0][2]["output"].settled_by != SETTLED_BY_STOPPED

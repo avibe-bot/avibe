@@ -47,6 +47,7 @@ import {
 } from '../lib/native';
 import { holdPageRequests, installPageFetchCounting, pageConnectionsQuiet } from '../lib/pageConnections';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
+import { createWorkbenchEventSource } from '../lib/workbenchEventSource';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
@@ -3561,7 +3562,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let source: EventSource;
     try {
-      source = new EventSource('/api/events');
+      source = createWorkbenchEventSource('/api/events');
     } catch (err) {
       setWorkbenchEventConnectionState('reconnecting');
       getWorkbenchEventReconnectLoop().failed();

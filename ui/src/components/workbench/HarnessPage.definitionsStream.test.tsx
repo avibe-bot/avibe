@@ -20,8 +20,8 @@ vi.mock('../../lib/apiFetch', () => ({
   apiFetch,
   isApiFetchDeadlineAbort: () => false,
   ensureCsrfToken: async () => 'csrf-not-real',
-  withApiDeadline: async <T,>(run: (signal: AbortSignal) => Promise<T>) =>
-    run(new AbortController().signal),
+  withApiDeadline: async <T,>(_milliseconds: number, signal: AbortSignal | undefined, run: (signal: AbortSignal) => Promise<T>) =>
+    run(signal ?? new AbortController().signal),
   recoverRemoteAuthFromSessionProbe: async () => {},
 }));
 vi.mock('./CapabilityTabs', () => ({ CapabilityTabs: () => null }));
@@ -63,7 +63,7 @@ class FakeEventSource {
   }
 
   emit(type: string, data: unknown): void {
-    const event = { data: JSON.stringify(data) } as MessageEvent;
+    const event = new MessageEvent(type, { data: JSON.stringify(data) });
     for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event);
   }
 
@@ -85,6 +85,10 @@ void i18n.use(initReactI18next).init({
 const HARNESS_BOOTSTRAP = '/api/harness/bootstrap';
 
 const jsonFor = (path: string) => {
+  if (new URL(path, window.location.href).pathname === '/api/session') {
+    // A successfully admitted old Runtime selects native EventSource.
+    return { remote: false };
+  }
   if (path.startsWith(HARNESS_BOOTSTRAP)) {
     return {
       counts: { tasks: {}, watches: {}, runs: {} },

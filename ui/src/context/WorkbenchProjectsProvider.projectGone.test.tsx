@@ -17,6 +17,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const apiFetch = vi.hoisted(() => vi.fn());
 const showToast = vi.hoisted(() => vi.fn());
 
+vi.mock('../lib/workbenchEventSource', () => ({
+  // This suite exercises ApiContext's reconnect/catch-up owner. Transport
+  // negotiation and real sockets are covered by the adapter/browser suites.
+  createWorkbenchEventSource: (url: string) => new EventSource(url),
+}));
+
 vi.mock('../lib/apiFetch', () => ({
   apiFetch,
   isApiFetchDeadlineAbort: () => false,

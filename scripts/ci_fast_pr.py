@@ -1,6 +1,7 @@
 """Fixed Linux PR portfolio plus the union of path-specific native/contract proofs."""
 from __future__ import annotations
 
+import hashlib
 import re
 
 from scripts.ci_docs_only import Scope, WINDOWS_CONTROL_IPC_PATHS
@@ -22,6 +23,13 @@ PROOFS = {
 EXTRA = frozenset().union(*PROOFS.values())
 IDENTITY = re.compile(r'auth|sign.?in|log.?in|log.?out|sign.?out|admission|onboard|pairing|binding|passkey|credential|remote.?access|device.?(?:claim|trust)|access.?token', re.I)
 SHARED = re.compile(r'(^|/)([^/]*\.lock|package-lock\.json|pnpm-lock\.yaml|requirements[^/]*\.txt|pyproject\.toml|package\.json|cargo\.toml|go\.mod|go\.sum|package\.resolved|tsconfig[^/]*\.json|vite\.config\.[^/]+|conftest\.py|\.pre-commit-config\.yaml|dockerfile[^/]*)$', re.I)
+
+
+def native_path_receipt(merge: str, paths: tuple[str, ...]) -> str:
+    """Bind the classifier's complete path set to its immutable synthetic merge."""
+    if not re.fullmatch(r'[a-f0-9]{40}', merge) or not paths:
+        raise ValueError('Missing verified native PR range')
+    return hashlib.sha256('\0'.join((merge, *sorted(paths))).encode()).hexdigest()
 
 
 def path_groups(path: str) -> set[str]:
@@ -61,11 +69,13 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
     if '.github/request-sensitive-checks.md' in paths:
         return set(PROOFS), set(LINUX | EXTRA)
     named = set().union(*(matched_proofs(p) for p in paths))
+    desktop = any(p.startswith('desktop/') for p in paths)
     if not named:
-        return set(), set(LINUX)
+        return ({'desktop'}, set(LINUX | PROOFS['desktop'])) if desktop else (set(), set(LINUX))
     if named == {'ios-app'}:
         # App build inputs require the simulator, not unrelated historical heuristics.
-        return {'ios'}, set(LINUX | PROOFS['ios'])
+        groups = {'ios', 'desktop'} if desktop else {'ios'}
+        return groups, set(LINUX).union(*(PROOFS[g] for g in groups))
     groups = set().union(*(path_groups(p) for p in paths))
     if 'engine-publication' in named:
         groups.add('shared')

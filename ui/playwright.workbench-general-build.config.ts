@@ -16,7 +16,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e/workbench-general',
-  testMatch: ['**/desktop-account-menu.spec.ts', '**/composer-mention-picker.spec.ts', '**/pending-voice-offline.spec.ts', '**/inbox-skeleton-loading.spec.ts'],
+  testMatch: ['**/desktop-account-menu.spec.ts', '**/composer-mention-picker.spec.ts', '**/pending-voice-offline.spec.ts', '**/inbox-skeleton-loading.spec.ts', '**/show-share-loading.spec.ts'],
   outputDir: './e2e/.artifacts/workbench-general/run',
   workers: 1,
   retries: 0,
@@ -27,5 +27,8 @@ export default defineConfig({
     url: 'http://127.0.0.1:5213/',
     timeout: 180_000,
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'webkit-show-share', testMatch: '**/show-share-loading.spec.ts', use: { ...devices['Desktop Safari'] } },
+  ],
 });

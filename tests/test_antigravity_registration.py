@@ -28,7 +28,7 @@ from modules.agents.catalog import (
     get_agent_backend_descriptor,
 )
 from vibe import api
-from vibe.backend_model_catalog import backend_model_snapshot
+from vibe.backend_model_catalog import backend_model_snapshot, load_bundled_catalog
 from vibe.cli_health import cli_version
 from vibe.cli_repair import identify_repair_source
 from vibe.desktop_backends import BACKEND_SPECS, DesktopBackendError, install_desktop_backend
@@ -358,7 +358,7 @@ def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, mon
 
 
 def test_bundled_antigravity_menu_matches_agy_1_5_17():
-    bundle = json.loads((Path(__file__).parents[1] / "vibe/data/backend_models.json").read_text())["backends"]["antigravity"]["models"]
+    bundle = load_bundled_catalog()["backends"]["antigravity"]["models"]
     expected = {
         "gemini-4-neon": ["low", "medium", "high", "xhigh"],
         "gemini-4-carbon": ["low", "medium", "high"],

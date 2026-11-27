@@ -12,7 +12,7 @@
 // A budget is a decision, not a ratchet: raise it in the same change that needs
 // the room, and say why there; move code off the first screen first
 // (src/routePages.ts, src/lib/lazyPage.ts).
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -37,6 +37,15 @@ const BUDGETS = {
   home: 600 * KiB,
   chat: 900 * KiB,
 };
+
+// An early warning, so the first anyone hears of a route nearing its budget is
+// not every PR going red at once (2026-11-27). A route within this margin of its
+// budget still passes, and says so: in the log, and in CI as a warning
+// annotation on the run plus a line in its job summary. Crossing that line means
+// the next locale slice (or another move off the first screen) gets scheduled;
+// it is not a reason to delete copy or to raise a budget.
+const WARNING_MARGIN = 10 * KiB;
+const PLAN = 'docs/plans/web-ui-first-load.md';
 
 const dist = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const html = readFileSync(join(dist, 'index.html'), 'utf8');
@@ -74,16 +83,30 @@ const routes = {
 };
 const css = sum(attributeFiles.filter((file) => file.endsWith('.css')));
 
+const kib = (bytes) => (bytes / KiB).toFixed(1);
 let over = false;
+const near = [];
 for (const [route, files] of Object.entries(routes)) {
   const bytes = sum(files);
   const budget = BUDGETS[route];
-  const verdict = bytes <= budget ? 'ok' : 'OVER';
-  if (bytes > budget) over = true;
-  console.log(`${route.padEnd(5)} ${(bytes / KiB).toFixed(1).padStart(7)} KiB gzip JS in ${files.length} files`
-    + ` (budget ${budget / KiB} KiB) ${verdict}`);
+  const room = budget - bytes;
+  const verdict = room < 0 ? 'OVER' : room < WARNING_MARGIN ? 'ok, near the budget' : 'ok';
+  if (room < 0) over = true;
+  else if (room < WARNING_MARGIN) near.push({ route, bytes, budget, room });
+  console.log(`${route.padEnd(5)} ${kib(bytes).padStart(7)} KiB gzip JS in ${files.length} files`
+    + ` (budget ${budget / KiB} KiB, ${kib(Math.abs(room))} KiB ${room < 0 ? 'over' : 'left'}) ${verdict}`);
 }
-console.log(`css   ${(css / KiB).toFixed(1).padStart(7)} KiB gzip`);
+console.log(`css   ${kib(css).padStart(7)} KiB gzip`);
+for (const { route, bytes, budget, room } of near) {
+  const message = `${route} first load is ${kib(bytes)} KiB, ${kib(room)} KiB under its ${budget / KiB} KiB budget`
+    + ` (warning line ${(budget - WARNING_MARGIN) / KiB} KiB). Schedule the next locale slice or another move off`
+    + ` the first screen (${PLAN}); do not delete copy or raise the budget for it.`;
+  console.log(`\nWarning: ${message}`);
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    console.log(`::warning title=First-screen budget: ${route} near its limit::${message}`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `> [!WARNING]\n> ${message}\n\n`);
+  }
+}
 if (over) {
   console.error('\nThe first screen grew past its budget. Load what it does not draw on demand'
     + ' (src/routePages.ts, src/lib/lazyPage.ts), or raise the budget in'
