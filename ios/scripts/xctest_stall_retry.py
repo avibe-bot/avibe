@@ -7,24 +7,31 @@ WebKit reports it unresponsive and kills it, or the whole simulator says nothing
 for two minutes. A test whose wait runs through such a stall fails at its own
 bound, and the same test on the same head passes on the next run.
 
-Given the log of one ``xcodebuild test`` run, this writes the
+``rerun``: given the log of one ``xcodebuild test`` run, this writes the
 ``-only-testing:`` arguments that run every failed test once more to ``--out``,
-one per line, and exits 0,
-only when the run completed, no test process crashed or was restarted, at most
+one per line, and exits 0, only when the run completed, no test process crashed or was restarted, at most
 ``--max-tests`` tests failed, and every failed test's own lines show one of
 these stalls. Anything else exits 1 with the reason: that failure stands.
 
 Each stalled test is written as a ``::warning::`` annotation, followed by the
-log lines that matched, so a test that passes only on its second run still
-shows on the run with its evidence.
+log lines that matched, and as a line of the job summary, so a test that
+passes only on its second run still shows on the run with its evidence. The
+matched lines also go to ``--evidence``, which the workflow uploads as the
+``ios-simulator-stall`` artifact.
+
+``count``: how many ios-shell jobs reran a test after a stall, per week, from
+those artifacts (``gh`` signed in).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # A process WebKit launched for the App took this long to come up. A healthy
@@ -48,6 +55,7 @@ _BOOTSTRAP = re.compile(
     r"\[iOS fixture\] stage=bootstrap settled, elapsed=(?P<seconds>\d+(?:\.\d+)?) seconds"
 )
 _RUN_ENDED = "Test Suite 'All tests' failed"
+ARTIFACT = "ios-simulator-stall"
 _RESTARTED = "Restarting after unexpected exit, crash, or test timeout"
 
 
@@ -123,28 +131,78 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
     return failed, None
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("log", type=Path, help="the xcodebuild test log")
-    parser.add_argument("--out", type=Path, required=True, help="where the arguments go")
-    parser.add_argument("--max-tests", type=int, default=3)
-    args = parser.parse_args(argv)
-
+def _rerun(args: argparse.Namespace) -> int:
     lines = args.log.read_text(encoding="utf-8", errors="replace").splitlines()
     failed, reason = stalled_failures(lines, args.max_tests)
     if reason:
         print(f"Not rerun: {reason}.", file=sys.stderr)
         return 1
+    record = []
     for case in failed:
         print(
             f"::warning title=Simulator stall::{case.name} failed through a "
             f"simulator stall ({'; '.join(case.stalls)}) and runs once more."
         )
         print(f"Matched lines of {case.name}:")
+        record.append(f"{case.name}: {'; '.join(case.stalls)}")
         for line in case.evidence:
             print(f"  {line}")
+            record.append(f"  {line}")
     args.out.write_text("".join(f"{case.only_testing}\n" for case in failed), encoding="utf-8")
+    # Uploaded as the `ios-simulator-stall` artifact, which `count` counts.
+    args.evidence.write_text("\n".join(record) + "\n", encoding="utf-8")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write("### Simulator stall: rerun once\n\n")
+            handle.writelines(f"- `{case.name}`: {'; '.join(case.stalls)}\n" for case in failed)
+            handle.write(f"\nWeekly count: `python3 ios/scripts/{Path(__file__).name} count`\n")
     return 0
+
+
+def weekly_counts(created: list[str], weeks: int, today: date) -> list[tuple[date, int]]:
+    """Count stall artifacts per ISO week (Monday first), newest week first."""
+    this_monday = today - timedelta(days=today.weekday())
+    mondays = [this_monday - timedelta(weeks=n) for n in range(weeks)]
+    counts = dict.fromkeys(mondays, 0)
+    for stamp in created:
+        day = datetime.fromisoformat(stamp.replace("Z", "+00:00")).date()
+        monday = day - timedelta(days=day.weekday())
+        if monday in counts:
+            counts[monday] += 1
+    return list(counts.items())
+
+
+def _count(args: argparse.Namespace) -> int:
+    listed = subprocess.run(
+        [
+            "gh", "api", "--paginate",
+            f"repos/{args.repo}/actions/artifacts?name={ARTIFACT}&per_page=100",
+            "--jq", ".artifacts[].created_at",
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    print(f"ios-shell jobs that reran a test after a simulator stall ({ARTIFACT} artifacts):")
+    for monday, count in weekly_counts(listed, args.weeks, datetime.now(timezone.utc).date()):
+        print(f"  week of {monday.isoformat()}: {count}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    rerun = commands.add_parser("rerun", help="decide on one failed run from its log")
+    rerun.add_argument("log", type=Path, help="the xcodebuild test log")
+    rerun.add_argument("--out", type=Path, required=True, help="where the arguments go")
+    rerun.add_argument("--evidence", type=Path, required=True, help="where the matched lines go")
+    rerun.add_argument("--max-tests", type=int, default=3)
+    rerun.set_defaults(run=_rerun)
+    count = commands.add_parser("count", help="jobs that reran a stalled test, per week")
+    count.add_argument("--repo", default="avibe-bot/avibe")
+    count.add_argument("--weeks", type=int, default=4)
+    count.set_defaults(run=_count)
+    args = parser.parse_args(argv)
+    return args.run(args)
 
 
 if __name__ == "__main__":

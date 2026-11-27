@@ -9,16 +9,20 @@ against a stand-in ``xcodebuild``.
 
 from __future__ import annotations
 
+from datetime import date
 import os
 from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "ios" / "scripts"))
+from xctest_stall_retry import weekly_counts  # noqa: E402
 
 STARTED = "Test Case '-[AvibeTests.{cls} {method}]' started."
 FAILED = "Test Case '-[AvibeTests.{cls} {method}]' failed (131.147 seconds)."
@@ -120,6 +124,7 @@ def run_step(
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "RUNNER_TEMP": str(runner_temp),
         "SIMULATOR_ID": "SIM",
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
     }
     result = subprocess.run(
         [shutil.which("bash") or "bash", "-e", "-c", step["run"]],
@@ -149,8 +154,14 @@ def test_a_failure_the_simulator_stalled_runs_once_more_alone(tmp_path: Path, ca
     # The lines that matched are printed, so the rerun shows its evidence.
     stalls = [SLOW_LAUNCH, UNRESPONSIVE, GPU_UNRESPONSIVE, SLOW_BOOTSTRAP]
     printed = result.stdout.split("Matched lines of ", 1)[1]
+    evidence = (tmp_path / "temp/ios-simulator-stall.txt").read_text(encoding="utf-8")
     for line in RERUN[case]:
         assert (f"  {line}\n" in printed) == (line in stalls)
+        assert (f"  {line}\n" in evidence) == (line in stalls)
+    summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    for only in expected:
+        name = only.split("/", 1)[1].replace("/", ".")
+        assert f"- `{name}`: " in summary
 
 
 @pytest.mark.parametrize("case", STANDS)
@@ -160,6 +171,8 @@ def test_any_other_failure_stands_without_a_rerun(tmp_path: Path, case: str) -> 
     assert result.returncode != 0
     assert len(calls) == 1
     assert "Not rerun:" in result.stderr
+    assert not (tmp_path / "temp/ios-simulator-stall.txt").exists()
+    assert not (tmp_path / "summary.md").exists()
 
 
 def test_a_rerun_that_fails_again_fails_the_step(tmp_path: Path) -> None:
@@ -167,3 +180,31 @@ def test_a_rerun_that_fails_again_fails_the_step(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert len(calls) == 2
+
+
+def test_the_stall_evidence_is_uploaded_for_the_weekly_count() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["simulator"]["steps"]
+    upload, = [step for step in steps if step.get("name") == "Upload simulator stall evidence"]
+    assert upload["if"] == "${{ always() }}"
+    assert upload["with"]["name"] == "ios-simulator-stall"
+    assert upload["with"]["path"] == "${{ runner.temp }}/ios-simulator-stall.txt"
+    assert upload["with"]["if-no-files-found"] == "ignore"
+    test_step, = [step for step in steps if step.get("name") == "Run XCTest on iPhone Simulator"]
+    assert steps.index(test_step) < steps.index(upload)
+
+
+def test_the_weekly_count_groups_reruns_by_iso_week() -> None:
+    # Thursday 2026-11-26: this week starts Monday 11-23.
+    created = [
+        "2026-11-23T00:00:01Z",  # this week's first second
+        "2026-11-26T19:07:51Z",
+        "2026-11-22T23:59:59Z",  # last week's last second
+        "2026-11-16T08:00:00Z",
+        "2026-11-02T08:00:00Z",  # older than the weeks asked for
+    ]
+    assert weekly_counts(created, 3, date(2026, 11, 26)) == [
+        (date(2026, 11, 23), 2),
+        (date(2026, 11, 16), 2),
+        (date(2026, 11, 9), 0),
+    ]

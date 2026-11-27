@@ -149,8 +149,9 @@ jobs:
           # The hosted simulator now and then stalls WebKit's processes for
           # 30 s or more. A failed test whose own lines show such a stall runs
           # once more, alone; any other failure stands. See the script.
-          python3 ios/scripts/xctest_stall_retry.py "$RUNNER_TEMP/AvibeTests.log" \
-            --out "$RUNNER_TEMP/AvibeTests.rerun"
+          python3 ios/scripts/xctest_stall_retry.py rerun "$RUNNER_TEMP/AvibeTests.log" \
+            --out "$RUNNER_TEMP/AvibeTests.rerun" \
+            --evidence "$RUNNER_TEMP/ios-simulator-stall.txt"
           rerun=()
           while IFS= read -r only; do rerun+=("$only"); done < "$RUNNER_TEMP/AvibeTests.rerun"
           xctest -resultBundlePath "$RUNNER_TEMP/AvibeTestsRerun.xcresult" \
@@ -166,6 +167,19 @@ jobs:
             ${{ runner.temp }}/AvibeTestsRerun.xcresult
           if-no-files-found: ignore
           retention-days: 7
+
+      # Only a job that reran a test after a simulator stall has one; the
+      # matched lines are its content. `xctest_stall_retry.py count` reads
+      # these per week, so a rising count is seen.
+      - name: Upload simulator stall evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-simulator-stall
+          path: ${{ runner.temp }}/ios-simulator-stall.txt
+          if-no-files-found: ignore
+          retention-days: 90
+          overwrite: true
 
       # The fixture's hold-to-talk page (HoldTouchUITests): the App follows a
       # press only with the microphone allowed.
