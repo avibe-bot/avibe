@@ -205,6 +205,9 @@ def test_unresolved_extension_cannot_hide_behind_known_class(tmp_path, swift_par
         ("scheme-with-mach", 1, False),
         ("mixed-errors", 1, False),
         ("scheme-second", 2, False),
+        ("fatal-no-catalog", 1, False),
+        ("fatal-generic-catalog", 1, False),
+        ("fatal-pure-host", 2, True),
     ],
 )
 def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypatch, capsys, mode, calls, passes):
@@ -253,6 +256,15 @@ def test_enumeration_retry_is_bounded_and_not_a_test_receipt(tmp_path, monkeypat
             if mode == "mixed-errors":
                 reasons.insert(0, "Test host crashed")
             data, output = {"errors": reasons, "values": []}, ("" if mode == "scheme-second" else mach)
+        elif mode.startswith("fatal-") and len(seen) == 1:
+            data = {"errors": ["Unable to enumerate"], "values": []} if mode == "fatal-generic-catalog" else None
+            rc = 65
+            cause = (
+                "Test runner exited unexpectedly"
+                if mode == "fatal-pure-host"
+                else "Scheme Avibe is not currently configured for the test action."
+            )
+            output = mach + "\nxcodebuild: error: " + cause
         elif mode == "nonzero":
             rc = 65
         if data is not None:

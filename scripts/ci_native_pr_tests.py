@@ -172,6 +172,11 @@ ENUM_HOST_DEATH = re.compile(
 )
 
 
+# Match explicit fatal records, not words like "Finished with error" in the
+# launch report above. Apply the same cause policy to these and catalog.errors.
+ENUM_FATAL_LINE = re.compile(r"^\s*(?:xcodebuild:\s*)?(?:fatal\s+)?error:\s*(.*)$", re.I)
+
+
 def enumerate_tests(common, target, temp):
     for attempt in (1, 2):
         with tempfile.TemporaryDirectory(dir=temp) as directory:
@@ -208,11 +213,14 @@ def enumerate_tests(common, target, temp):
             # No catalog, or explicitly no values: only known discovery errors
             # are compatible with a host crash. A separate error vetoes recovery.
             diagnostic = proc.stdout
-            for error in errors or []:
+            fatal_messages = [match[1] for line in proc.stdout.splitlines() if (match := ENUM_FATAL_LINE.match(line))]
+            for error in [*(errors or []), *fatal_messages]:
                 if not isinstance(error, str) or not (
                     ENUM_HOST_DEATH.fullmatch(error.strip().rstrip(".")) or error == "Unable to enumerate"
                 ):
-                    raise ValueError(f"{target} enumeration attempt {attempt}: unclassified catalog error")
+                    raise ValueError(
+                        f"{target} enumeration attempt {attempt}: independent or unknown fatal diagnostic: {str(error)[:300]}"
+                    )
                 diagnostic += "\n" + error
             signature = ENUM_HOST_DEATH.search(diagnostic)
             if attempt == 2 or not signature:
