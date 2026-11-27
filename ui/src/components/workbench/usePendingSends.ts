@@ -68,7 +68,8 @@ const appendShown = (live: WorkbenchMessage[], shown: PendingSend[], place: Pend
   return here.length > 0 ? [...live, ...here.map((entry) => entry.message)] : live;
 };
 
-const clientMessageIdOf = (message: WorkbenchMessage): string | null => {
+/** The client id a server row carries for the send it came from, if any. */
+export const clientMessageIdOf = (message: WorkbenchMessage): string | null => {
   const value = message.metadata?.[CLIENT_MESSAGE_ID];
   return typeof value === 'string' && value ? value : null;
 };

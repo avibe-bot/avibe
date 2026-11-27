@@ -26,6 +26,8 @@ function instance({ receives }: { receives: boolean }) {
     receives,
     principal: 'reader-a',
     held: [] as Array<Record<string, unknown>>,
+    /** Rows above the chat's latest window: a page reads them only by paging back. */
+    older: [] as Array<Record<string, unknown>>,
     sent: [] as Sent[],
     draft: { text: '', updated_at: null as string | null },
     revision: 0,
@@ -76,7 +78,7 @@ async function serveChat(page: Page, chat: Instance) {
     session, capabilities: { can_chat: true },
     agents: [{ id: 'agt-codex', name: 'codex', backend: 'codex', enabled: true }],
     default_agent_name: 'codex', config: { ui: {} },
-    messages: chat.held, queued: [], next_after_id: null, next_before_id: null,
+    messages: chat.held, queued: [], next_after_id: null, next_before_id: chat.older.length ? 'msg-window-start' : null,
     draft: chat.draft, turn_state: turnState,
   } }));
   await page.route(`**/api/sessions/${SESSION_ID}`, (route) => route.fulfill({ json: session }));
@@ -91,7 +93,10 @@ async function serveChat(page: Page, chat: Instance) {
   await page.route(`**/api/sessions/${SESSION_ID}/messages**`, (route) => {
     const request = route.request();
     if (request.method() !== 'POST') {
-      return route.fulfill({ json: { messages: chat.held, next_before_id: null, next_after_id: null } });
+      const before = new URL(request.url()).searchParams.get('before_id');
+      return route.fulfill({ json: before === 'msg-window-start'
+        ? { messages: chat.older, next_before_id: null, next_after_id: null }
+        : { messages: chat.held, next_before_id: chat.older.length ? 'msg-window-start' : null, next_after_id: null } });
     }
     const body = request.postDataJSON() as {
       text: string; content?: { attachments?: Array<{ token: string }> }; metadata: Record<string, string>;
@@ -198,6 +203,29 @@ test('a send the instance received before the page went shows in the conversatio
   await expect(editor(next)).toHaveText('');
   await expect(chip(next)).toHaveCount(0);
   expect(await records(next)).toEqual([]);
+  expect(chat.sent).toHaveLength(1);
+  expect(denied).toEqual([]);
+});
+
+test('a received send pushed out of the latest window by later rows is found further back, not given back', async ({ page }) => {
+  const chat = instance({ receives: true });
+  const denied = await serveChat(page, chat);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await open(page, `/chat/${SESSION_ID}`);
+
+  await send(page, chat, 'Received long ago');
+  await tearDown(page);
+  // A long turn followed: the message now sits above the window a chat opens with.
+  chat.older = chat.held.splice(0);
+  chat.held.push({
+    ...chat.older[0], id: 'msg-later', author: 'agent', type: 'result', source: 'agent', author_id: null,
+    text: 'A later answer', metadata: {}, created_at: '2026-11-27T13:30:00Z', updated_at: '2026-11-27T13:30:00Z',
+  });
+  const next = await reopen(page, chat, denied);
+
+  await expect(next.locator('main').getByText('A later answer')).toBeVisible();
+  await expect.poll(() => records(next)).toEqual([]);
+  await expect(editor(next)).toHaveText('');
   expect(chat.sent).toHaveLength(1);
   expect(denied).toEqual([]);
 });

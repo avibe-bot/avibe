@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => ({
     can_use_vault_secrets: false,
   },
   composerMounts: 0,
+  readerPrincipal: null as string | null,
   sessionActionsWritable: [] as boolean[],
   routePicker: null as null | { onChange: (changes: Record<string, unknown>) => void },
   events: null as null | {
@@ -60,6 +61,8 @@ const mocks = vi.hoisted(() => ({
     onConnected: () => void;
   },
   composer: null as ComposerProps | null,
+  // What the composer's handle does when the page gives back an unanswered send.
+  restoreUnsent: vi.fn((_unsent: unknown) => true),
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
 }));
 
@@ -84,7 +87,7 @@ vi.mock('../../context/WorkbenchInboxContext', () => ({
 }));
 
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({ capabilities: mocks.capabilities }),
+  useInstanceAuthorization: () => ({ capabilities: mocks.capabilities, readerPrincipal: mocks.readerPrincipal }),
 }));
 
 vi.mock('../../context/ComposerBridgeContext', () => ({
@@ -162,10 +165,14 @@ vi.mock('./useShowPageAnnotation', () => ({
 // records how often it mounted, which draft it was handed, and renders the
 // actions row (the route picker) the page gives it.
 vi.mock('./Composer', async () => {
-  const { useState } = await import('react');
+  const { useImperativeHandle, useState } = await import('react');
   return {
-    Composer: (props: ComposerProps) => {
+    Composer: (props: ComposerProps & { ref?: React.Ref<unknown> }) => {
       mocks.composer = props;
+      useImperativeHandle(props.ref, () => ({
+        restoreUnsent: (unsent: unknown) => mocks.restoreUnsent(unsent),
+        withdrawUnsent: () => false,
+      }));
       const [instance] = useState(() => {
         mocks.composerMounts += 1;
         return mocks.composerMounts;
@@ -332,6 +339,7 @@ beforeEach(() => {
   mocks.composer = null;
   vi.clearAllMocks();
   setLocalSnapshotPrincipal('local');
+  mocks.readerPrincipal = null;
   mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
     mocks.events = events;
@@ -374,6 +382,22 @@ afterEach(async () => {
 });
 
 describe('ChatPage optimistic send', () => {
+  it('tries a restore the busy composer refused again, without waiting for the conversation to change', async () => {
+    // Voice capture owning the draft, say: nothing else in the chat may change
+    // once it ends, so the page cannot wait for a transcript or queue update.
+    window.localStorage.setItem(`avibe.unacknowledged-send.v1.${SESSION}:c-1`, JSON.stringify({
+      version: 1, sessionId: SESSION, clientId: 'c-1', principal: 'local', text: 'never answered', attachments: [], sentAt: Date.now(),
+    }));
+    mocks.restoreUnsent.mockReturnValueOnce(false);
+    mocks.readerPrincipal = 'local';
+    await openChat();
+
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(mocks.restoreUnsent).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'never answered' }));
+    expect(Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'))).toEqual([]);
+  });
+
   it('keeps a typed send on the device until it is answered, and leaves a spoken one to its voice take', async () => {
     // lib/unacknowledgedSends: a typed message lives only there once the composer
     // empties. A spoken one is kept by its voice take (lib/voiceTakeStore) until
