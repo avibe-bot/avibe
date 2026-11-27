@@ -90,6 +90,47 @@ def test_removed_model_leaves_every_surface_until_restored(owner, monkeypatch):
     assert surfaces() == {"web": everywhere, "cli": everywhere, "im": everywhere, "restore": []}
 
 
+def test_surfaces_follow_the_accounts_inventory_and_keep_removals(owner, monkeypatch):
+    """A model the backend lists for this account appears without a release; removing it keeps it gone."""
+    from config import paths
+    from core.handlers import direct_inventory_identity
+    from core.handlers.direct_model_menu import PickerModel, publish_inventory
+    from core.handlers.settings_handler import SettingsHandler
+
+    client, headers = owner
+    monkeypatch.setattr(api, "codex_agents", lambda cwd: {"ok": True, "agents": []})
+    account = {"id": None}
+    monkeypatch.setattr(direct_inventory_identity, "inventory_identity", lambda backend, config, cwd=None: account["id"])
+    db = paths.get_sqlite_state_path()
+    publish_inventory(
+        "codex",
+        "account-a",
+        [PickerModel("gpt-7-sol", "GPT-7-Sol", reasoning_efforts=("low", "high")), PickerModel("gpt-6.2-sol")],
+        db_path=db,
+    )
+    url = "/api/backend/codex/models/visibility"
+
+    def menus():
+        return (
+            client.get("/api/codex/models").get_json()["models"],
+            [row["value"] for row in api.route_menu_options("codex")["models"]],
+            _im_menu(SettingsHandler._load_codex_route_menu, "codex"),
+        )
+
+    # Unproven account: the public catalog, never another account's answer.
+    assert menus() == (["gpt-6.2-sol", "gpt-5.5"],) * 3
+    account["id"] = "account-a"
+    assert menus() == (["gpt-7-sol", "gpt-6.2-sol"],) * 3
+    web = client.get("/api/codex/models").get_json()
+    assert web["model_labels"]["gpt-7-sol"] == "GPT-7-Sol"
+    assert [entry["value"] for entry in web["reasoning_options"]["gpt-7-sol"]] == ["__default__", "low", "high"]
+
+    assert client.put(url, json={"model_id": "gpt-7-sol", "removed": True}, headers=headers).status_code == 200
+    publish_inventory("codex", "account-a", [PickerModel("gpt-7-sol"), PickerModel("gpt-6.2-sol")], db_path=db)
+    assert menus() == (["gpt-6.2-sol"],) * 3
+    assert client.get(url).get_json()["removed"] == [{"id": "gpt-7-sol", "label": "gpt-7-sol"}]
+
+
 def test_im_form_reads_the_hub_menu_for_a_hub_backend(monkeypatch):
     """Before, the IM form offered Claude and Codex their Direct catalog even on the gateway."""
     from core.handlers.settings_handler import SettingsHandler

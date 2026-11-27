@@ -8685,11 +8685,10 @@ def _direct_menu_rows(ids) -> list:
 
 
 def _direct_menu_ids(backend: str, ids, *, removed: bool = False) -> list[str]:
-    """The IDs of ``ids`` (current supply, in order) a Direct menu offers, or with ``removed`` the ones it hides.
+    """The IDs of ``ids`` (OpenCode's live options, in order) its Direct menu offers, or with ``removed`` hides.
 
-    No account snapshot is read yet: the native producers (#4411) prove an identity, and until a
-    surface has one the contract's reader uses None, so the current catalog is the supply.
-    Storage IO: call off the event loop.
+    OpenCode's options are read live from its own server, so they are the supply; the other backends read
+    their account's inventory in ``direct_model_menu``. Storage IO: call off the event loop.
     """
     from core.handlers.direct_model_menu import read_menu
 
@@ -8697,23 +8696,63 @@ def _direct_menu_ids(backend: str, ids, *, removed: bool = False) -> list[str]:
     return [row.id for row in menu.models]
 
 
-def direct_model_menu(backend: str, *, schedule_refresh: bool = True, removed: bool = False) -> dict:
-    """A Claude, Codex or Antigravity catalog snapshot as its Direct menu shows it.
+def _direct_menu_identity(backend: str) -> Optional[str]:
+    """The current account scope a Claude, Codex or Antigravity Direct menu reads, or None when unproven."""
+    from core.handlers.direct_inventory_identity import inventory_identity
 
-    ``removed`` answers the restore list instead: the rows of the current catalog the menu hides.
+    try:
+        return inventory_identity(backend, V2Config.load())
+    except Exception:
+        logger.debug("Direct menu identity unavailable for %s", backend, exc_info=True)
+        return None
+
+
+def direct_model_menu(
+    backend: str,
+    *,
+    schedule_refresh: bool = True,
+    removed: bool = False,
+    snapshot: Optional[dict] = None,
+) -> dict:
+    """A Claude, Codex or Antigravity Direct menu, in the catalog snapshot's shape.
+
+    The rows are the last good answer the backend gave for the current account (published by the native
+    refresh), else the public catalog, less the rows removed in Settings · Models; ``removed`` answers the
+    restore list instead. An inventory row's label and efforts come from the backend's answer, falling back
+    to the catalog's. Reads only stored state: it never asks the CLI. Storage IO: call off the event loop.
     """
-    snapshot = backend_model_catalog.backend_model_snapshot(backend, schedule_refresh=schedule_refresh)
+    from core.handlers.direct_model_menu import read_menu
+
+    snapshot = snapshot or backend_model_catalog.backend_model_snapshot(backend, schedule_refresh=schedule_refresh)
     if not snapshot.get("ok"):
         return snapshot
-    models = _direct_menu_ids(backend, snapshot.get("models") or [], removed=removed)
-    kept = set(models)
     labels = snapshot.get("model_labels") or {}
     options = snapshot.get("reasoning_options") or {}
+    menu = read_menu(
+        backend,
+        _direct_menu_identity(backend),
+        fallback=_direct_menu_rows(snapshot.get("models") or []),
+        removed=removed,
+    )
+    models: list[str] = []
+    model_labels: dict[str, str] = {}
+    reasoning_options = {"": options.get("", [])}
+    for row in menu.models:
+        models.append(row.id)
+        label = row.label or labels.get(row.id)
+        if label and label != row.id:
+            model_labels[row.id] = label
+        if row.reasoning_efforts is not None:
+            reasoning_options[row.id] = backend_model_catalog.reasoning_option_items(row.reasoning_efforts)
+        elif row.id in options:
+            reasoning_options[row.id] = options[row.id]
+    observed = menu.observed_at is not None
     return {
         **snapshot,
         "models": models,
-        "model_labels": {model: label for model, label in labels.items() if model in kept},
-        "reasoning_options": {model: entry for model, entry in options.items() if model == "" or model in kept},
+        "model_labels": model_labels,
+        "reasoning_options": reasoning_options,
+        **({"source": "native (last answer)", "sources": ["native"], "observed_at": menu.observed_at} if observed else {}),
     }
 
 
@@ -8838,11 +8877,11 @@ async def direct_menu_and_removals(backend: str, *, live: bool = False) -> dict:
         snapshot = backend_model_catalog.backend_model_snapshot(backend)
         if not snapshot.get("ok"):
             return {"ok": False, "error": snapshot.get("error") or "model_catalog_unavailable"}
-        labels = snapshot.get("model_labels") or {}
-        ids = snapshot.get("models") or []
 
         def rows(removed: bool) -> list[dict]:
-            return [{"id": m, "label": labels.get(m) or m} for m in _direct_menu_ids(backend, ids, removed=removed)]
+            menu = direct_model_menu(backend, removed=removed, snapshot=snapshot)
+            labels = menu.get("model_labels") or {}
+            return [{"id": m, "label": labels.get(m) or m} for m in menu["models"]]
 
         # As the pickers do, Settings reads again while a remote catalog refresh may answer differently.
         pending = bool(snapshot.get("catalog_refresh_pending"))

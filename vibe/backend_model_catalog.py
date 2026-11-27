@@ -1700,6 +1700,11 @@ def _legacy_claude_reasoning_efforts(model: str) -> list[str]:
     ]
 
 
+def reasoning_option_items(efforts: Iterable[object]) -> list[dict[str, str]]:
+    """A picker's effort options for ``efforts``: the backend's Default first, then each effort labelled."""
+    return _reasoning_option_items(efforts)
+
+
 def _reasoning_option_items(efforts: Iterable[object]) -> list[dict[str, str]]:
     options = [{"value": "__default__", "label": "(Default)"}]
     for effort in _dedupe_str_values(efforts):
