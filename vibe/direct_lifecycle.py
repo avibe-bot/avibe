@@ -236,9 +236,10 @@ class _OwnedRendezvous:
         if self._owner._can_commit(self._generation, self._ingress):
             self._owner._rendezvous.clear_paths(publisher=self._publisher)
 
-    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
+    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> str:
         if self._owner._can_commit(self._generation, self._ingress):
-            self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path, publisher=self._publisher)
+            return self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path, publisher=self._publisher)
+        return "unknown"
 
     def set_admission_listener(self, listener: Any) -> None:
         if listener is not None and not self._owner._can_commit(self._generation, self._ingress):

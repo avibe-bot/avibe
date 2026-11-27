@@ -415,6 +415,15 @@ def describe_in_transaction(conn, binding, subject, sid, report, now):
     return 409 if row['identity_source'] == 'installation' and row['device_id'] != key else 429
 
 
+def session_kind(binding: str, subject: str, sid: str) -> str | None:
+    """The registered device kind of this one live session, not its identifiers or version."""
+    with get_cached_sqlite_engine().connect() as conn:
+        return conn.scalar(select(sessions.c.kind).where(
+            sessions.c.binding == binding, sessions.c.subject == subject, sessions.c.session_id == sid,
+            sessions.c.expires_at > int(time.time()),
+        ))
+
+
 def touch(session_id, now, cookie_exp):
     with get_cached_sqlite_engine().begin() as conn:
         conn.execute(
