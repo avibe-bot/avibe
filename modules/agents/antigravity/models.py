@@ -5,23 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
-import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
 from typing import Any
 
 from config import paths
-from config.atomic_io import write_atomic
 from modules.agents.acp import AcpClient, AcpRpcError
 from modules.agents.base import AgentRequest
 
 logger = logging.getLogger(__name__)
 
-_LIVE_MODELS_CACHE_SCHEMA_VERSION = 1
 _LIVE_MODELS_CACHE_FILENAME = "antigravity_models_cache.json"
-_LIVE_MODELS_CACHE_LOCK = threading.Lock()
 _CANONICAL_AUTH_MODES = ("oauth-personal", "oauth-business", "gemini-api-key", "agent-platform")
 
 class AntigravityModelSelectionError(RuntimeError):
@@ -647,150 +641,90 @@ def extract_live_model_catalog_entries(
     return [entries_by_id[model_id] for model_id in order]
 
 
-def _antigravity_models_cache_path() -> Path:
-    return paths.get_state_dir() / _LIVE_MODELS_CACHE_FILENAME
-
-
-def _normalize_cached_model_entry(item: Any) -> dict[str, Any] | None:
-    if not isinstance(item, Mapping):
-        return None
-    raw_id = item.get("id")
-    if not isinstance(raw_id, str) or not raw_id.strip():
-        return None
-    entry: dict[str, Any] = {"id": raw_id.strip()}
-    raw_label = item.get("label")
-    if isinstance(raw_label, str) and raw_label.strip() and raw_label.strip() != entry["id"]:
-        entry["label"] = raw_label.strip()
-    raw_efforts = item.get("reasoning_efforts")
-    if isinstance(raw_efforts, Sequence) and not isinstance(raw_efforts, (str, bytes)):
-        efforts: list[str] = []
-        seen: set[str] = set()
-        for val in raw_efforts:
-            if isinstance(val, str):
-                cleaned = val.strip()
-                if cleaned and cleaned not in seen:
-                    seen.add(cleaned)
-                    efforts.append(cleaned)
-        entry["reasoning_efforts"] = efforts
-    return entry
-
-
-def _read_raw_live_models_cache(cache_path: Path) -> dict[str, Any]:
-    try:
-        loaded = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return {}
-    return (
-        loaded
-        if isinstance(loaded, dict) and loaded.get("schema_version") == _LIVE_MODELS_CACHE_SCHEMA_VERSION
-        else {}
-    )
-
-
 def invalidate_antigravity_live_models() -> None:
-    """Discard account observations on OAuth cutover, whose config may be unchanged."""
-    with _LIVE_MODELS_CACHE_LOCK:
-        _antigravity_models_cache_path().unlink(missing_ok=True)
+    # Released OAuth snapshots had no account identity. Never import them.
+    (paths.get_state_dir() / _LIVE_MODELS_CACHE_FILENAME).unlink(missing_ok=True)
 
 
-def record_antigravity_live_models(
-    config: Any,
-    payload: Mapping[str, Any] | Sequence[Mapping[str, Any]],
-    *,
-    auth_fingerprint: str | None = None,
-) -> None:
-    """Persist account-scoped live Antigravity models and per-model effort options atomically."""
-    extracted = extract_live_model_catalog_entries(payload)
-    if not extracted:
+def _valid_picker_choices(raw: object) -> bool:
+    if not isinstance(raw, list):
+        return False
+    ids = []
+    for group in raw:
+        if not isinstance(group, Mapping):
+            return False
+        choices = group.get("options", [group])
+        if not isinstance(choices, list):
+            return False
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                return False
+            value = choice.get("value")
+            if not isinstance(value, str) or not value.strip() or value != value.strip():
+                return False
+            ids.append(value)
+    return len(ids) == len(set(ids))
+
+
+def record_antigravity_live_models(config: Any, payload, *, auth_fingerprint: str | None = None) -> None:
+    """Publish at the ACP observation, never on a timer that rereads an old file.
+
+    A session response replaces membership atomically (including a confirmed
+    empty list); a selection update can enrich known rows but cannot add or
+    withdraw one. Keep failed, malformed and unscoped observations session-local.
+    """
+    from storage.lock import MigrationFileLock
+    from core.handlers.direct_model_menu import PickerModel, publish_inventory, read_inventory
+
+    identity = account_cache_identity(config)
+    if not identity or (auth_fingerprint and auth_fingerprint != identity):
         return
-
-    active_fp = account_cache_identity(config)
-    if not active_fp or (auth_fingerprint and auth_fingerprint != active_fp):
+    complete = isinstance(payload, Mapping)
+    options = payload.get("configOptions") if complete else payload
+    if not isinstance(options, (tuple, list)) or not all(isinstance(row, Mapping) for row in options):
         return
-    replace_set = isinstance(payload, Mapping)
-    cache_path = _antigravity_models_cache_path()
-
+    option = _find_config_option(options, categories=("model",), ids=("model",))
+    effort = _find_config_option(options, categories=_EFFORT_CATEGORIES, ids=("thought_level",))
+    if option is None or not _valid_picker_choices(option.get("options")):
+        return
+    if effort is not None and not _valid_picker_choices(effort.get("options")):
+        return
+    rows = [PickerModel(**row) for row in extract_live_model_catalog_entries(payload)]
     try:
-        with _LIVE_MODELS_CACHE_LOCK:
-            existing = _read_raw_live_models_cache(cache_path)
-            existing_models: list[dict[str, Any]] = []
-            if existing.get("auth_fingerprint") == active_fp and isinstance(existing.get("models"), list):
-                for item in existing["models"]:
-                    normalized = _normalize_cached_model_entry(item)
-                    if normalized is not None:
-                        existing_models.append(normalized)
-
-            if replace_set:
-                prev_by_id = {m["id"]: m for m in existing_models}
-                merged_models: list[dict[str, Any]] = []
-                for entry in extracted:
-                    merged = dict(entry)
-                    prev = prev_by_id.get(entry["id"])
-                    if prev is not None:
-                        if not merged.get("label") and prev.get("label"):
-                            merged["label"] = prev["label"]
-                        if "reasoning_efforts" not in merged and "reasoning_efforts" in prev:
-                            merged["reasoning_efforts"] = list(prev["reasoning_efforts"])
-                    merged_models.append(merged)
-            elif existing_models:
-                merged_by_id = {m["id"]: dict(m) for m in existing_models}
-                order = [m["id"] for m in existing_models]
-                for entry in extracted:
-                    model_id = entry["id"]
-                    current = merged_by_id.get(model_id)
-                    if current is None:
-                        merged_by_id[model_id] = dict(entry)
-                        order.append(model_id)
-                        continue
-                    if entry.get("label") and entry["label"] != model_id:
-                        current["label"] = entry["label"]
-                    if "reasoning_efforts" in entry:
-                        current["reasoning_efforts"] = list(entry["reasoning_efforts"])
-                merged_models = [merged_by_id[mid] for mid in order]
-            else:
-                merged_models = [dict(entry) for entry in extracted]
-
-            document = {
-                "schema_version": _LIVE_MODELS_CACHE_SCHEMA_VERSION,
-                "auth_fingerprint": active_fp,
-                "updated_at": time.time(),
-                "models": merged_models,
-            }
-            write_atomic(cache_path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+        # ACP connection probes can run in Web as well as controller. Don't
+        # let a delta race a replacement and revive a withdrawn model.
+        with MigrationFileLock(paths.get_state_dir() / "antigravity-picker.lock", timeout_seconds=2):
+            last = read_inventory("antigravity", identity)
+            if not complete and last.observed_at is None:
+                return
+            previous = {row.id: row for row in last.models}
+            updated = {row.id: row for row in rows}
+            ids = updated if complete else previous
+            merged = []
+            for model_id in ids:
+                row = updated.get(model_id) or previous[model_id]
+                old = previous.get(model_id)
+                if old is not None and row.reasoning_efforts is None:
+                    row = replace(row, reasoning_efforts=old.reasoning_efforts)
+                merged.append(row)
+            if complete or tuple(merged) != last.models:
+                publish_inventory("antigravity", identity, merged)
     except Exception:
-        logger.debug("Best-effort Antigravity live model cache write skipped", exc_info=True)
+        logger.debug("Antigravity inventory write skipped")
 
 
-def read_antigravity_live_models(
-    config: Any | None = None,
-    *,
-    auth_fingerprint: str | None = None,
-) -> list[dict[str, Any]]:
-    """Return cached live Antigravity models when the cache matches the active auth fingerprint."""
-    cache_path = _antigravity_models_cache_path()
-    if not cache_path.is_file():
-        return []
-
-    cached = _read_raw_live_models_cache(cache_path)
-    cached_fp = cached.get("auth_fingerprint")
-    raw_models = cached.get("models")
-    if not isinstance(cached_fp, str) or not cached_fp or not isinstance(raw_models, list) or not raw_models:
-        return []
-
+def read_antigravity_live_models(config: Any = None) -> list[dict[str, Any]] | None:
+    """None = no proven account/observation; [] = authenticated, complete empty list."""
+    from core.handlers.direct_model_menu import read_inventory
     if config is None:
+        from config.v2_config import V2Config
         try:
-            from config.v2_config import V2Config
-
-            config = V2Config.load().agents.antigravity
-        except Exception:
-            return []
-    active_fp = account_cache_identity(config)
-    if not active_fp or cached_fp != active_fp or (auth_fingerprint and auth_fingerprint != active_fp):
-        return []
-
-    entries: list[dict[str, Any]] = []
-    for item in raw_models:
-        normalized = _normalize_cached_model_entry(item)
-        if normalized is not None:
-            entries.append(normalized)
-    return entries
+            config = V2Config.load()
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+    snapshot = read_inventory("antigravity", account_cache_identity(config))
+    if snapshot.observed_at is None:
+        return None
+    return [dict(id=row.id, **({"label": row.label} if row.label else {}),
+                 **({"reasoning_efforts": list(row.reasoning_efforts)} if row.reasoning_efforts is not None else {}))
+            for row in snapshot.models]

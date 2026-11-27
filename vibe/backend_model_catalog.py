@@ -1388,7 +1388,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
         blocked = (
             set()
-            if local_catalog
+            if local_catalog is not None
             else _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
         )
     else:
@@ -1424,7 +1424,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         "sources": [name for name, entries in sources if entries],
         "source": " + ".join(name for name, entries in sources if entries),
         "live": False,
-        "authoritative": backend_key == "antigravity" and bool(local_catalog),
+        "authoritative": backend_key == "antigravity" and local_catalog is not None,
         "notes": notes or None,
         "catalog_refresh_pending": remote_catalog_refresh_pending(
             refresh_token,
@@ -1500,7 +1500,7 @@ def backend_builtin_snapshot(
         sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
         blocked = (
             set()
-            if local_catalog
+            if local_catalog is not None
             else _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
         )
     else:
@@ -1714,19 +1714,19 @@ def _bundled_retired_model_ids(
 def _antigravity_sources(
     remote_catalog: dict[str, Any],
     bundled_catalog: dict[str, Any],
-    local_catalog: Sequence[dict[str, Any]],
+    local_catalog: Sequence[dict[str, Any]] | None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     remote_entries = backend_model_entries("antigravity", remote_catalog)
     visible_remote = [entry for entry in remote_entries if not _model_hidden(entry)]
     bundled_entries = backend_model_entries("antigravity", bundled_catalog)
 
-    live_entries = local_catalog
+    live_entries = local_catalog or ()
     normalized_live = [
         entry
         for item in live_entries
         if (entry := _normalize_model_entry(item)) and not _model_hidden(entry)
     ]
-    if normalized_live:
+    if local_catalog is not None:
         metadata_by_id: dict[str, dict[str, Any]] = {}
         for fallback_entry in (*bundled_entries, *visible_remote):
             model_id = fallback_entry["id"]

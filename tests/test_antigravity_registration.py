@@ -338,12 +338,13 @@ def test_legacy_model_cache_is_ignored_and_replaced(tmp_path, monkeypatch, agy_s
         "models": [{"id": "gemini-4-carbon-medium"}],
     }))
     if not refresh:
-        assert read_antigravity_live_models(cfg) == []
+        assert read_antigravity_live_models(cfg) is None
     else:
-        # Config-option updates must discard legacy entries too, even without a full session payload.
+        # A delta alone must never promote a partial or old list.
         record_antigravity_live_models(cfg, agy_session_options["configOptions"])
-        entries = read_antigravity_live_models(cfg)
-        assert [entry["id"] for entry in entries] == AGY_MODEL_IDS
+        assert read_antigravity_live_models(cfg) is None
+        record_antigravity_live_models(cfg, agy_session_options)
+        assert [entry["id"] for entry in read_antigravity_live_models(cfg)] == AGY_MODEL_IDS
 
 
 def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, monkeypatch):
@@ -360,6 +361,12 @@ def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, mon
     snapshot = backend_model_snapshot("antigravity", schedule_refresh=False)
     assert all(row["value"] == "__default__" for row in snapshot["reasoning_options"]["gemini-4-neon"])
     assert all(row["value"] == "__default__" for row in snapshot["reasoning_options"]["live-only"])
+    # One malformed option invalidates the *whole* replacement; it is not a withdrawal.
+    record_antigravity_live_models(cfg, {"configOptions": [{**model_option, "options": [{"value": "live-only"}, {}]}]})
+    assert read_antigravity_live_models(cfg) == entries
+    record_antigravity_live_models(cfg, {"configOptions": [{"id": "model", "options": []}]})
+    empty = backend_model_snapshot("antigravity", schedule_refresh=False)
+    assert empty["authoritative"] and empty["models"] == []
 
 
 def test_bundled_antigravity_menu_matches_agy_1_5_17():

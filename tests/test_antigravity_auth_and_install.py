@@ -218,7 +218,7 @@ async def test_oauth_credential_cutover_discards_previous_account_model_menu(
         "id": "model", "category": "model", "currentValue": "account-a-only",
         "options": [{"value": "account-a-only"}],
     }]})
-    assert read_antigravity_live_models(cfg) == []  # OAuth mode cannot name the active account.
+    assert read_antigravity_live_models(cfg) is None  # OAuth mode cannot name the active account.
     service = _make_auth_service()
 
     if transition == "login":
@@ -234,7 +234,7 @@ async def test_oauth_credential_cutover_discards_previous_account_model_menu(
 
     current = V2Config.load().agents.antigravity
     assert auth_config_fingerprint(current) == before_fingerprint
-    assert read_antigravity_live_models(current) == []
+    assert read_antigravity_live_models(current) is None
     assert backend_model_snapshot("antigravity", schedule_refresh=False)["authoritative"] is False
 
 

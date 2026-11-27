@@ -1,4 +1,4 @@
-"""Controller-owned background native model discovery. Readers never join these tasks."""
+"""Controller-owned background native inventory discovery. Readers never join this task."""
 
 from __future__ import annotations
 
@@ -6,20 +6,34 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 import shutil
 import time
 
 from config.v2_compat import runtime_agent_cli_path
 from config.v2_config import V2Config, is_model_hub_enabled
-from core.handlers.direct_inventory_identity import inventory_identity
-from core.handlers.direct_model_menu import publish_inventory
+from core.backend_restart import NativeCredentialLease, finish_native_operation
+from core.handlers.direct_inventory_identity import NativeScope, inventory_scope
+from core.handlers.direct_model_menu import publish_inventory, read_inventory
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, default_cli_for_backend
 from modules.agents.direct_inventory import discover
 
 logger = logging.getLogger(__name__)
-_BACKENDS = ("codex", "claude", "antigravity", "opencode")
 _POLL = 60
 _INTERVAL = 3600
+
+
+@dataclass(frozen=True)
+class _Source:
+    scope: NativeScope
+    binary: str
+    build: tuple
+    directory: str
+
+    @property
+    def trigger(self):
+        return self.scope.identity, self.binary, self.build, self.directory
 
 
 def _source(config, backend, directory):
@@ -27,23 +41,29 @@ def _source(config, backend, directory):
     if is_model_hub_enabled() and getattr(mode, "mode", None) == "hub":
         return None
     cwd = str(Path(directory or config.runtime.default_cwd).expanduser().resolve())
-    identity = inventory_identity(backend, config, cwd=cwd)
-    if identity is None:
+    scope = inventory_scope(backend, config, cwd=cwd)
+    if scope is None:
         return None
-    settings = getattr(config.agents, backend)
     binary = runtime_agent_cli_path(
-        settings.cli_path, "agy" if backend == "antigravity" else backend, resolve_agent_paths=True
+        getattr(config.agents, backend).cli_path, default_cli_for_backend(backend), resolve_agent_paths=True
     )
     if backend == "claude" and binary == "claude":
-        import claude_agent_sdk
-        import os
+        # Same resolution as connect(): embedded SDK binary first, then its
+        # platform-aware search. Resolve only; don't open an SDK transport.
+        from claude_agent_sdk import ClaudeAgentOptions
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-        bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
-        if bundled.is_file():
-            binary = str(bundled)
-    path = Path(shutil.which(str(Path(binary).expanduser())) or binary).expanduser().resolve()
+        binary = SubprocessCLITransport("", ClaudeAgentOptions())._find_cli()
+    binary = os.path.expanduser(binary)
+    if not os.path.isabs(binary):
+        if os.path.dirname(binary):
+            return None
+        binary = shutil.which(binary)
+    if not binary or not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+        return None
+    path = Path(binary).resolve()
     stat = path.stat()
-    return identity, str(path), (stat.st_ino, stat.st_mtime_ns, stat.st_size), cwd
+    return _Source(scope, str(path), (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size), cwd)
 
 
 @dataclass
@@ -54,8 +74,6 @@ class _Attempt:
 
 
 class NativeInventoryRefresh:
-    """One worker, bounded interest in OpenCode directories, last good in PR1's store."""
-
     def __init__(self, controller):
         self.controller = controller
         self.directories = OrderedDict()
@@ -81,10 +99,12 @@ class NativeInventoryRefresh:
     async def _run(self):
         while True:
             try:
-                config = await asyncio.to_thread(V2Config.load)
-                work = [(backend, None) for backend in _BACKENDS]
+                config = await asyncio.to_thread(V2Config.load, persist_migrations=False)
+                # Antigravity publishes at the trusted ACP observation; there
+                # is no separately attributable CLI discovery for it today.
+                work = [(backend, None) for backend in NATIVE_CLI_BACKENDS if backend != "antigravity"]
                 work.extend(("opencode", cwd) for cwd in tuple(self.directories) if cwd != config.runtime.default_cwd)
-                self.attempts = {key: value for key, value in self.attempts.items() if key in work}
+                self.attempts = {k: v for k, v in self.attempts.items() if k in work}
                 for backend, cwd in work:
                     await self._refresh(config, backend, cwd)
             except Exception:
@@ -95,31 +115,60 @@ class NativeInventoryRefresh:
         slot = (backend, cwd)
         try:
             source = await asyncio.to_thread(_source, config, backend, cwd)
-        except Exception:  # A failed scope read for one backend must not starve the others.
+        except Exception:
             source = None
         if source is None:
             self.attempts.pop(slot, None)
             return
         last = self.attempts.get(slot)
         now = time.monotonic()
-        if last and last.revision == source and last.retry_at > now:
+        if last and last.revision == source.trigger and last.retry_at > now:
             return
-        failures = last.failures if last and last.revision == source else 0
-        identity, binary, _, directory = source
+        failures = last.failures if last and last.revision == source.trigger else 0
         try:
-            rows = await asyncio.wait_for(
-                discover(backend, getattr(config.agents, backend), binary, directory, self.controller), timeout=18
-            )
+            service = self.controller.agent_service
+            if not service.is_backend_ready(backend):
+                return
+            # Cross-process, nonblocking lease. Auth cutover, native takeover
+            # and CLI replacement own the same lease. Never start a probe if
+            # they have admission, and never release it before cleanup ends.
+            with NativeCredentialLease((backend,)) as lease:
+                await asyncio.to_thread(lease.assert_auth_custody, backend)
+                if not service.is_backend_ready(backend):
+                    return
+                rows = await asyncio.wait_for(
+                    discover(
+                        backend,
+                        getattr(config.agents, backend),
+                        source.binary,
+                        source.directory,
+                        source.scope,
+                        self.controller,
+                    ),
+                    timeout=18,
+                )
 
-            def commit_if_current():
-                if _source(V2Config.load(), backend, cwd) == source:
+                def commit_if_current():
+                    if _source(V2Config.load(persist_migrations=False), backend, cwd) != source:
+                        return False
+                    identity = source.scope.identity
+                    if backend == "codex":
+                        # A successful model-list command can silently fall back
+                        # to its bundled table after a refresh failure. Without
+                        # authoritative withdrawal evidence, never replace an
+                        # account's last good reply with a subset or a union.
+                        previous = read_inventory(backend, identity)
+                        if not {r.id for r in previous.models}.issubset({r.id for r in rows}):
+                            raise ValueError("Codex withdrawal not confirmed")
                     publish_inventory(backend, identity, rows)
+                    return True
 
-            await asyncio.to_thread(commit_if_current)
+                if not await finish_native_operation(asyncio.to_thread(commit_if_current)):
+                    self.attempts.pop(slot, None)
+                    return
         except Exception:
-            # Native diagnostics can contain account/provider data, so log only the backend.
             logger.debug("No complete %s native inventory", backend)
             failures = min(7, failures + 1)
-            self.attempts[slot] = _Attempt(source, now + min(_INTERVAL, _POLL * 2 ** (failures - 1)), failures)
+            self.attempts[slot] = _Attempt(source.trigger, now + min(_INTERVAL, _POLL * 2 ** (failures - 1)), failures)
         else:
-            self.attempts[slot] = _Attempt(source, now + _INTERVAL)
+            self.attempts[slot] = _Attempt(source.trigger, now + _INTERVAL)

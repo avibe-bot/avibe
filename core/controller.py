@@ -1291,10 +1291,13 @@ class Controller:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
-        from core.native_inventory_refresh import NativeInventoryRefresh
+        try:
+            from core.native_inventory_refresh import NativeInventoryRefresh
 
-        self.native_inventory_refresh = NativeInventoryRefresh(self)
-        self.native_inventory_refresh.start()
+            self.native_inventory_refresh = NativeInventoryRefresh(self)
+            self.native_inventory_refresh.start()
+        except Exception:
+            logger.exception("Failed to start native inventory refresh")
 
         try:
             self.update_checker.start()

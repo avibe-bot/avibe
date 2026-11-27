@@ -7072,7 +7072,7 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
 
         from modules.agents.antigravity.models import read_antigravity_live_models
 
-        assert read_antigravity_live_models(config) == []  # The live probe succeeded, but OAuth has no account key.
+        assert read_antigravity_live_models(config) is None  # The live probe succeeded, but OAuth has no account key.
         # Exercise the Web wire contract with valid credentials: the HTTP
         # start must publish the CLI URL and accept code before committing.
         process = FakeProcess()
@@ -7140,7 +7140,7 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
                     await asyncio.sleep(0.01)
                 assert status["state"] == "success" and status["authorization_completed"] is True
                 assert V2Config.load().agents.antigravity.auth_mode == "oauth-personal"
-                assert read_antigravity_live_models(config) == []
+                assert read_antigravity_live_models(config) is None
             finally:
                 await service.cancel_web_flow(flow_id)
 

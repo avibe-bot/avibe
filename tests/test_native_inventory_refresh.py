@@ -6,14 +6,14 @@ probe as [], restoring a deleted row on upgrade, or relabeling one account's rep
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 import sys
 from types import SimpleNamespace
 
 import pytest
 
 from config.v2_config import V2Config
-from core.handlers.direct_inventory_identity import inventory_identity
+from core.handlers.direct_inventory_identity import NativeScope, inventory_identity
 from core.handlers.direct_model_menu import read_inventory, read_menu, set_removed
 from core.native_inventory_refresh import NativeInventoryRefresh
 from modules.agents.direct_inventory import discover
@@ -37,10 +37,11 @@ async def test_codex_upgrade_failure_and_account_cutover(tmp_path, monkeypatch):
     config.agents.codex.cli_path = str(binary)
     config.model_hub.agents["codex"].mode = "direct"
     config.save()
-    worker = NativeInventoryRefresh(None)
+    worker = NativeInventoryRefresh(SimpleNamespace(agent_service=SimpleNamespace(is_backend_ready=lambda _: True)))
     calls = tmp_path / "calls"
 
     def release(rows, *, broken=False):
+        rows = [dict({"priority": i, "supported_in_api": True}, **row) for i, row in enumerate(rows)]
         command = f"print({json.dumps({'models': rows})!r})" if not broken else 'print("{truncated")'
         binary.write_text(
             f'#!{sys.executable}\nimport sys\nassert sys.argv[1:] == ["debug", "models"]\n'
@@ -48,26 +49,49 @@ async def test_codex_upgrade_failure_and_account_cutover(tmp_path, monkeypatch):
         )
         binary.chmod(0o700)
 
-    old = {"slug": "old", "visibility": "list"}
+    old = {"slug": "old", "visibility": "list", "priority": -1}
+    # A closed native-auth lease must prevent starting a subprocess, even for
+    # the boot scan of a freshly installed executable.
+    from core.backend_restart import NativeCredentialLease
+
     release([old])
+    with NativeCredentialLease(("codex",)):
+        await worker._refresh(config, "codex", None)
+    assert not calls.exists()
+    worker = NativeInventoryRefresh(worker.controller)
     identity = inventory_identity("codex", config)
     assert identity
     await worker._refresh(config, "codex", None)
     assert [r.id for r in read_menu("codex", identity).models] == ["old"]
     set_removed("codex", "old", True)
     new = [{"slug": slug, "visibility": "list"} for slug in ("gpt-6.2-sol", "gpt-6.2-astra")]
-    release([old, {"slug": "hidden", "visibility": "hide"}, *new])
+    release(
+        [
+            old,
+            {"slug": "hidden", "visibility": "hide"},
+            {"slug": "subscription-only", "visibility": "list", "supported_in_api": False},
+            *new,
+        ]
+    )
     await worker._refresh(config, "codex", None)
     before = read_inventory("codex", identity)
     assert [r.id for r in read_menu("codex", identity).models] == ["gpt-6.2-sol", "gpt-6.2-astra"]
+    release([{"slug": "silent-fallback", "visibility": "list"}])
+    await worker._refresh(config, "codex", None)
+    assert read_inventory("codex", identity) == before
     release([], broken=True)
     await worker._refresh(config, "codex", None)
     await worker._refresh(config, "codex", None)
-    assert calls.read_text() == "111"  # backoff; a reader did not spawn anything
+    assert calls.read_text() == "1111"  # backoff; a reader did not spawn anything
     assert read_inventory("codex", identity) == before
     auth.write_text(json.dumps({"OPENAI_API_KEY": "test-account-B"}))
     other = inventory_identity("codex", config)
     assert other and other != identity and read_inventory("codex", other).observed_at is None
+    monkeypatch.setenv("CODEX_API_KEY", "test-override-C")
+    third = inventory_identity("codex", config)
+    assert third and third not in (identity, other)
+    (home / "config.toml").write_text('profile="private"\n[profiles.private]\nmodel_catalog_json="projected.json"')
+    assert inventory_identity("codex", config) is None
 
 
 @pytest.mark.asyncio
@@ -77,9 +101,12 @@ async def test_stalled_probe_does_not_block_menu_or_relabel_its_reply(tmp_path, 
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
     config = V2Config.default()
+    config.model_hub.agents["codex"].mode = "direct"
     config.save()
     key = "A"
-    monkeypatch.setattr(refresh, "_source", lambda *_: (key, "codex", (1,), "."))
+    monkeypatch.setattr(
+        refresh, "_source", lambda *_: refresh._Source(NativeScope(key, key, "api"), "codex", (1,), ".")
+    )
     started, finish = asyncio.Event(), asyncio.Event()
 
     async def blocked(*_):
@@ -89,7 +116,8 @@ async def test_stalled_probe_does_not_block_menu_or_relabel_its_reply(tmp_path, 
 
     monkeypatch.setattr(refresh, "discover", blocked)
     publish_inventory("codex", key, [PickerModel("last-good")])
-    task = asyncio.create_task(NativeInventoryRefresh(None)._refresh(config, "codex", None))
+    worker = NativeInventoryRefresh(SimpleNamespace(agent_service=SimpleNamespace(is_backend_ready=lambda _: True)))
+    task = asyncio.create_task(worker._refresh(config, "codex", None))
     try:
         await asyncio.wait_for(started.wait(), timeout=2)
         assert [r.id for r in read_menu("codex", key).models] == ["last-good"]
@@ -99,7 +127,10 @@ async def test_stalled_probe_does_not_block_menu_or_relabel_its_reply(tmp_path, 
         finish.set()
         await task
     assert read_inventory("codex", "B").observed_at is None
-    assert [r.id for r in read_inventory("codex", "A").models] == ["last-good"]
+    key = "A"  # A rejected commit was not a successful observation of A.
+    monkeypatch.setattr(refresh, "discover", AsyncMock(return_value=[PickerModel("last-good"), PickerModel("new-A")]))
+    await worker._refresh(config, "codex", None)
+    assert [r.id for r in read_inventory("codex", "A").models] == ["last-good", "new-A"]
 
 
 @pytest.mark.asyncio
@@ -112,14 +143,12 @@ async def test_claude_preserves_aliases_even_when_they_resolve_to_one_id(monkeyp
         def __init__(self, *, options):
             assert options.cli_path == "/fixture/claude" and options.strict_mcp_config
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
+        async def connect(self):
             pass
 
         async def get_server_info(self):
             return {
+                "account": {"apiProvider": "firstParty", "apiKeySource": "ANTHROPIC_API_KEY"},
                 "models": [
                     {
                         "value": value,
@@ -128,63 +157,17 @@ async def test_claude_preserves_aliases_even_when_they_resolve_to_one_id(monkeyp
                         "supportedEffortLevels": ["high"],
                     }
                     for value in ("default", "opus")
-                ]
+                ],
             }
 
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     settings = SimpleNamespace(cli_path="/fixture/claude")
-    rows = await discover("claude", settings, settings.cli_path, str(tmp_path), None)
+    controller = SimpleNamespace(agent_auth_service=SimpleNamespace(_disconnect_claude_probe_client=AsyncMock()))
+    rows = await discover(
+        "claude", settings, settings.cli_path, str(tmp_path), NativeScope("key", "key", "api"), controller
+    )
+    controller.agent_auth_service._disconnect_claude_probe_client.assert_awaited_once()
     assert [(r.id, r.resolved_model, r.reasoning_efforts) for r in rows] == [
         ("default", "claude-new", ("high",)),
         ("opus", "claude-new", ("high",)),
     ]
-
-
-@pytest.mark.asyncio
-async def test_opencode_selects_connected_provider_in_the_requested_directory(tmp_path, monkeypatch):
-    from aiohttp import web
-    from aiohttp.test_utils import TestServer
-    from modules.agents.opencode.server import OpenCodeServerClient
-    config = V2Config.default()
-    config.agents.opencode.enabled = True
-    monkeypatch.setenv("HOME", str(tmp_path))
-    data = tmp_path / "xdg-data"
-    monkeypatch.setenv("XDG_DATA_HOME", str(data))
-    for key in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_AUTH_CONTENT", "OPENCODE_CONFIG_CONTENT"):
-        monkeypatch.delenv(key, raising=False)
-    auth = data / "opencode/auth.json"
-    auth.parent.mkdir(parents=True, exist_ok=True)
-    auth.write_text('{"one":{"type":"api","key":"fixture-A"}}')
-    folder = str(tmp_path / "workspace")
-    scope = inventory_identity("opencode", config, cwd=folder)
-    assert scope and inventory_identity("opencode", config, cwd=str(tmp_path)) != scope
-    auth.write_text('{"one":{"type":"api","key":"fixture-B"}}')
-    assert inventory_identity("opencode", config, cwd=folder) != scope
-
-    async def providers(request):
-        assert request.headers["x-opencode-directory"] == folder
-        return web.json_response(
-            {
-                "all": [
-                    {"id": pid, "models": {"new": {"name": "New", "variants": {"high": {}}}}} for pid in ("one", "two")
-                ],
-                "connected": ["one"],
-            }
-        )
-
-    app = web.Application()
-    app.router.add_get("/provider", providers)
-    async with TestServer(app) as http:
-        server = OpenCodeServerClient(str(http.make_url("")).rstrip("/"))
-
-        @asynccontextmanager
-        async def current():
-            yield server
-
-        agent = SimpleNamespace(current_server=current)
-        controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"opencode": agent}))
-        try:
-            rows = await discover("opencode", None, "", folder, controller)
-            assert [(r.id, r.reasoning_efforts) for r in rows] == [("one/new", ("high",))]
-        finally:
-            await server.close_http_session()
