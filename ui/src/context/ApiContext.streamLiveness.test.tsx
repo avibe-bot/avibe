@@ -1187,6 +1187,90 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 
+  // The live stream is a connection of its own (a WebSocket), so the stream's
+  // word does not speak for the page's requests. The instance says on each
+  // answer how that request arrived (`X-Avibe-Via`), and the page follows both.
+  const requestSaid = async (word: 'direct' | 'other') => {
+    const page = await import('../lib/liveStreamVia');
+    page.noteRequestVia(page.beginRequestVia(), word);
+  };
+
+  it('keeps going while the requests are not on the path, though the stream came in directly', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // The shell kept the busy request connection; the stream opened a new
+    // one, which took the path. The stream's own reconnect begins with a
+    // request, and that one still came in the other way.
+    await requestSaid('other');
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(shell.handovers()).toBe(2);
+    // Now both came in directly: the page is on the path, and stays.
+    await requestSaid('direct');
+    emitHandshakeVia(3, 'direct');
+    for (let sequence = 2; sequence < 12; sequence += 2) {
+      shell.emit({ preferred: 'tunnel', sequence, closure: 0 });
+      shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 0, path: 'ipv4' });
+      await vi.advanceTimersByTimeAsync(31_000);
+      emitHeartbeat();
+    }
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('asks again when a request falls back to another way between two streams', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    await requestSaid('direct');
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(31_000);
+    emitHeartbeat();
+    expect(shell.handovers()).toBe(1);
+    // The request connection was lost and came back on the public leg. No
+    // stream says so: the request's own answer does.
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+    // The same word again is not a change, and asks nothing.
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('stops after three hand-overs that did not move the requests, though each stream came in directly', async () => {
+    // Requests on a connection the shell cannot close (it was made before
+    // the route existed): every new stream takes the path, the requests never.
+    const shell = await pathShell();
+    await requestSaid('other');
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    for (let round = 1; round <= 3; round += 1) {
+      expect(shell.handovers()).toBe(round);
+      emitHandshakeVia(round + 1, 'direct');
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    expect(shell.handovers()).toBe(3);
+    for (let round = 0; round < 5; round += 1) {
+      emitHandshakeVia(10 + round, 'direct');
+      await vi.advanceTimersByTimeAsync(40_000);
+    }
+    expect(shell.handovers()).toBe(3);
+  });
+
+  it('moves nothing on the relay, whichever of the stream and the requests came in through it', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'relay' });
+    await requestSaid('other');
+    emitHandshakeVia(2, 'direct');
+    await vi.advanceTimersByTimeAsync(61_000);
+    await requestSaid('direct');
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(shell.handovers()).toBe(0);
+  });
+
   it('stops after three hand-overs in a row that did not move the stream, until the path changes', async () => {
     const shell = await pathShell();
     shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });

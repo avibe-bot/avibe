@@ -10,7 +10,7 @@ import { cleanDomainName } from '@/components/domainName';
 import type { RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkInterface } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { hasDesktopClient } from '@/desktop/bridge';
-import { liveStreamVia, subscribeLiveStreamVia } from '@/lib/liveStreamVia';
+import { pageVia as readPageVia, subscribePageVia } from '@/lib/liveStreamVia';
 import { nativeDirectAvailable, nativeDirectPathReported } from '@/lib/native';
 import {
   nativeDirectChoiceAvailable, nativeDirectChoiceShell, nativeDirectOnlyAvailable, onNativeDirectChoiceChanged,
@@ -302,7 +302,7 @@ export function ConnectionPage() {
   const flow = useClaimFlow({ kind: 'rebind', locale: i18n.language, onEnd: onRebindEnd, returned });
 
   // ── the shell's own path and choice (the Avibe App, a Desktop window) ──
-  const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
+  const pageVia = useSyncExternalStore(subscribePageVia, readPageVia, () => null);
   const nativePath = useNativeDirectPath(pageVia);
   const [preference, setPreference] = useState<DirectPreference | undefined>();
   useEffect(() => {

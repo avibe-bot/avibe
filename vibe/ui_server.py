@@ -1548,10 +1548,16 @@ def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
     Called where a request's session is accepted as current: the gate every
     route that needs a session passes, and ``/api/session``, which reads the
     session itself.
+
+    The same observation is told to the page on this request's answer
+    (``add_request_via_header``): a page's live stream is a connection of its
+    own, so the stream's ``via`` no longer says how the page's requests arrive.
     """
+    direct = _is_direct_ingress_request()
+    g.remote_request_via = "direct" if direct else "other"
     direct_path_use.counts.note(
         (str(identity.get("sub")), str(identity.get("browser_session_id"))),
-        direct=_is_direct_ingress_request(),
+        direct=direct,
         owner=owner,
     )
 
@@ -3232,6 +3238,47 @@ def add_public_show_representation_vary(response: Response) -> Response:
             response.headers.get("Vary"),
             "Cookie",
         )
+    return response
+
+
+# How this request arrived, for the page that made it: ``direct`` through the
+# direct ingress, ``other`` for any other way in, which is never named (the
+# words of the event stream's ``via``). Only on the answer to a request whose
+# remote session was accepted as current, and only what the instance counted
+# for it. Not an address, and nothing a client did not already choose.
+#
+# Only on an answer that itself says ``no-store``: one no cache may keep, so
+# the word cannot be given again for a request the instance never saw (after
+# the client changed paths, or by a shared cache to another client). Opting
+# in by that directive, not out by a list of what makes an answer reusable:
+# a lifetime, a validator added after this hook, or a policy forwarded from
+# a Show runtime can then never carry it. The page's session check, which
+# begins every stream, is such an answer.
+REQUEST_VIA_HEADER = "X-Avibe-Via"
+
+
+def _answer_is_never_stored(response: Response) -> bool:
+    """The answer carries an actual ``no-store`` directive, read without parsing.
+
+    This is no HTTP parser and must not become one: a value it cannot read as
+    plainly as a cache does is declined. Any quoted string is (its text may
+    hold commas, and an escaped quote, so ``no-store`` inside it would look
+    like a directive here and be extension text to a cache), and then a whole
+    comma-separated token must be exactly ``no-store``. Every ``Cache-Control``
+    line of the answer is read as the one list a cache makes of them: a
+    quoted string may begin on one line and end on another.
+    """
+    value = ", ".join(response.headers.getlist("Cache-Control"))
+    if '"' in value or "\\" in value:
+        return False
+    return any(token.strip(" \t").lower() == "no-store" for token in value.split(","))
+
+
+@app.after_request
+def add_request_via_header(response: Response) -> Response:
+    via = getattr(g, "remote_request_via", None)
+    if via is not None and _answer_is_never_stored(response):
+        response.headers[REQUEST_VIA_HEADER] = via
     return response
 
 

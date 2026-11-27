@@ -37,15 +37,20 @@ const said = (path: 'ipv4' | 'ipv6' | 'relay' | null, scope?: 'local' | 'global'
 
 const host = 'max-app.avibe.bot';
 
-/** The page and everything it reads, loaded after the bridge so that they share one `native.ts`. */
-async function mount(via: 'direct' | 'other') {
+/**
+ * The page and everything it reads, loaded after the bridge so that they share one `native.ts`.
+ * `via` is what the instance said of the page's live stream, `requests` what it said of the page's
+ * latest request: the stream is a connection of its own.
+ */
+async function mount(via: 'direct' | 'other', requests: 'direct' | 'other' = via) {
   vi.resetModules();
-  const [{ ConnectionPage }, { devicesApi }, { InstanceAuthorizationContext }, { DENIED_INSTANCE_CAPABILITIES }, { MemoryRouter, Route, Routes }, { default: i18n }, { setLiveStreamVia }, native] = await Promise.all([
+  const [{ ConnectionPage }, { devicesApi }, { InstanceAuthorizationContext }, { DENIED_INSTANCE_CAPABILITIES }, { MemoryRouter, Route, Routes }, { default: i18n }, { beginRequestVia, noteRequestVia, setLiveStreamVia }, native] = await Promise.all([
     import('./ConnectionPage'), import('./api'), import('@/context/InstanceAuthorizationContext'), import('@/lib/sessionInfo'),
     import('react-router-dom'), import('../../i18n'), import('@/lib/liveStreamVia'), import('@/lib/native'),
   ]);
   await i18n.changeLanguage('zh');
   setLiveStreamVia(via);
+  noteRequestVia(beginRequestVia(), requests);
   vi.spyOn(devicesApi, 'interfaces').mockResolvedValue([]);
   vi.spyOn(devicesApi, 'connection').mockResolvedValue({
     settings: { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: 'auto', edge_bind_address: '' },
@@ -127,6 +132,21 @@ describe('ConnectionPage · in an Avibe Desktop window of another computer\'s in
     expect(direct.textContent).not.toContain('使用中');
     // This instance reports no relay row, so nothing carries the mark.
     expect(document.body.textContent).not.toContain('使用中');
+  });
+
+  it('says what the requests use: a stream that came in directly does not speak for them', async () => {
+    // The stream connected again by itself and took the path; the page's requests are still on
+    // the connection they had.
+    install(said('ipv4', 'local'));
+    await mount('direct', 'other');
+    await waitFor(() => expect(screen.getByText('本设备正在使用：Cloudflare 隧道')).toBeTruthy());
+    expect(document.body.textContent).not.toContain('使用中');
+    cleanup();
+    // On a relay-only network the same: the relay carries the stream, the tunnel the requests.
+    install(said('relay'));
+    await mount('direct', 'other');
+    await waitFor(() => expect(screen.getByText(/^本设备正在使用：Cloudflare 隧道/)).toBeTruthy());
+    expect(document.body.textContent).not.toContain('本设备正在使用：中继');
   });
 
   it('says the tunnel where the window has no route of its own', async () => {
