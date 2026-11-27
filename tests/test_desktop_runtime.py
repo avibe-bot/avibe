@@ -723,6 +723,39 @@ def test_desktop_readiness_waits_out_a_database_update(monkeypatch, migrating_fo
 
 
 @pytest.mark.parametrize(
+    ("initially_migrating", "setup_seconds", "expected"),
+    [(True, 60, 1234), (False, 60, None), (True, runtime.SERVICE_MIGRATION_TIMEOUT_SECONDS + 1, None)],
+)
+def test_desktop_readiness_accounts_for_client_setup(monkeypatch, initially_migrating, setup_seconds, expected):
+    """The update can finish while the HTTP client is opening, before its first poll."""
+    import httpx
+    import time
+
+    offset = 0
+    requests = []
+
+    def ready(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, stream=httpx.ByteStream(b'{"schema_version":1,"product":"avibe","ready":true}'))
+
+    class Client(httpx.AsyncClient):
+        async def __aenter__(self):
+            nonlocal offset
+            offset = setup_seconds
+            return await super().__aenter__()
+
+    # Advance only the startup wait's clock, not asyncio's request deadline.
+    monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + offset))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: Client(transport=httpx.MockTransport(ready), **kw))
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kw: 1234)
+    monkeypatch.setattr(runtime, "service_instance_migrating", lambda pid: initially_migrating and offset == 0)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
+    result = runtime.wait_for_desktop_startup_ready(1234, "127.0.0.1", 5123, timeout=10)
+    assert result == expected
+    assert requests == (["/ready"] if expected is not None else [])
+
+
+@pytest.mark.parametrize(
     "response_kind", ["drip", "oversized", "oversized-stream", "starting", "utf16", "compressed", "malformed"],
 )
 def test_desktop_ready_request_body_has_one_deadline_and_size_bound(monkeypatch, response_kind):
