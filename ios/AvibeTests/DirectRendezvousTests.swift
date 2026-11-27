@@ -540,6 +540,17 @@ final class DirectRendezvousTests: XCTestCase {
         DirectListenerFailure(step: step, code: code, backgroundSeconds: away, at: at)
     }
 
+    /// A first bind confirmed after the first load is reported in the
+    /// instance's own shape: the step `late`, and the bind's duration in
+    /// milliseconds where a failure has its error number.
+    func testTheRequestReportsALateFirstBindWithItsDuration() throws {
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [failure(.late, code: 1_840)]),
+            "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+                + ",\"listener_faults\":[{\"step\":\"late\",\"code\":1840,\"background_seconds\":0}]}"
+        )
+    }
+
     /// The App's slow store removals ride on the same request, as at most
     /// five non-negative integers the instance accepts (milliseconds), and
     /// no field when there are none.

@@ -404,7 +404,7 @@ enum DirectRendezvous {
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
-            // Written by hand, in a fixed order: a step is one of six words,
+            // Written by hand, in a fixed order: a step is one of the enum's words,
             // and the rest are integers within the instance's bounds.
             let code = fault.code ?? 0
             let seconds = min(max(fault.backgroundSeconds ?? 0, 0), DirectListenerFailure.maxBackgroundSeconds)
