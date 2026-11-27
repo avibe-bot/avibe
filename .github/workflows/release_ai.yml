@@ -811,6 +811,18 @@ jobs:
             fi
           fi
 
+          # Source 3: an RC is silent by default. A gh-v*rc* tag announces itself only
+          # when its annotation carries the explicit announce flag
+          # <!-- avibe:update-notification=default -->, which the release lane adds
+          # to the RCs it cuts. A colleague's RC tag still ships, but never offers
+          # itself to automatic updaters. Stable v* tags are unchanged.
+          ANNOUNCE_RE='<!--[[:space:]]*(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*default[[:space:]]*-->'
+          if [ "$has_marker" != "true" ] && [[ "$TAG" =~ ^gh-v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$ ]] \
+             && ! echo "$TAG_MSG" | grep -qE "$ANNOUNCE_RE"; then
+            echo "RC tag without the explicit announce flag: publishing silent by default."
+            has_marker="true"
+          fi
+
           # Prepend once (idempotent — never double-add if the notes already carry it).
           # Emit BOTH the current and legacy markers: the release body is read by
           # already-installed updaters, and a pre-rebrand client only understands

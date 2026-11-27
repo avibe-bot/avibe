@@ -25,6 +25,9 @@ WORKFLOWS = (
 )
 
 
+ANNOUNCE = "<!-- avibe:update-notification=default -->"
+
+
 @pytest.mark.parametrize(
     ("annotation", "existing_body", "silent"),
     [
@@ -37,11 +40,22 @@ WORKFLOWS = (
     ],
 )
 @pytest.mark.parametrize("rewritten", [False, True])
+@pytest.mark.parametrize("kind", ["stable", "rc-announced", "rc-default"])
 def test_notes_shell_reads_remote_annotation_not_checkout_ref(
-    tmp_path, annotation, existing_body, silent, rewritten,
+    tmp_path, annotation, existing_body, silent, rewritten, kind,
 ):
+    # A stable tag follows its annotation. An RC tag is silent by default and
+    # announces only with the explicit flag in its annotation (never in a
+    # lightweight tag), unless it also asks to be silent.
+    tag = "v3.1.0" if kind == "stable" else "gh-v3.1.0rc1"
+    if kind == "rc-announced" and annotation is not None:
+        annotation = f"{annotation}\n{ANNOUNCE}"
+    if kind == "rc-default":
+        silent = True
+    elif kind == "rc-announced" and annotation is None:
+        silent = True
     remote, workspace, env, tag, source, command = _notes_git_fixture(
-        tmp_path, annotation=annotation, existing_body=existing_body,
+        tmp_path, annotation=annotation, existing_body=existing_body, tag=tag,
     )
     if rewritten:
         _fixture_git(workspace, "update-ref", f"refs/tags/{tag}", source)
@@ -138,7 +152,7 @@ def _fixture_git(directory, *arguments):
     ).stdout.strip()
 
 
-def _notes_git_fixture(tmp_path, *, annotation, existing_body):
+def _notes_git_fixture(tmp_path, *, annotation, existing_body, tag="gh-v3.1.0rc1"):
     remote = tmp_path / "remote 中文"
     remote.mkdir()
     _fixture_git(remote, "init")
@@ -150,7 +164,6 @@ def _notes_git_fixture(tmp_path, *, annotation, existing_body):
     )
     _fixture_git(remote, "commit", "--allow-empty", "-m", message)
     source = _fixture_git(remote, "rev-parse", "HEAD")
-    tag = "gh-v3.1.0rc1"
     if annotation is None:
         _fixture_git(remote, "tag", tag)
     else:
@@ -906,3 +919,25 @@ def test_every_rc_runs_the_stable_release_regressions_on_its_package():
     assert names.index("Build Python distributions") < position < names.index("Upload release artifacts")
     # The RC's release job publishes only after this job succeeded.
     assert "build-assets" in _job("release_ai.yml", "release")["needs"]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "Avibe 3.1.0rc1\n\nannounce: avibe:update-notification=default in prose",
+        "Avibe 3.1.0rc1\n<!-- avibe:update-notification=default -->\n<!-- avibe:update-notification=none -->",
+    ],
+    ids=["prose-is-not-the-flag", "silent-wins-over-announce"],
+)
+def test_an_rc_needs_the_exact_announce_comment_and_silent_still_wins(tmp_path, annotation):
+    _remote, workspace, env, _tag, _source, command = _notes_git_fixture(
+        tmp_path, annotation=annotation, existing_body="",
+    )
+    notes = workspace / "release.md"
+    notes.write_text("# Release\n", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+        cwd=workspace, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert notes.read_text(encoding="utf-8").count("<!-- avibe:update-notification=none -->") == 1

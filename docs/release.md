@@ -108,6 +108,13 @@ remain mandatory.
   input. Put `<!-- avibe:update-notification=none -->` in the tag annotation
   for a silent release: no notification announces it and nothing installs it
   automatically.
+- A GitHub-only RC (`gh-vX.Y.ZrcN`) is **silent by default**. It announces
+  itself only when its annotated tag carries the explicit flag
+  `<!-- avibe:update-notification=default -->`; the release Session adds it to
+  every RC it cuts for testers. Without the flag (including a lightweight tag),
+  the RC still builds and publishes, but its notes get the silent marker, so no
+  automatic updater offers it. A silent marker in the annotation wins over the
+  flag. Stable `v*` tags are unchanged.
 - On the Runtime, the periodic check neither notifies about nor automatically
   installs a silent release. It skips releases the mirror index marks silent
   and still finds the newest announced release below them. A release the index
