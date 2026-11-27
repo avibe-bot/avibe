@@ -3,7 +3,8 @@
 // A model is offered when the user's own Source lists it, it is that vendor's own chat model, and the
 // Vibey menu does not hold it yet. Vibey's Session model menu then ends its list with one quiet row:
 // one model is named in the row with 「添加」; more are counted, and the row opens to name them. 「添加」
-// puts the model in the menu and picks it, as the menu's 添加模型 already does; the row shrinks to what is
+// puts the model in the menu and picks it, as the menu's 添加模型 already does, so the next message in this
+// Session uses it; the row shrinks to what is
 // left, and goes with the last. × (「不再提示」) ends it for those models; so does showing in three
 // opened menus without an add. Settings › 模型 › add lists the same models first, under 「新模型」, for
 // as long as the menu row would offer them; once added, closed, or seen three times, a model goes back
@@ -27,8 +28,8 @@ const menu = [astra, sol, opus5];
 const opus55: DraftModel = { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', efforts: claudeEfforts };
 const terra: DraftModel = { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', efforts: gptEfforts };
 
-// A longer menu, for where the opened names go: they join the end of the list and scroll with it,
-// while the count stays pinned.
+// A longer menu, for where the opened hint goes: count line and names together at the end of the list,
+// scrolling with it.
 const longMenu: DraftModel[] = [
   ...menu,
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', efforts: gptEfforts },
@@ -44,7 +45,7 @@ const states: Record<string, MenuState & { title: string; hover?: string; click?
   two: { title: '两个新模型：「有 2 个新模型可以添加」', models: menu, current: astra.id, hint: { kind: 'many', models: [opus55, terra], open: false } },
   'two-open': { title: '两个新模型 · 点开：逐个写名字，各带「添加」', models: menu, current: astra.id, hint: { kind: 'many', models: [opus55, terra], open: true } },
   'long-open': {
-    title: '八个模型时点开：名字接在列表末尾，随列表滚动，计数行仍固定在底部',
+    title: '八个模型时点开：计数行和名字一起接在列表末尾，随列表滚动',
     models: longMenu,
     current: astra.id,
     hint: { kind: 'many', models: [opus55, terra], open: true },
@@ -52,7 +53,7 @@ const states: Record<string, MenuState & { title: string; hover?: string; click?
     click: ['[data-new-models-open] >> text=GPT-6.1 Terra'],
   },
   'two-added': {
-    title: '点了 Claude Opus 5.5 的「添加」：它进了菜单并被选中，提示行缩成剩下的一个',
+    title: '点「添加」也切换了这个会话的模型：下一条消息起用 Claude Opus 5.5，思考强度跟着它；提示行缩成剩下的一个',
     models: [...menu, opus55],
     current: opus55.id,
     hint: { kind: 'one', model: terra },

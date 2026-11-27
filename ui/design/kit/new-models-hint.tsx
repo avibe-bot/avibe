@@ -118,7 +118,7 @@ const CloseControl = () => {
   const d = useDraft();
   const label = d('不再提示', "Don't show again");
   return (
-    <span className="group/hint-close relative shrink-0">
+    <span className="group/hint-close relative shrink-0 max-md:-mr-2">
       <Button
         type="button"
         variant="ghost"
@@ -139,14 +139,34 @@ const CloseControl = () => {
   );
 };
 
-/** The hint's line in the model list's pinned foot, above 添加模型: one model named with 「添加」, or a
- *  count that opens. Pinned, so every opened menu shows it, however long the list. */
+/** The count line: 「有 2 个新模型可以添加」 with its chevron and ×. */
+const CountLine = ({ count, open }: { count: number; open: boolean }) => {
+  const d = useDraft();
+  return (
+    <div className="flex items-center gap-1 pr-0.5 max-md:gap-3">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-expanded={open}
+        className="h-auto min-w-0 flex-1 justify-start gap-1 rounded px-2 py-1.5 text-left text-[11px] font-medium text-muted hover:bg-wash hover:text-foreground max-md:min-h-10"
+      >
+        <span className="truncate">{d(`有 ${count} 个新模型可以添加`, `${count} new models you can add`)}</span>
+        <ChevronDown aria-hidden className={clsx('size-3 shrink-0 transition-transform', open && 'rotate-180')} />
+      </Button>
+      <CloseControl />
+    </div>
+  );
+};
+
+/** Closed, the hint is one line in the model list's pinned foot, above 添加模型: one model named with
+ *  「添加」, or a count that opens. Pinned, so every opened menu shows it, however long the list. */
 export function NewModelsLine({ hint }: { hint: NewModelsHint }) {
   const d = useDraft();
-  if (hint.kind === 'none') return null;
+  if (hint.kind === 'none' || (hint.kind === 'many' && hint.open)) return null;
   if (hint.kind === 'one') {
     return (
-      <div data-new-models="" className="mt-1 flex items-center gap-1 max-md:gap-3">
+      <div data-new-models="" className="mt-1 flex items-center gap-1 pr-0.5 max-md:gap-3">
         <NewModelButton>
           <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
             <span className="shrink-0 text-[11px] font-medium text-muted">{d('新模型', 'New model')}</span>
@@ -158,30 +178,17 @@ export function NewModelsLine({ hint }: { hint: NewModelsHint }) {
       </div>
     );
   }
-  const count = hint.models.length;
-  return (
-    <div data-new-models="" className="mt-1 flex items-center gap-1 pr-0.5 max-md:gap-3">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        aria-expanded={hint.open}
-        className="h-auto min-w-0 flex-1 justify-start gap-1 rounded px-2 py-1.5 text-left text-[11px] font-medium text-muted hover:bg-wash hover:text-foreground max-md:min-h-10"
-      >
-        <span className="truncate">{d(`有 ${count} 个新模型可以添加`, `${count} new models you can add`)}</span>
-        <ChevronDown aria-hidden className={clsx('size-3 shrink-0 transition-transform', hint.open && 'rotate-180')} />
-      </Button>
-      <CloseControl />
-    </div>
-  );
+  return <div data-new-models="" className="mt-1"><CountLine count={hint.models.length} open={false} /></div>;
 }
 
-/** Opened, the names join the end of the list and scroll with it, so they never crowd the models out of
- *  a phone's 40vh column; opening brings them into view. */
+/** Opened, the hint is one block that reads top to bottom, the count line and then the names under it,
+ *  at the end of the list. It scrolls with the list, so the names never crowd the models out of a
+ *  phone's 40vh column; opening brings it into view. Dividers above (its own) and below (the foot's). */
 export function NewModelsOpened({ hint }: { hint: NewModelsHint }) {
   if (hint.kind !== 'many' || !hint.open) return null;
   return (
-    <div data-new-models-open="" className="-mx-1.5 mt-1 flex flex-col border-t border-border px-1.5 pt-1">
+    <div data-new-models="" data-new-models-open="" className="-mx-1.5 mt-1 flex flex-col border-t border-border px-1.5 py-1">
+      <CountLine count={hint.models.length} open />
       {hint.models.map((model) => (
         <NewModelButton key={model.id}>
           <ModelLines model={model} />
