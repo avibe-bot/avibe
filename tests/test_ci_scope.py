@@ -358,6 +358,35 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     assert result.returncode == 0 and output.read_text() == "ios=run\n"
 
 
+def test_native_receipt_uses_the_classified_checkout_not_another_run(tmp_path):
+    from scripts.ci_native_pr_tests import verified_merge_paths
+    from tests.test_ci_docs_only import make_repo, synthetic_pr, write
+
+    path = 'ios/Avibe/NavigationPolicy.swift'
+    cases = []
+    for name in ('first', 'second'):
+        repo = make_repo(tmp_path / name)
+        event, merge = synthetic_pr(repo, lambda root: write(root, path, f'// {name}\n'))
+        cases.append((repo, event, merge))
+    repo, event, merge = cases[0]
+    other, _, other_merge = cases[1]
+    assert merge != other_merge
+    payload, output = tmp_path / 'event.json', tmp_path / 'scope.out'
+    payload.write_text(json.dumps(event))
+    env = {**os.environ, 'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REF': 'refs/pull/1/merge',
+           'GITHUB_EVENT_PATH': str(payload), 'GITHUB_OUTPUT': str(output), 'FAST_PR_ENABLED': 'true'}
+    command = [sys.executable, str(ROOT / 'scripts/ci_scope.py')]
+    # Two valid merges change the same path. A stale run identity must fail on
+    # the issuing worker, before any receipt or dispatch outputs are written.
+    mixed = subprocess.run(command, cwd=repo, env={**env, 'GITHUB_SHA': other_merge}, capture_output=True, text=True)
+    assert mixed.returncode != 0 and 'classified checkout' in mixed.stdout and not output.exists()
+    subprocess.run(command, cwd=repo, env={**env, 'GITHUB_SHA': merge}, check=True, capture_output=True)
+    receipt = dict(line.split('=', 1) for line in output.read_text().splitlines())['native_path_receipt']
+    assert verified_merge_paths(repo, receipt) == (event['pull_request']['base']['sha'], (path,))
+    with pytest.raises(ValueError, match='do not match'):
+        verified_merge_paths(other, receipt)
+
+
 @pytest.mark.parametrize("path", ["vibe/ui_network_access.py", "tests/test_ui_listener_lifecycle.py"])
 def test_native_ui_listener_changes_run_on_all_three_operating_systems(path):
     jobs = make_plan("PR", scope(path))["jobs"]

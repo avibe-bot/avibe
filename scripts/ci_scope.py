@@ -283,7 +283,9 @@ def main() -> int:
             from scripts.ci_fast_pr import native_path_receipt, selected
             groups, chosen = selected(scope)
             if 'ios-shell' in chosen:
-                native_receipt = native_path_receipt(os.environ['GITHUB_SHA'], scope.verified_paths)
+                if scope.verified_checkout != os.environ.get('GITHUB_SHA'):
+                    raise ValueError('Native path receipt requires the classified checkout to match the run SHA')
+                native_receipt = native_path_receipt(scope.verified_checkout, scope.verified_paths)
             dispatch = {job: 'run' if job in chosen else 'skip' for job in PRODUCERS}
             advisory_ios = 'skip'  # selected native PR paths call the real required job instead
         shards = unit_shards(portfolio)
