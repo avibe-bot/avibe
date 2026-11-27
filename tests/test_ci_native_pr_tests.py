@@ -8,6 +8,7 @@ import pytest
 
 from scripts.ci_native_pr_tests import (
     CONTRACTS,
+    Owners,
     changed_sources,
     declared_classes,
     enumeration,
@@ -94,7 +95,7 @@ def test_deletion_and_rename_read_old_extension_but_not_vanished_class(tmp_path,
     (tmp_path / new).write_text("class PhoneTests: XCTestCase {}")
     renamed = changed_sources([old, new], tmp_path, "HEAD")
     assert selection(TARGET, renamed[TARGET], ALL, set())[1] == CONTRACTS | {COMMON, PHONE}
-    assert selection(TARGET, [({"RemovedTests"}, False, tmp_path / "Gone.swift")], ALL, set())[1] == CONTRACTS
+    assert selection(TARGET, [(Owners({"RemovedTests"}), False, tmp_path / "Gone.swift")], ALL, set())[1] == CONTRACTS
 
 
 def test_app_only_and_helpers_and_other_scheme(tmp_path):
@@ -103,16 +104,19 @@ def test_app_only_and_helpers_and_other_scheme(tmp_path):
     assert (
         selection(
             TARGET,
-            [({"NativeBadgeTests", "FakeAppBadgeCenter", "NSObject"}, True, tmp_path / "Badge.swift")],
+            [(Owners({"NativeBadgeTests", "FakeAppBadgeCenter", "NSObject"}), True, tmp_path / "Badge.swift")],
             ALL,
             set(),
         )[0].count(TARGET)
         == 0
     )
-    assert selection(TARGET, [({"FakeClock"}, True, tmp_path / "Support.swift")], ALL, set()) == ([TARGET], CONTRACTS)
+    assert selection(TARGET, [(Owners({"FakeClock"}), True, tmp_path / "Support.swift")], ALL, set()) == (
+        [TARGET],
+        CONTRACTS,
+    )
     fix = "AvibeSheetFixtureTests/HoldTouchUITests/testTouch"
     assert selection(
-        "AvibeSheetFixtureTests", [({"HoldTouchUITests"}, True, tmp_path / "Sheet.swift")], {fix}, set()
+        "AvibeSheetFixtureTests", [(Owners({"HoldTouchUITests"}), True, tmp_path / "Sheet.swift")], {fix}, set()
     ) == (["AvibeSheetFixtureTests/HoldTouchUITests"], {fix})
 
 
@@ -122,16 +126,16 @@ def test_real_shared_helper_and_protocol_reference(swift_parser):
     helper = root / "WebKitReadiness.swift"
     protocol = root / "DirectIrohInteropProtocolTests.swift"
     owners = declared_classes(helper.read_bytes())
-    assert "DirectPathAppTests" not in owners
+    assert "DirectPathAppTests" not in owners.classes | owners.extensions
     assert selection(TARGET, [(owners, True, helper)], available, set()) == ([TARGET], CONTRACTS)
     owners = declared_classes(protocol.read_bytes())
-    assert "DirectIrohInteropTests" not in owners
+    assert "DirectIrohInteropTests" not in owners.classes | owners.extensions
     assert selection(TARGET, [(owners, True, protocol)], available, set())[1] == CONTRACTS | {
         f"{TARGET}/DirectIrohInteropProtocolTests/testProtocol"
     }
-    assert declared_classes(b'// class Bogus {}\nlet text = #"extension Bogus {}"#\nextension Mod.PhoneTests {}') == {
-        "PhoneTests"
-    }
+    assert declared_classes(
+        b'// class Bogus {}\nlet text = #"extension Bogus {}"#\nextension Mod.PhoneTests {}'
+    ) == Owners(extensions={"Mod.PhoneTests"})
 
 
 def test_ambiguous_parse_requires_full_receipts_even_on_deletion(tmp_path, swift_parser):
@@ -144,9 +148,44 @@ def test_ambiguous_parse_requires_full_receipts_even_on_deletion(tmp_path, swift
 
 @pytest.mark.parametrize("owners", [{"DirectIrohInteropTests"}, {"DirectIrohInteropTests", "PhoneTests"}])
 def test_named_master_only_exception_does_not_waive_other_receipts(owners):
-    selected, required = selection(TARGET, [(owners, True, Path("Mixed.swift"))], ALL, set())
+    selected, required = selection(TARGET, [(Owners(owners), True, Path("Mixed.swift"))], ALL, set())
     assert not any("DirectIrohInteropTests" in s for s in [*selected, *required])
     assert required == (CONTRACTS | {PHONE} if "PhoneTests" in owners else CONTRACTS)
+
+
+def test_unknown_ownership_cannot_hide_disabled_method(swift_parser):
+    source = Path(__file__).resolve().parents[1] / "ios/AvibeTests/MobileOnboardingTests.swift"
+    method = f"{TARGET}/MobileOnboardingTests/testBundledPageLoadsItsReactApplicationThroughTheAppScheme"
+    # Use the production parser; the rule holds even if a newer grammar can
+    # establish the class directly later.
+    try:
+        owners = declared_classes(source.read_bytes())
+    except ValueError:
+        owners = None
+    with pytest.raises(ValueError, match="unavailable"):
+        selection(TARGET, [(owners, True, source)], ALL, {method})
+
+
+@pytest.mark.parametrize("old_only", [False, True])
+def test_unresolved_extension_cannot_hide_behind_known_class(tmp_path, swift_parser, old_only):
+    path = "ios/AvibeTests/Suites.swift"
+    name = tmp_path / path
+    mixed = (
+        "class CommonTests: XCTestCase {}\n"
+        "typealias Alternate = PhoneTests\n"
+        "extension Alternate { func testViaAlias() {} }"
+    )
+    repo(tmp_path, {path: mixed if old_only else "class CommonTests: XCTestCase {}"})
+    name.write_text("class CommonTests: XCTestCase {}" if old_only else mixed)
+    sources = changed_sources([path], tmp_path, "HEAD")[TARGET]
+    method = f"{TARGET}/PhoneTests/testViaAlias"
+    catalog = ALL | {method}
+    selectors, required = selection(TARGET, sources, catalog - {OPTIONAL}, {OPTIONAL})
+    assert selectors == [TARGET] and required == catalog - {OPTIONAL}
+    with pytest.raises(ValueError, match="testViaAlias"):
+        verify(tree(dict.fromkeys(required - {method}, "Passed")), TARGET, required)
+    with pytest.raises(ValueError, match="unavailable"):
+        selection(TARGET, sources, catalog - {method}, {method})
 
 
 def test_native_capture_env_is_scoped(tmp_path):
@@ -190,7 +229,7 @@ def test_show_fixture_requires_own_readiness_and_cleans_up(tmp_path, monkeypatch
 
 def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
     swift = tmp_path / "New.swift"
-    sources = [({"PhoneTests"}, True, swift)]
+    sources = [(Owners({"PhoneTests"}), True, swift)]
     with pytest.raises(ValueError, match="compiler file list"):
         verify_membership(TARGET, sources, tmp_path)
     listing = (
@@ -223,6 +262,6 @@ def test_disabled_touched_method_is_not_passing_evidence(tmp_path):
     }
     enabled, disabled = enumeration({"errors": [], "values": [config]}, TARGET)
     with pytest.raises(ValueError, match="unavailable"):
-        selection(TARGET, [({"PhoneTests"}, True, tmp_path / "Phone.swift")], enabled, disabled)
+        selection(TARGET, [(Owners({"PhoneTests"}), True, tmp_path / "Phone.swift")], enabled, disabled)
     with pytest.raises(ValueError):
         enumeration({"errors": ["failed"], "values": [config]}, TARGET)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -65,13 +66,19 @@ def fixture_env(required, env, temp):
                     proc.wait()
 
 
+@dataclass
+class Owners:
+    classes: set[str] = field(default_factory=set)
+    extensions: set[str] = field(default_factory=set)
+
+
 def declared_classes(source):
     """Parse Swift syntax, including declarations inside conditional branches."""
     from tree_sitter import Language, Parser
     import tree_sitter_swift
 
     tree = Parser(Language(tree_sitter_swift.language())).parse(source)
-    names = set()
+    owners = Owners()
     todo = [tree.root_node]
     while todo:
         node = todo.pop()
@@ -86,13 +93,18 @@ def declared_classes(source):
             if kind and kind.type in ("class", "extension"):
                 name = node.child_by_field_name("name")
                 if kind.type == "extension" and name and name.type == "user_type":
-                    identifiers = [part for part in name.named_children if part.type == "type_identifier"]
-                    name = identifiers[-1] if identifiers else None
-                if not name or name.type != "type_identifier" or name.has_error:
+                    parts = name.named_children
+                    if not parts or any(part.type != "type_identifier" for part in parts) or name.has_error:
+                        raise ValueError("Cannot establish extended Swift type")
+                    owners.extensions.add(".".join(part.text.decode().strip("`") for part in parts))
+                elif name and name.type == "type_identifier" and not name.has_error:
+                    (owners.extensions if kind.type == "extension" else owners.classes).add(
+                        name.text.decode().strip("`")
+                    )
+                else:
                     raise ValueError("Cannot establish Swift declaration name")
-                names.add(name.text.decode().strip("`"))
         todo.extend(node.named_children)
-    return names
+    return owners
 
 
 def changed_sources(paths, root, base):
@@ -115,16 +127,17 @@ def changed_sources(paths, root, base):
             raise ValueError(f"Missing both sides: {path}")
         # Parse revisions independently: one side's comment/string/conditional
         # must never change how the other side's declaration is interpreted.
-        names = set()
-        if path.suffix == ".swift":
-            for revision in (before, after):
-                if revision is not None:
-                    try:
-                        names.update(declared_classes(revision))
-                    except ValueError:
-                        names = None  # Unknown ownership on either side, even for a deletion.
-                        break
-        changes[path.parts[1]].append((names, after is not None, path))
+        target = changes[path.parts[1]]
+        if path.suffix != ".swift":
+            target.append((Owners(), after is not None, path))
+            continue
+        for revision, exists in ((before, False), (after, True)):
+            if revision is not None:
+                try:
+                    owners = declared_classes(revision)
+                except ValueError:
+                    owners = None  # Unknown on either side, even for a deletion.
+                target.append((owners, exists, path))
     return changes
 
 
@@ -155,11 +168,15 @@ def selection(target, sources, enabled, disabled):
     classes = {s.split("/")[1] for s in available}
     broad = False
     for owners, exists, _ in sources:
-        if owners is None:
+        # A class declaration may be an ordinary helper. An extension receiver
+        # on the other hand can be a typealias for a different compiled suite,
+        # even when another owner in this very file matched the catalog.
+        extensions = {name.removeprefix(target + ".") for name in owners.extensions} if owners is not None else set()
+        if owners is None or extensions - classes:
             broad = True
-            required.update(s for s in enabled if not s.startswith(MASTER_INTEROP + "/"))
+            required.update(s for s in available if not s.startswith(MASTER_INTEROP + "/"))
             continue
-        matches = classes & owners
+        matches = (classes & owners.classes) | extensions
         for cls in matches:
             prefix = f"{target}/{cls}"
             if prefix == MASTER_INTEROP:
