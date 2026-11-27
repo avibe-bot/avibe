@@ -1593,6 +1593,10 @@ def _project_model_inventory(
         for member in ("data", "models")
         for suffix in (("*",), ("*", "id"), ("*", "supported_parameters", "*"))
     }
+    if pagination is not None:
+        # Anthropic uses the last model ID as its opaque continuation token.
+        # Preserve it exactly, even when it exceeds the diagnostic token cap.
+        lossless_paths.add(("last_id",))
     if not project_json_reader(
         reader, paths, visit, lossless_string_paths=lossless_paths
     ) or not root_is_map:

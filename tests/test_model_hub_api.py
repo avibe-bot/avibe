@@ -3693,8 +3693,10 @@ def test_models_dev_route_passes_the_nonblocking_refresh_mode(monkeypatch):
     assert calls == [("claude", True)]
 
 
-def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode", ["direct", "hub"])
+def test_claude_cli_override_only_adds_rows_in_direct_mode(monkeypatch, tmp_path, mode):
     service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].mode = mode
     monkeypatch.setattr(
         service,
         "_builtin_snapshots",
@@ -3712,8 +3714,8 @@ def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, 
     asyncio.run(service.reconcile_builtin_models(("claude",)))
 
     model_ids = {model.id for model in store.config.agents["claude"].models}
-    assert "deepseek-v3.2" in model_ids
-    assert "claude-sonnet-9" in model_ids
+    assert ("deepseek-v3.2" in model_ids) is (mode == "direct")
+    assert ("claude-sonnet-9" in model_ids) is (mode == "direct")
 
 
 def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
@@ -6528,7 +6530,8 @@ def test_deepseek_replacement_guards_new_supply_gaps(monkeypatch, tmp_path, outc
     assert committed["source"]["credential_ref"] == f"cred_test{adapter.credential_count:03d}"
     assert committed["source"]["credential_generation"]
     assert store.config.sources[0].to_payload()["models"] == before["sources"][0]["models"]
-    assert committed["source"]["last_discovered_at"] == source.last_discovered_at
+    assert committed["source"]["last_discovered_at"] is None
+    assert store.config.sources[0].last_discovered_at == source.last_discovered_at
     assert store.config.agents["codex"].to_payload()["routes"] == before["agents"]["codex"]["routes"]
     assert adapter.discovery_credential_refs == []
     assert adapter.revoked[-1] == source.credential_ref
@@ -8335,6 +8338,44 @@ def test_renewal_finalizes_while_a_previous_generations_menu_write_is_blocked(tm
             release.set()
             await refresh
         assert store.load().sources[0].credential_ref == "cred_renewed"
+
+    asyncio.run(run())
+
+
+def test_cancelled_same_handle_discovery_invalidates_the_old_grant(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_samegrant1", kind="subscription", vendor="anthropic", display_name="Subscription",
+        protocol="anthropic", supply_channel="hub", billing="monthly", credential_ref="cred_reused",
+        state=ModelHubSourceStateConfig(status="standby"), credential_generation="vp_" + "a" * 32,
+        models=[ModelHubModelConfig(id="claude-private-old", provenance="discovered")],
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+
+    async def run():
+        await service._observe_family_listing(source, [DiscoveredModel(id="claude-private-old")])
+        flow = (await service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+        fid = flow["flow_id"]
+        adapter.flows[fid] = OAuthFlowState(**{**adapter.flows[fid].__dict__, "state": "success",
+                                              "credential_ref": source.credential_ref})
+        entered = asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await asyncio.Future()
+
+        adapter.discover_models = blocked
+        poll = asyncio.create_task(service.oauth_status(fid))
+        await asyncio.wait_for(entered.wait(), 2)
+        poll.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+        saved = store.load().sources[0]
+        assert saved.credential_ref == source.credential_ref
+        assert saved.credential_generation != source.credential_generation
+        assert service._family_inventory.listed(saved) is None
+        assert not adapter.revoked
 
     asyncio.run(run())
 

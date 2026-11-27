@@ -3321,10 +3321,15 @@ class CLIProxyEngineAdapter:
                 timeout=_ENGINE_MODEL_LISTING_TIMEOUT_SECONDS,
             )
             prefix = metadata.get("prefix")
-            return _discovered_models(
-                payload,
-                str(prefix) if isinstance(prefix, str) and prefix else None,
-            )
+            try:
+                return _discovered_models(
+                    payload,
+                    str(prefix) if isinstance(prefix, str) and prefix else None,
+                )
+            except EngineClientError as exc:
+                # An invalid optional inventory does not invalidate the grant
+                # that the engine has already accepted.
+                raise ModelDiscoveryError("invalid OAuth model inventory") from exc
         normalized_base_url = await run_owned_in_thread(
             self.state_store.validate_api_key_target,
             credential_ref,

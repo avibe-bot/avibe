@@ -43,6 +43,7 @@ def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
     async def scenario():
         requests = []
         mode = "public"
+        listed_id = "listed-model" if operation == "create" else "old-account-model"
         expected_key = "unverified-test-key"
 
         async def models(request):
@@ -64,7 +65,7 @@ def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
             if mode in {"confirmed", "empty_confirmed"} and not has_key:
                 return web.Response(status=401)
             return web.json_response({"data": [] if mode == "empty_confirmed" else [
-                {"id": "listed-model", "supported_parameters": ["reasoning_effort"]},
+                {"id": listed_id, "supported_parameters": ["reasoning_effort"]},
             ]})
 
         app = web.Application()
@@ -87,6 +88,7 @@ def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
             requests.clear()
             adapter.provision_credential.reset_mock()
             mode = outcome
+            listed_id = "listed-model"
             if outcome == "connection_refused":
                 await site.stop()
             if operation == "create":
@@ -131,11 +133,13 @@ def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
                 assert source["credential_generation"]
                 if not confirmed:
                     assert source["verification_pending"] == source["credential_generation"]
-                assert [m["id"] for m in source["models"]] == (
-                    [] if outcome == "empty_confirmed" or (
-                        operation == "create" and outcome in {"unreachable", "timeout", "connection_refused"}
-                    ) else ["listed-model"]
-                )
+                no_read = outcome in {"unreachable", "timeout", "connection_refused"}
+                expected = [] if no_read or outcome == "empty_confirmed" else [listed_id]
+                assert [m["id"] for m in source["models"]] == expected
+                current = next(s for s in service.list_sources() if s["id"] == source["id"])
+                assert [m["id"] for m in current["models"]] == expected
+                if no_read:
+                    assert current["last_discovered_at"] is None
                 if operation != "create":
                     assert source["credential_ref"] != old_ref
                     assert state.credential_metadata_if_present(old_ref) is None

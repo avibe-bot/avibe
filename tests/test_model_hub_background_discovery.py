@@ -120,12 +120,139 @@ def test_family_menu_follows_complete_listings_without_forgetting_the_route(tmp_
     refresh()
     assert mid not in offers(service)
     persisted = store.load()
-    assert mid in {row.id for row in persisted.agents[backend].models}
-    restarted, _, _ = _service(tmp_path, persisted)
+    # A menu observation must never write an implicit row into the same
+    # aggregate that credential finalization owns. A saved session resolves
+    # from the execution view instead, including after a process restart.
+    assert mid not in {row.id for row in persisted.agents[backend].models}
+    restarted, _, restarted_adapter = _service(tmp_path, persisted)
+    from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+    from core.handlers.model_hub.resolver import resolve_model_hub_turn
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+    snapshot = ModelHubRuntimeRouter(service=restarted, overlay_path=tmp_path / "overlay.json").snapshot()
+    assert resolve_model_hub_turn(snapshot, backend, mid, now=restarted.now()).source.id == source.id
+    # Gateway admission reloads the config independently of the CLI launch.
+    restarted_adapter.outcomes.append(RawCallOutcome(kind=RawOutcomeKind.SUCCESS, http_status=200,
+                                                    error_code=None, redacted_message=None, stream_started=False,
+                                                    source_id=source.id, model_id=mid))
+    assert asyncio.run(restarted.resolve(backend=backend, model_id=mid, request={})).source_id == source.id
+    assert restarted_adapter.invocations == [(source.id, mid)]
     assert mid not in offers(restarted)
+    assert mid not in {row["model_id"] for row in restarted.agent_chains(backend)}
+    assert restarted.agent_chain(backend, mid)["model_id"] == mid
     assert mid not in {row["id"] for row in restarted.agent_model_candidates(backend)["providers"]}
     if backend == "codex":
         assert next(row for row in restarted.codex_launch_catalog(persisted) if row["id"] == mid)["menu_visible"] is False
+
+
+def test_crash_before_manual_receipt_publication_rechecks_the_source_on_restart(tmp_path):
+    source = _hub_source("src_crashgap")
+    service, store, adapter, clock = _background(tmp_path, [source], ListingAdapter((MENU_MODEL, "claude-old")))
+    _refresh(service)
+    clock.advance(60)
+    adapter.discovered = (MENU_MODEL, "claude-new")
+    asyncio.run(service.refresh_source(source.id))
+    assert source.id in service._pending_family_listings
+    # Drop the original controller before its notification can publish. The
+    # old receipt and the freshly committed route file survive independently.
+    restart_adapter = ListingAdapter((MENU_MODEL, "claude-new"))
+    restarted, _, _ = _service(tmp_path, store.load(), restart_adapter)
+    restarted.now = clock.now
+    _refresh(restarted)
+    assert restart_adapter.listed == [source.credential_ref]
+    assert {row["id"] for row in restarted.list_sources()[0]["models"]} == {MENU_MODEL, "claude-new"}
+
+
+def test_failed_queued_listing_cannot_overwrite_a_newer_background_receipt(tmp_path, monkeypatch):
+    from core.handlers.model_hub.family_inventory import FamilyInventory
+
+    source = _hub_source("src_retryorder")
+    service, _, adapter, clock = _background(tmp_path, [source], ListingAdapter((MENU_MODEL, "claude-older")))
+    asyncio.run(service.refresh_source(source.id))
+    save = FamilyInventory.save
+    with monkeypatch.context() as patch:
+        def fail_once(self, path):
+            raise OSError("injected failure")
+        patch.setattr(FamilyInventory, "save", fail_once)
+        _refresh(service)
+    assert FamilyInventory.save is save
+    assert source.id in service._pending_family_listings
+    adapter.discovered = (MENU_MODEL, "claude-newer")
+    clock.advance(1)
+    asyncio.run(service._refresh_source_in_background(source.id))
+    _refresh(service)
+    assert source.id not in service._pending_family_listings
+    assert {row["id"] for row in service.list_sources()[0]["models"]} == {MENU_MODEL, "claude-newer"}
+
+
+@pytest.mark.parametrize("change", ["assignment", "mode", "metadata"])
+def test_known_family_supply_reprojects_without_another_provider_read(tmp_path, monkeypatch, change):
+    mid = "gpt-late-family"
+    source = _hub_source("src_lateoffer", vendor="openai")
+    service, store, adapter, _ = _background(tmp_path, [source], ListingAdapter((mid,)))
+    metadata = {"openai": {"name": "OpenAI", "models": {mid: {
+        "name": "Chat", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
+    }}}}
+    cached = {} if change == "metadata" else metadata
+    service.models_dev_catalog = lambda: cached
+    monkeypatch.setattr("vibe.models_dev_catalog.cached_models_dev_catalog", lambda: cached)
+    config = copy.deepcopy(store.load())
+    if change == "assignment":
+        config.agents["codex"].sources.order = []
+    if change == "mode":
+        config.agents["codex"].mode = "direct"
+    store.save(config)
+    asyncio.run(service._refresh_source_in_background(source.id))
+    assert mid not in {r["id"] for r in service.backend_catalog_models("codex")}
+    adapter.discovery_error = ModelDiscoveryError("offline")
+    if change == "assignment":
+        payload = asyncio.run(service.set_agent_sources("codex", {"order": [source.id]}))
+    elif change == "mode":
+        payload = asyncio.run(service.set_agent_mode("codex", "hub"))
+    else:
+        cached = metadata
+        _refresh(service)
+        payload = service.get_agent_sources("codex")
+    assert mid in {r["id"] for r in payload["catalog_models"] if r["routeable"]}
+    assert adapter.listed == [source.credential_ref]
+
+
+def test_automatic_row_delete_and_restore_stays_explicit_after_withdrawal(tmp_path):
+    from core.handlers.model_hub.service import ModelHubError
+
+    mid = "gpt-owner-restored"
+    source = _hub_source("src_restored1", kind="api_key", vendor="openai")
+    service, store, adapter, _ = _background(tmp_path, [source], ListingAdapter((mid,)))
+    service.models_dev_catalog = lambda: {"openai": {"name": "OpenAI", "models": {
+        mid: {"name": "Restored", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    }}}
+    asyncio.run(service._refresh_source_in_background(source.id))
+    baseline = service.backend_catalog_models("codex")
+    chosen = next(row for row in baseline if row["id"] == mid)
+    desired = [row for row in baseline if row["id"] != mid]
+    # Echoing the picker is not an edit, and cannot pin automatic metadata.
+    asyncio.run(service.set_agent_models("codex", baseline, baseline))
+    assert mid not in {row.id for row in store.load().agents["codex"].models}
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(service.set_agent_models("codex", baseline, desired))
+    assert exc.value.code == "backend_model_in_route"
+    plan = exc.value.data
+    asyncio.run(service.set_agent_models("codex", baseline, desired, force=True,
+                                        confirmed_remove_hops=plan["would_remove_hops"],
+                                        confirmed_interruptions=plan["would_interrupt"]))
+    asyncio.run(service._refresh_source_in_background(source.id))
+    assert mid in store.load().agents["codex"].removed_model_ids
+    assert mid not in {r["id"] for r in service.backend_catalog_models("codex")}
+    asyncio.run(service.set_agent_models("codex", desired, [*desired, chosen]))
+    # The fixture also has two Claude aliases bound to MENU_MODEL. Withdraw
+    # only the Codex offer; deleting those unrelated hops really needs consent.
+    adapter.discovered = (MENU_MODEL,)
+    response = asyncio.run(service.refresh_source(source.id))
+    assert mid not in {row["id"] for row in response["source"]["models"]}
+    assert not response["removed_hops"]
+    _refresh(service)
+    restarted, _, _ = _service(tmp_path, store.load())
+    assert mid in {r["id"] for r in restarted.backend_catalog_models("codex")}
+    assert restarted.agent_chain("codex", mid)["current"] == {"source_id": source.id, "model_id": mid}
 
 
 @pytest.mark.parametrize("damage", [b"{", b'{"version":2}', b'{"version":1,"automatic":{},"listings":[]}'])
@@ -144,7 +271,7 @@ def test_damaged_inventory_preserves_routes_and_recovery_bytes(tmp_path, damage)
     assert [row["id"] for row in service.backend_catalog_models("codex")] == ["gpt-explicit"]
     inventory = FamilyInventory.load(path)
     assert inventory.status == "damaged"
-    offline = inventory.codex_launch_rows(config, inventory.hidden(config, "codex"))
+    offline = inventory.offline_codex_launch_rows(config)
     assert offline == service.codex_launch_catalog(config)
     assert [(row["id"], row["menu_visible"]) for row in offline] == [("gpt-explicit", True), ("gpt-former-auto", False)]
     asyncio.run(service._refresh_source_in_background(source.id))
@@ -152,7 +279,8 @@ def test_damaged_inventory_preserves_routes_and_recovery_bytes(tmp_path, damage)
     assert path.read_bytes() == damage
 
 
-def test_private_models_do_not_follow_a_reused_subscription_handle_to_a_new_grant(tmp_path):
+@pytest.mark.parametrize("ledger", ["intact", "missing", "damaged"])
+def test_private_models_do_not_follow_a_reused_subscription_handle_to_a_new_grant(tmp_path, ledger):
     mid = "claude-private-family"
     source = _hub_source("src_scopecheck", kind="subscription")
     service, store, _, _ = _background(tmp_path, [source], ListingAdapter((mid,)))
@@ -165,12 +293,18 @@ def test_private_models_do_not_follow_a_reused_subscription_handle_to_a_new_gran
     # Model the persisted boundary of a renewal that reused the engine handle;
     # the older route is deliberately retained. No new grant listing landed.
     config = copy.deepcopy(store.load())
-    config.sources[0].credential_generation = "new-generation"
+    config.sources[0].credential_generation = "vp_" + "b" * 32
     assert mid in {row.id for row in config.sources[0].models}
+    if ledger == "missing":
+        service._family_inventory_path.unlink()
+    elif ledger == "damaged":
+        service._family_inventory_path.write_bytes(b"{")
     restarted, _, _ = _service(tmp_path, config)
     assert mid not in {row["id"] for row in restarted.backend_catalog_models("claude")}
     assert mid not in {row["id"] for row in restarted.agent_model_candidates("claude")["providers"]}
-    assert mid not in {row["id"] for row in restarted.list_sources()[0]["models"]}
+    presented = restarted.list_sources()[0]
+    assert mid not in {row["id"] for row in presented["models"]}
+    assert presented["last_discovered_at"] is None
 
 
 def test_background_failure_keeps_source_untouched_and_backs_off_until_a_success(tmp_path, caplog):

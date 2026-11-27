@@ -250,7 +250,11 @@ class _Router:
         self.retired = []
 
     def snapshot(self):
-        return SimpleNamespace(agents={"codex": SimpleNamespace(models=[])})
+        from config.v2_config import ModelHubConfig
+
+        config = ModelHubConfig()
+        config.agents["codex"].models.clear()
+        return config
 
     async def resolve(self, backend, requested_model, *, process_scope=None, turn_id=None, config=None):
         self.scopes.append((backend, process_scope))

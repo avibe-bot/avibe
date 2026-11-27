@@ -1156,7 +1156,7 @@ class ModelHubRuntimeRouter:
         if listed_only:
             # A backend that addresses only listed rows cannot take a manual
             # Route retained for an id its list does not hold.
-            view = self.service._clone_config(self.service.store.load())
+            view = self.service._clone_config(self.snapshot())
             view.agents[backend].routes.pop(requested_model, None)
         projection_config, projection_resolution = self.service._inspect_terminal_chain(
             backend=backend,
@@ -1275,12 +1275,12 @@ class ModelHubRuntimeRouter:
         and its runtime's launch inputs from one load, so a concurrent catalog
         change cannot split them.
         """
-        return self.service.store.load()
+        return self.service.routing_snapshot()
 
     def turn_mode(self, backend: BackendName, *, config: ModelHubConfig | None = None) -> TurnMode:
         if backend not in MODEL_HUB_BACKENDS:
             return "direct"
-        config = config if config is not None else self.service.store.load()
+        config = config if config is not None else self.snapshot()
         return cast(TurnMode, config.agents[backend].mode)
 
     def _describe_launch(
@@ -1356,7 +1356,7 @@ class ModelHubRuntimeRouter:
         requested_model = str(requested_model or "").strip()
         if backend not in MODEL_HUB_BACKENDS:
             return self._direct_launch(backend, requested_model)
-        config = config if config is not None else self.service.store.load()
+        config = config if config is not None else self.snapshot()
         if backend == "vibey" and (
             config.agents[backend].mode != "hub" or self.turn_gateway is None
         ):
@@ -1511,7 +1511,7 @@ class ModelHubRuntimeRouter:
             None,
         )
         if launch is None:
-            config = snapshot if snapshot is not None else self.service.store.load()
+            config = snapshot if snapshot is not None else self.snapshot()
             if all(model.id != requested_model for model in config.agents["opencode"].models):
                 # The overlay holds launches only for listed rows.
                 raise self._no_candidate_error(
@@ -1535,7 +1535,7 @@ class ModelHubRuntimeRouter:
                     turn_id=None,
                 )
             raise ModelHubError("mapping_target_unavailable", status=409)
-        config = snapshot if snapshot is not None else self.service.store.load()
+        config = snapshot if snapshot is not None else self.snapshot()
         self._emit_transition(launch, config)
         return launch
 
@@ -1595,7 +1595,7 @@ class ModelHubRuntimeRouter:
             )
         if decision is None:
             return False
-        config = self.service.store.load()
+        config = self.snapshot()
         source = next((item for item in config.sources if item.id == launch.source_id), None)
         if source is None:
             return False
@@ -1614,7 +1614,7 @@ class ModelHubRuntimeRouter:
         *,
         config: ModelHubConfig | None = None,
     ) -> OpenCodeOverlay | None:
-        config = config if config is not None else self.service.store.load()
+        config = config if config is not None else self.snapshot()
         agent = config.agents["opencode"]
         if agent.mode == "direct":
             return None

@@ -1600,7 +1600,7 @@ class CodexAgent(BaseAgent):
 
                 def offline_catalog():
                     evidence = FamilyInventory.load(paths.get_state_dir() / FAMILY_INVENTORY_FILE)
-                    return evidence.codex_launch_rows(config, evidence.hidden(config, "codex"))
+                    return evidence.offline_codex_launch_rows(config)
 
                 configured_models = await asyncio.to_thread(offline_catalog)
         key = (

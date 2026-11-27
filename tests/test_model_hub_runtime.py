@@ -3525,6 +3525,7 @@ def test_anthropic_inventory_only_returns_after_the_last_complete_page(monkeypat
     from contextlib import asynccontextmanager
 
     seen = []
+    cursor = "first" if tail is not None else "m" * 17000
 
     class Session:
         def __init__(self, **kwargs):
@@ -3540,7 +3541,7 @@ def test_anthropic_inventory_only_returns_after_the_last_complete_page(monkeypat
         async def get(self, url, *, headers, allow_redirects, params=None, **kwargs):
             assert not allow_redirects
             seen.append((url, params or {}))
-            body = ({"data": [{"id": "first"}], "has_more": True, "last_id": "first"}
+            body = ({"data": [{"id": cursor}], "has_more": True, "last_id": cursor}
                     if not params else tail or {"data": [{"id": "second"}], "has_more": False})
             buffer = io.BytesIO(json.dumps(body).encode())
 
@@ -3556,11 +3557,11 @@ def test_anthropic_inventory_only_returns_after_the_last_complete_page(monkeypat
     monkeypatch.setattr(client_module.aiohttp, "ClientSession", Session)
     call = client_module.probe_models(vendor="custom", protocol="anthropic", base_url="https://api.example.test/v1", secret="fixture")
     if tail is None:
-        assert [m.id for m in asyncio.run(call)] == ["first", "second"]
+        assert [m.id for m in asyncio.run(call)] == [cursor, "second"]
     else:
         with pytest.raises(client_module.EngineClientError):
             asyncio.run(call)
-    assert [params for _, params in seen] == [{}, {"after_id": "first"}]
+    assert [params for _, params in seen] == [{}, {"after_id": cursor}]
     assert seen[0][0] == seen[1][0]
 
 
