@@ -44,6 +44,10 @@ window.fetch = async (input, init) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.origin);
   const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
   if (url.pathname === '/api/csrf-token') return reply({ csrf_token: 'fixture' });
+  // The Workbench event transport is negotiated from /api/session before it
+  // opens a stream. A local answer without `event_stream_transport` (an older
+  // Runtime) selects EventSource, which is this fixture's event transport.
+  if (url.pathname === '/api/session') return reply({ remote: false });
   if (url.pathname === '/api/projects/order') {
     const payload = JSON.parse(String(init?.body));
     if (JSON.stringify(payload.expected_order) !== JSON.stringify(readProjects().map((p) => p.id))) {

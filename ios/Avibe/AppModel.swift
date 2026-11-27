@@ -622,7 +622,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The listener's last few failures, for the rendezvous request.
+    /// The listener's last few failures, and a first bind confirmed late,
+    /// for the rendezvous request.
     var directListenerFailures: [DirectListenerFailure] {
         directPathController?.listenerFailures ?? []
     }

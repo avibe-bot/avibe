@@ -1,1 +1,1 @@
-Run desktop-shell: this PR changes the Desktop's direct listener (desktop/src-tauri/src/direct/listener.rs), which only that job builds and tests, on macOS and Windows.
+Run the browser lanes: this PR fixes the project-order, home-media and session-dot fixtures (ui/e2e/*/fixture.tsx) that only they execute, and master's red lanes 2 and 3 skipped the suites after them.

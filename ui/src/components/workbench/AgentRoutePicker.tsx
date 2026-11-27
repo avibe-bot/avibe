@@ -941,7 +941,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 };
 
 // One effort in the compact menu's radio group. A refused saved effort stays
-// checked and gold: routing still sends it, so it shows as itself.
+// checked and gold: routing still sends it, so it shows as itself. Each segment
+// is as wide as its label and shares what the row leaves over, so a long label
+// stays inside its segment at the 320px menu; a row that cannot hold them all
+// wraps rather than overflowing.
+// ui/design: chat/composer/route-picker-long-efforts
 export const EffortChip: React.FC<{
   active: boolean;
   label: string;
@@ -958,7 +962,7 @@ export const EffortChip: React.FC<{
     title={hint ?? undefined}
     onClick={onClick}
     className={clsx(
-      'min-w-[3rem] flex-1 whitespace-nowrap rounded-[4px] border px-2 py-1.5 text-[12px] capitalize transition-colors',
+      'flex-auto whitespace-nowrap rounded-[4px] border px-1.5 py-1.5 text-[12px] capitalize transition-colors',
       'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60',
       refused
         ? 'border-gold/40 bg-gold/10 font-bold text-gold-ink'

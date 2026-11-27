@@ -73,7 +73,7 @@ import {
   type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
-import { liveStreamVia, setLiveStreamVia } from '../lib/liveStreamVia';
+import { latestRequestVia, liveStreamVia, pageVia, setLiveStreamVia, subscribePageVia } from '../lib/liveStreamVia';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 import {
@@ -678,6 +678,16 @@ export type TunnelNetworkPath = {
 if (typeof window !== 'undefined' && nativeDirectHandoverAvailable()) installPageFetchCounting();
 
 /** The shell's connection runs straight to an address, not through the relay. */
+/**
+ * The page came in through the direct ingress, as far as the hand-over needs
+ * to know: its stream and its latest request both said so. With an instance
+ * that does not say how requests arrive (one from before `X-Avibe-Via`), the
+ * stream's word alone, as it was.
+ */
+function pageOnDirectPath(): boolean {
+  return pageVia() === 'direct' || (latestRequestVia() === null && liveStreamVia() === 'direct');
+}
+
 function isDirectAddressPath(path: NativeDirectPathKind | null): boolean {
   return path === 'ipv4' || path === 'ipv6';
 }
@@ -3053,6 +3063,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     retryAt: 0,
   });
   const attemptDirectHandoverRef = useRef<() => Promise<void>>(async () => {});
+  const askForDirectHandoverRef = useRef<() => void>(() => {});
   const openWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
@@ -3604,28 +3615,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (sourceKind === 'browser') {
           setLiveStreamVia(parsed.via === 'direct' || parsed.via === 'other' ? parsed.via : null);
           const handover = directHandoverRef.current;
-          if (parsed.via === 'direct') {
+          // The stream is a connection of its own: the verdict on a
+          // hand-over is the stream's word and the latest request's
+          // together. The stream's own reconnect begins with a request, so
+          // that request's word is the newer of the two.
+          if (pageOnDirectPath()) {
             // The page is on the direct path: nothing more is handed over
-            // while its stream says so.
+            // while both say so.
             handover.awaitingVerdict = false;
             handover.fruitless = 0;
-          } else if (parsed.via === 'other') {
+          } else if (pageVia() === 'other') {
             if (handover.awaitingVerdict) {
-              // The hand-over before this stream did not move it.
+              // The hand-over before this stream did not move the page.
               handover.awaitingVerdict = false;
               handover.fruitless += 1;
             }
-            // A stream that says it did not come in directly while the App
-            // prefers direct (it opened on a pooled public connection, as on
-            // a first load, or fell back to one): hand it over, within the
-            // hand-over's own bounds. With a shell on a direct address this
-            // arms it again, so a page that fell back comes back by itself.
-            if (nativeDirectPreference() === 'direct') {
-              if (nativeDirectPathReported() && isDirectAddressPath(nativeDirectPathKind())) {
-                handover.armed = true;
-              }
-              void attemptDirectHandoverRef.current();
-            }
+            askForDirectHandoverRef.current();
           }
         }
         eventConnectionRef.current = {
@@ -4039,10 +4044,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     state.retryAt = due;
     state.retryTimer = window.setTimeout(() => {
       state.retryTimer = null;
-      // Only on the stream's own word. One that has not said how it came in
-      // (it is still opening, or the instance does not report it) is left
+      // Only on the instance's own word, the stream's or the latest
+      // request's. A page that has not been told how it came in (its stream
+      // is still opening, or the instance does not report it) is left
       // alone: unknown is not "not direct".
-      if (liveStreamVia() === 'other') void attemptDirectHandoverRef.current();
+      if (pageVia() === 'other') void attemptDirectHandoverRef.current();
     }, delay);
   };
   const attemptDirectHandover = async () => {
@@ -4054,7 +4060,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // address, never while its connection runs through the relay: a stream
     // moved there would race the public path over the relay and lose, and
     // nothing would move it again when the direct address comes. And not a
-    // stream that already said it came in through the direct ingress.
+    // page that already came in through the direct ingress, by its stream
+    // and by its latest request.
     // Asked now, again each time a busy page is looked at, and so once more
     // before anything is closed: the wait can take long, and the shell's
     // path may have gone back to the relay or to the public path meanwhile;
@@ -4064,7 +4071,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       && !state.disposed
       && nativeDirectPreference() === 'direct'
       && (!nativeDirectPathReported() || isDirectAddressPath(nativeDirectPathKind()))
-      && liveStreamVia() !== 'direct'
+      && !pageOnDirectPath()
     );
     if (state.running || !nativeDirectHandoverAvailable() || !wanted()) return;
     const sinceLast = Date.now() - state.lastAt;
@@ -4118,6 +4125,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
   attemptDirectHandoverRef.current = attemptDirectHandover;
+  // The page said it did not come in directly, by its stream or by a
+  // request, while the App prefers direct (it opened on a pooled public
+  // connection, as on a first load; or one of the two fell back to one, or
+  // was never moved): hand it over, within the hand-over's own bounds. With a
+  // shell on a direct address this arms it again, so a page that fell back
+  // comes back by itself.
+  askForDirectHandoverRef.current = () => {
+    if (pageVia() !== 'other' || nativeDirectPreference() !== 'direct') return;
+    if (nativeDirectPathReported() && isDirectAddressPath(nativeDirectPathKind())) {
+      directHandoverRef.current.armed = true;
+    }
+    void attemptDirectHandoverRef.current();
+  };
   openWorkbenchEventsRef.current = () => {
     if (nativeDirectBaselineState() === 'ready') ensureWorkbenchEventSource();
   };
@@ -4138,6 +4158,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // One object for the provider's life; named here for the clean-up.
     const handover = directHandoverRef.current;
     handover.disposed = false;
+    // A request that says it did not come in directly, between two streams:
+    // its connection fell back, or was never moved. Only on a change of the
+    // request's own word; the stream's is heard in its handshake.
+    let requestVia = latestRequestVia();
+    const stopRequestVia = subscribePageVia(() => {
+      const next = latestRequestVia();
+      if (next === requestVia) return;
+      requestVia = next;
+      if (next === 'other') askForDirectHandoverRef.current();
+    });
     const stopDirectPreference = onNativeDirectPreference((preferred, path) => {
       const state = handover;
       if (preferred === 'tunnel') {
@@ -4175,6 +4205,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       stopReactivation();
       stopDirectClosures();
+      stopRequestVia();
       stopDirectPreference();
       stopDirectBaseline();
       if (handover.retryTimer !== null) window.clearTimeout(handover.retryTimer);
