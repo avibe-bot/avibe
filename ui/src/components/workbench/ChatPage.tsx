@@ -167,6 +167,14 @@ import {
   usePendingSends,
 } from './usePendingSends';
 import type { ChatSnapshot } from '../../lib/chatSnapshots';
+import { getLocalSnapshotPrincipal } from '../../lib/localSnapshots';
+import {
+  forgetUnacknowledgedSend,
+  rememberSend,
+  settleSend,
+  unacknowledgedSends,
+  type UnacknowledgedSend,
+} from '../../lib/unacknowledgedSends';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -1827,6 +1835,49 @@ export const ChatPage: React.FC = () => {
     };
   }, [sessionId, api]);
 
+  // Sends an earlier page never saw answered (lib/unacknowledgedSends). Once this
+  // chat's first live read shows what the instance holds, a message it received
+  // (its client id on a transcript or queue row) is left alone, and one it did not
+  // goes back into the composer as a draft, never sent again by itself. Should the
+  // conversation show a restored one after all (the instance took that send after
+  // this read), the composer gives it back up unless the reader has changed it.
+  const restoredSendsRef = useRef<{ sessionId: string; sends: Map<string, UnacknowledgedSend> } | null>(null);
+  useEffect(() => {
+    if (!sessionId || hydratedTranscriptSessionId !== sessionId || !writable) return;
+    const composer = composerRef.current;
+    if (!composer) return;
+    const held = new Set<string>();
+    for (const row of [...messages, ...queue]) {
+      const clientId = row.metadata?.client_message_id;
+      if (typeof clientId === 'string' && clientId) held.add(clientId);
+    }
+    const restored = restoredSendsRef.current;
+    if (restored?.sessionId === sessionId) {
+      for (const [clientId, send] of restored.sends) {
+        if (!held.has(clientId)) continue;
+        restored.sends.delete(clientId);
+        composer.withdrawUnsent(send);
+      }
+      return;
+    }
+    // Records are kept per reader: while the page does not know who reads, they wait.
+    const principal = getLocalSnapshotPrincipal();
+    if (!principal) return;
+    const sends = new Map<string, UnacknowledgedSend>();
+    restoredSendsRef.current = { sessionId, sends };
+    for (const send of unacknowledgedSends(sessionId)) {
+      // Another reader's never comes back; one the instance holds is already shown.
+      if (send.principal !== principal || held.has(send.clientId)) {
+        forgetUnacknowledgedSend(sessionId, send.clientId);
+        continue;
+      }
+      // Refused while voice capture owns the draft: it stays for the next open.
+      if (!composer.restoreUnsent(send)) continue;
+      forgetUnacknowledgedSend(sessionId, send.clientId);
+      sends.set(send.clientId, send);
+    }
+  }, [sessionId, hydratedTranscriptSessionId, writable, messages, queue]);
+
   // The fire-and-forget turn survives browser disconnects, so a freshly loaded /
   // reconnected page asks the controller whether a turn is still in flight and
   // restores the working/Stop state to match (Codex P2). Authoritative in BOTH
@@ -2383,6 +2434,7 @@ export const ChatPage: React.FC = () => {
       attachments?: ComposerAttachment[],
       metadata?: Record<string, unknown>,
       references?: MentionReference[],
+      { fromComposer = false }: { fromComposer?: boolean } = {},
     ) => {
       if (!writable) return false;
       // NB: no ``working`` guard — sending WHILE a turn runs is the queue
@@ -2423,6 +2475,26 @@ export const ChatPage: React.FC = () => {
       const clientId = newClientMessageId();
       const sentMetadata = { ...metadata, ...clientMessageMetadata(clientId) };
       const sentAt = new Date().toISOString();
+      // The composer emptied in this same task: until the answer settles this send,
+      // its words stay on the device, so a page torn down meanwhile can give them
+      // back (lib/unacknowledgedSends).
+      if (fromComposer) {
+        rememberSend({
+          sessionId,
+          clientId,
+          text,
+          attachments: ready.map((a) => ({
+            token: a.token,
+            name: a.name,
+            mime: a.mime,
+            size: a.size,
+            kind: a.kind,
+            url: a.url,
+            ...(a.width !== undefined ? { width: a.width } : {}),
+            ...(a.height !== undefined ? { height: a.height } : {}),
+          })),
+        });
+      }
       // The row is drawn once, where the send goes (owner, 2026-11-12): it must
       // not appear in one place and then jump to the other.
       //  * A quick reply keeps its place under the question it answers.
@@ -2623,6 +2695,8 @@ export const ChatPage: React.FC = () => {
         // Every outcome ends the pending row, in the same render as the row that
         // replaces it (or the error and restored draft that withdraw it).
         if (!settledLater) settlePendingSend(clientId);
+        // Answered either way: the instance holds it, or the composer gets it back.
+        if (fromComposer) settleSend(sessionId, clientId);
       }
     },
     [
@@ -3739,7 +3813,7 @@ export const ChatPage: React.FC = () => {
           key={sessionId}
           composerRef={composerRef}
           readVoiceContext={readVoiceContext}
-          onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references)}
+          onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references, { fromComposer: true })}
           onStop={stopMessage}
           busy={working}
           sessionId={sessionId ?? ''}

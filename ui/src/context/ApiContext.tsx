@@ -83,6 +83,7 @@ import {
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
 import { sessionDraftAttachmentsCache } from '../lib/sessionDraftAttachmentsCache';
+import { forgetSessionUnacknowledgedSends } from '../lib/unacknowledgedSends';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
 import { useLatestRef } from '../lib/useLatestRef';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
@@ -3062,6 +3063,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const clearSessionDraftCaches = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
     sessionDraftAttachmentsCache.clear(sessionId);
+    forgetSessionUnacknowledgedSends(sessionId);
   };
 
   const convergeSessionArchived = (sessionId: string) => {

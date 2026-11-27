@@ -34,6 +34,8 @@ import {
 //  * The send settles its pending entry at the POST's outcome, whatever it is.
 //  * It belongs to the reader who sent it: a different reader or a cleared store
 //    drops it, as it drops everything else the page showed for them.
+//  * Its words outlive the page only as an unanswered composer send
+//    (lib/unacknowledgedSends): a later page gives them back as a draft.
 
 const CLIENT_MESSAGE_ID = 'client_message_id';
 
