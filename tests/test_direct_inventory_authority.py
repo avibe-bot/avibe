@@ -49,6 +49,45 @@ def test_unknown_codex_authority_never_selects_previous_inventory(codex, tmp_pat
     assert identity is None
 
 
+@pytest.mark.parametrize("field", ["chatgpt_user_id", "user_id", "chatgpt_account_user_id"])
+def test_codex_oauth_is_scoped_to_person_and_workspace(codex, tmp_path, field):
+    import base64
+    from vibe import api
+
+    def login(workspace, claims, revision):
+        payload = json.dumps({"https://api.openai.com/auth": claims}).encode()
+        encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        (tmp_path / "auth.json").write_text(
+            json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "tokens": {
+                        "account_id": workspace,
+                        "access_token": revision,
+                        "id_token": f"e30.{encoded}.fixture",
+                    },
+                }
+            )
+        )
+        return inventory_identity("codex", codex)
+
+    shared = {"chatgpt_account_id": "shared-workspace"}
+    first = login("shared-workspace", {**shared, field: "fixture-person-a"}, "r1")
+    assert first and len(first) == 64
+    publish_inventory("codex", first, [PickerModel("first-private")])
+    assert login("shared-workspace", {**shared, field: "fixture-person-a"}, "r2") == first
+    second = login("shared-workspace", {**shared, field: "fixture-person-b"}, "r3")
+    assert second and second != first
+    assert "first-private" not in api.codex_models(schedule_refresh=False)["models"]
+    publish_inventory("codex", second, [PickerModel("second-private")])
+    assert api.codex_models(schedule_refresh=False)["models"] == ["second-private"]
+    assert login("shared-workspace", {**shared, field: "fixture-person-a"}, "r4") == first
+    assert api.codex_models(schedule_refresh=False)["models"] == ["first-private"]
+    for claims in (shared, {field: "fixture-person-a"}, {"chatgpt_account_id": "wrong", field: "fixture-person-a"}):
+        assert login("shared-workspace", claims, "r5") is None
+        assert "first-private" not in api.codex_models(schedule_refresh=False)["models"]
+
+
 def test_existing_codex_picker_reads_scoped_ids_and_efforts(codex):
     from vibe import api
     from core.handlers.direct_model_menu import set_removed
@@ -59,6 +98,37 @@ def test_existing_codex_picker_reads_scoped_ids_and_efforts(codex):
     assert "fixture-private" in [row["value"] for row in api.agent_model_options("codex", cached_only=True)["models"]]
     set_removed("codex", "fixture-private", True)
     assert "fixture-private" not in api.codex_models(schedule_refresh=False)["models"]
+
+
+def test_unreadable_config_keeps_public_codex_removals(codex, monkeypatch):
+    from core.handlers.direct_model_menu import set_removed
+    from vibe import api
+
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError("fixture config unavailable")
+
+    set_removed("codex", "gpt-6.2-sol", True)
+    monkeypatch.setattr(V2Config, "load", unavailable)
+    snapshot = api.codex_models(schedule_refresh=False)
+    assert "gpt-6.2-sol" not in snapshot["models"]
+    assert "fixture-private" not in snapshot["models"]
+
+
+def test_public_default_efforts_and_explicit_empty_native_efforts(codex, tmp_path, monkeypatch):
+    from vibe import api, backend_model_catalog as catalog
+
+    key = inventory_identity("codex", codex)
+    publish_inventory("codex", key, [PickerModel("fixture-model", reasoning_efforts=())])
+
+    def efforts():
+        snapshot = api.codex_models(schedule_refresh=False)
+        return [opt["value"] for opt in snapshot["reasoning_options"]["fixture-model"]]
+
+    assert efforts() == ["__default__"]
+    (tmp_path / "auth.json").unlink()
+    remote = {"backends": {"codex": {"models": [{"id": "fixture-model"}]}}}
+    monkeypatch.setattr(catalog, "load_cached_remote_catalog", lambda **_: remote)
+    assert efforts() == ["__default__", "minimal", "low", "medium", "high", "xhigh"]
 
 
 def test_claude_custom_headers_are_not_scoped_by_an_unrelated_key(tmp_path, monkeypatch):

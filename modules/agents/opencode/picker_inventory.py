@@ -1,7 +1,8 @@
 """Account-scoped Direct picker proof. No native defaults, sessions, Hub or CLI probes.
 
-Only transparent credentials are supported: native API keys, OpenAI OAuth with
-an explicit accountId, and static provider config. Unknown auth mechanisms,
+Only transparent credentials are supported: native API keys and static provider
+config. OpenAI OAuth supplies a workspace ID but not a person; any such profile
+is unsupported. Unknown auth mechanisms,
 plugins, substitutions and ambiguous config layers are not identities. A key
 is portable between the UI and controller *only* for the same native profile.
 The binary build belongs to the live probe, not the last-good inventory key.
@@ -28,7 +29,7 @@ from vibe.native_inventory_files import read_native_file as _read
 from vibe.opencode_config import get_opencode_auth_path, parse_jsonc_object
 
 from .caller_context import PLUGIN_FILENAME, PLUGIN_SOURCE
-from .client_manager import _binary_identity, _digest, _stable_auth_entry
+from .client_manager import _binary_identity, _digest
 
 # These native providers have a simple environment API-key credential. Do not
 # infer a provider from an arbitrary *_TOKEN, a helper or a cloud SDK profile.
@@ -70,25 +71,15 @@ def _roots(env):
 def _credentials(auth: Path) -> tuple[dict, str]:
     credentials = _object(auth)
     revision = _digest(credentials)
-    for provider, entry in credentials.items():
-        if not isinstance(entry, dict):
-            raise ValueError("invalid native credential")
-        if entry.get("type") == "api" and _literal(entry.get("key")):
-            continue
-        if (
-            provider == "openai"
-            and entry.get("type") == "oauth"
-            and all(_literal(entry.get(k)) for k in ("accountId", "refresh", "access"))
-        ):
-            credentials[provider] = _stable_auth_entry(entry)
-            continue
-        raise ValueError("no stable native credential")
+    for entry in credentials.values():
+        if not isinstance(entry, dict) or entry.get("type") != "api" or not _literal(entry.get("key")):
+            # Never attribute part of a mixed OAuth/API-key profile to a proven key.
+            raise ValueError("no stable native credential")
     return credentials, revision
 
 
 def _grant(grants: dict[str, str | None], pid: str, key: str | None) -> None:
-    # A proven OAuth account has no stable API key. Don't guess precedence
-    # between that account and an inherited/configured API key, or two keys.
+    # Don't guess precedence between conflicting configured and inherited keys.
     value = _digest(key) if key is not None else None
     if pid in grants and grants[pid] != value:
         raise ValueError("ambiguous provider credentials")

@@ -1420,9 +1420,15 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
             config = V2Config.load(persist_migrations=False)
         except (ValueError, OSError):
             config = None
-        if config is not None and (not is_model_hub_enabled() or config.model_hub.agents["codex"].mode == "direct"):
-            public = tuple(PickerModel(entry["id"], entry.get("label"), reasoning_efforts=entry.get("reasoning_efforts")) for entry in merged)
-            menu = read_menu("codex", inventory_identity("codex", config), fallback=public)
+        if config is None or not is_model_hub_enabled() or config.model_hub.agents["codex"].mode == "direct":
+            # Unknown mode has no private authority. It still has the same
+            # saved removals; only a positively identified Hub bypasses them.
+            identity = inventory_identity("codex", config) if config is not None else None
+            public = tuple(
+                PickerModel(entry["id"], entry.get("label"), reasoning_efforts=entry.get("reasoning_efforts") or default_efforts)
+                for entry in merged
+            )
+            menu = read_menu("codex", identity, fallback=public)
             models = [row.id for row in menu.models]
             model_labels = {row.id: row.label for row in menu.models if row.label and row.label != row.id}
             reasoning_options = {"": _reasoning_option_items(default_efforts)}

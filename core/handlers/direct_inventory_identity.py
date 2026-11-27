@@ -32,6 +32,33 @@ def _read_object(path: Path) -> dict:
     return value
 
 
+def _codex_oauth_identity(tokens: dict) -> str | None:
+    """Unverified, local names for inventory isolation only (never an auth grant)."""
+    from vibe.codex_config import _id_token_claims
+
+    selected = tokens.get("account_id")
+    token = tokens.get("id_token")
+    if not isinstance(selected, str) or not selected or selected.strip() != selected:
+        return None
+    if not isinstance(token, str) or token.count(".") != 2:
+        return None
+    try:
+        claims = _id_token_claims(token).get("https://api.openai.com/auth")
+    except RecursionError:
+        return None
+    if not isinstance(claims, dict) or claims.get("chatgpt_account_id") != selected:
+        return None
+    # Both user spellings name the same kind of identifier; membership IDs
+    # have their own namespace and are meaningful only in the matched workspace.
+    users = [claims[k] for k in ("chatgpt_user_id", "user_id") if k in claims]
+    if users and any(user != users[0] for user in users):
+        return None
+    person = users[0] if users else claims.get("chatgpt_account_user_id")
+    if not isinstance(person, str) or not person or person.strip() != person:
+        return None
+    return _key("codex-chatgpt-person-v1", selected, "user" if users else "membership", person)
+
+
 def _codex_scope():
     from vibe.codex_config import get_codex_home
 
@@ -73,14 +100,9 @@ def _codex_scope():
             return None
         identity = _key("codex-first-party-file-v2", str(home), "api", key)
         return NativeScope(identity, identity, "api")
-    if (
-        mode in (None, "chatgpt")
-        and isinstance(tokens, dict)
-        and isinstance(account := tokens.get("account_id"), str)
-        and account.strip()
-        and tokens.get("access_token")
-    ):
-        return NativeScope(_key("codex-first-party-file-v2", str(home), "chatgpt", account), _key(data), "chatgpt")
+    if mode in (None, "chatgpt") and isinstance(tokens, dict) and tokens.get("access_token"):
+        identity = _codex_oauth_identity(tokens)
+        return NativeScope(identity, _key(data), "chatgpt") if identity else None
     return None
 
 

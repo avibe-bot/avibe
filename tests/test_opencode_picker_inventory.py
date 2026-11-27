@@ -103,23 +103,24 @@ def test_only_the_effective_non_ambiguous_project_and_global_layers_are_evidence
     assert native.identity() is None
 
 
-def test_stable_account_id_not_rotating_tokens_or_credential_presence(native):
-    def auth(account, n):
+def test_opencode_openai_oauth_always_uses_public_fallback(native):
+    # Even an unrelated, proven key cannot make the whole profile attributable.
+    native.env["ANTHROPIC_API_KEY"] = "fixture-key"
+    assert native.identity()
+    for grant in ("first", "second"):
         write(
             native.auth,
-            {"openai": {"type": "oauth", "accountId": account, "access": f"a{n}", "refresh": f"r{n}", "expires": n}},
+            {
+                "openai": {
+                    "type": "oauth",
+                    "accountId": "shared-workspace",
+                    "access": grant,
+                    "refresh": grant,
+                }
+            },
         )
-
-    auth("account-A", 1)
-    a = native.identity()
-    before = picker.binding(native.config, str(native.cwd))
-    auth("account-A", 2)
-    assert a and native.identity() == a
-    assert picker.binding(native.config, str(native.cwd))[1] != before[1]
-    auth("account-B", 2)
-    assert native.identity() not in (None, a)
-    native.auth.unlink()
-    assert native.identity() is None
+        assert native.identity() is None
+        assert picker.binding(native.config, str(native.cwd)) is None
 
 
 @pytest.mark.reap_processes
@@ -319,7 +320,9 @@ async def test_only_warm_matching_generation_can_publish_full_connected_catalog(
         write(documents, {**docs, "/provider": {**connections, "connected": []}})
         with pytest.raises(ValueError):
             await picker.discover(controller, binary, cwd)  # two native reads disagree, not a withdrawal
-        write(documents, {**docs, "/provider": {**connections, "connected": []}, "/config/providers": {"providers": []}})
+        write(
+            documents, {**docs, "/provider": {**connections, "connected": []}, "/config/providers": {"providers": []}}
+        )
         assert await picker.discover(controller, binary, cwd) == []
         children[0].terminate()
         await children[0].wait()
