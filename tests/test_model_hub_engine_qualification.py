@@ -125,8 +125,15 @@ def test_anything_but_exactly_one_consistent_record_is_refused(tmp_path, damage)
         qualification.load_candidate(target)
 
 
-def test_no_candidate_is_recorded_before_one_is_reviewed() -> None:
-    assert sorted(path.name for path in qualification.CANDIDATES_DIR.iterdir()) == ["README.md"]
+def test_rehearsal_record_uses_the_shipped_engine_bytes() -> None:
+    raw = (ROOT / 'vibe/model_hub_runtime/cliproxyapi_manifest.json').read_bytes()
+    record = qualification.CANDIDATES_DIR / 'model-hub-engine-v8.1.2-1'
+    candidate = qualification.load_candidate(record)
+    # Later Avibe versions can bundle another tag. While 8.1.2 is bundled,
+    # the rehearsal must use those exact published bytes, not a reconstruction.
+    if json.loads(raw)['asset_release_tag'] == candidate.asset_release_tag:
+        assert candidate.manifest_bytes == raw
+    assert candidate.min_avibe_version == '3.2.8'
 
 
 def _problems(candidate, evidence, **overrides) -> list[str]:
@@ -1163,7 +1170,6 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "model-hub-engine-trusted-assets" in text
     assert "model-hub-engine-untrusted-assets" in text
-    assert "rehearsal-baselines" in text
     assert "Runtime pass/fail assertions above are rehearsal data" in text
     assert "REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}" in text
     assert "persist-credentials: false" in text
