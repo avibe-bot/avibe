@@ -78,6 +78,10 @@ window.fetch = async (input, init) => {
   const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
   if (init?.method === 'POST') writes.push({ path, body });
   if (path === '/api/csrf-token') return reply({ csrf_token: 'fixture' });
+  // The Workbench event transport is negotiated from /api/session before it
+  // opens a stream. A local answer without `event_stream_transport` (an older
+  // Runtime) selects EventSource, which is this fixture's event transport.
+  if (path === '/api/session') return reply({ remote: false });
   if (path === '/api/agents') return reply({ ok: true, agents, default_agent_name: 'codex' });
   if (path === '/api/projects' && init?.method === 'POST') {
     if (control.holdProject) await new Promise<void>((resolve) => { control.releaseProject = resolve; });
