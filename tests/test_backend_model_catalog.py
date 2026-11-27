@@ -1438,7 +1438,7 @@ def test_published_feed_remains_readable_by_3_2_8():
 
     # Run the released strict validator on the complete file, just as served.
     path = Path(__file__).resolve().parents[1] / "vibe/data/backend_models.json"
-    released = _normalize_catalog(json.loads(path.read_bytes()), strict=True)
+    released = _normalize_catalog(json.loads(path.read_bytes().decode("utf-8")), strict=True)
     assert set(released["backends"]) == {"claude", "codex"}
 
 
