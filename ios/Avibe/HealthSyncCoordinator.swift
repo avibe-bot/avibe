@@ -537,10 +537,12 @@ final class HealthSyncCoordinator: ObservableObject {
             try requireAccount()
             guard let store else { return "failed" }
             try store.update { $0.pendingConsent = .init(requestID: requestID, pairingCode: pairingCode, metrics: metrics) }
-            try await manifest(background: backgroundDelivery)
+            // Durable approval belongs to the shared convergence owner. Its HTTP,
+            // error policy and retries survive the foreground reply's deadline.
+            markManifestDue()
+            await requestConvergence().value
             try requireConnection(attempt)
             guard Set(metrics).isSubset(of: Set(confirmedMetrics)) else { throw HealthSyncError.code("request_unavailable") }
-            markManifestDue()
             let token = epoch
             Task { @MainActor [weak self] in
                 guard let self, self.epoch == token else { return }
@@ -551,9 +553,10 @@ final class HealthSyncCoordinator: ObservableObject {
             return "connected"
         } catch {
             // A failed permission sheet or code does not revoke an existing device.
+            // Persisted approval already has a convergence owner: keep its retry
+            // timing and any terminal update-required notice.
             guard epoch == attempt.epoch, connectionAttempt === attempt else { return "failed" }
-            notice = "health.connection_failed"
-            requestConvergence()
+            if store?.state.suspended != true { notice = "health.connection_failed" }
             return "failed"
         }
     }

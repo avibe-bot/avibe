@@ -8189,7 +8189,10 @@
       "steps": "steps",
       "activity": "activity",
       "workouts": "workouts",
-      "sleep": "sleep"
+      "sleep": "sleep",
+      "heartRate": "heart rate",
+      "restingHeartRate": "resting heart rate",
+      "hrv": "heart rate variability"
     },
     "detail": {
       "connection": "Connection",

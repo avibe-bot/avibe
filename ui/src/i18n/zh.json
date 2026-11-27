@@ -8189,7 +8189,10 @@
       "steps": "步数",
       "activity": "活动",
       "workouts": "锻炼",
-      "sleep": "睡眠"
+      "sleep": "睡眠",
+      "heartRate": "心率",
+      "restingHeartRate": "静息心率",
+      "hrv": "心率变异性"
     },
     "detail": {
       "connection": "连接",

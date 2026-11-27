@@ -1853,6 +1853,143 @@ final class HealthSyncTests: XCTestCase {
     }
 
     @MainActor
+    func testApprovedHeartExpansionRetriesWithoutResumeOrRestart() async throws {
+        let fixture = try await connectedInFront()
+        let before = fixture.credentials.identity
+        fixture.client.manifestErrors = [HealthSyncError.http(503, "unavailable", 1)]
+        fixture.client.manifestResponse = ["supported_metrics": HealthQueryWindow.metrics,
+                                           "confirmed_metrics": HealthQueryWindow.metrics]
+        let expanding = Task { await fixture.coordinator.connect(requestID: "heart-request", pairingCode: "heart-code",
+            origin: fixture.origin, options: .init(supportedMetrics: HealthQueryWindow.metrics,
+                requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let reply = await expanding.value
+        XCTAssertEqual(reply, "failed", "The failed immediate attempt remains retryable by convergence")
+        XCTAssertNotNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+        // No resume, restart, observer delivery or second permission request drives recovery.
+        try await eventually(timeout: .seconds(8)) {
+            (try? HealthDeviceStore(directory: fixture.directory).state.confirmedMetrics) == HealthQueryWindow.metrics
+        }
+        XCTAssertNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+        XCTAssertEqual(fixture.reader.authorizations, 1)
+        XCTAssertEqual(fixture.credentials.identity, before)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" || $0.path.hasSuffix("/pair") })
+    }
+
+    @MainActor
+    func testApprovedHeartExpansionHonorsTheSharedRetryDelayWithoutRetryAfter() async throws {
+        let fixture = try await connectedInFront()
+        let manifests = fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count
+        fixture.client.manifestErrors = [HealthSyncError.http(500, "internal", nil)]
+        fixture.client.manifestResponse = ["supported_metrics": HealthQueryWindow.metrics,
+                                           "confirmed_metrics": HealthQueryWindow.metrics]
+        let expanding = Task { await fixture.coordinator.connect(requestID: "heart-request", pairingCode: "heart-code",
+            origin: fixture.origin, options: .init(supportedMetrics: HealthQueryWindow.metrics,
+                requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let reply = await expanding.value
+        XCTAssertEqual(reply, "failed")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, manifests + 1,
+                       "The native failure reply must not start another pass before the shared retry")
+        XCTAssertNotNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+        try await eventually(timeout: .seconds(35)) {
+            (try? HealthDeviceStore(directory: fixture.directory).state.confirmedMetrics) == HealthQueryWindow.metrics
+        }
+        XCTAssertNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+    }
+
+    @MainActor
+    func testApprovedHeartExpansionOutlivesTheNativeReplyDeadline() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true, connectionTimeout: .milliseconds(300))
+        await fixture.coordinator.resume(foreground: false)
+        let before = fixture.credentials.identity
+        fixture.client.holdManifest = true
+        let expanding = Task { await fixture.coordinator.connect(requestID: "heart-request", pairingCode: "heart-code",
+            origin: fixture.origin, options: .init(supportedMetrics: HealthQueryWindow.metrics,
+                requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        try await eventually { fixture.client.manifestContinuation != nil }
+        let reply = await expanding.value
+        XCTAssertEqual(reply, "failed")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNotNil(fixture.client.manifestContinuation, "Durable approval belongs to convergence, not the expired native reply")
+        fixture.client.holdManifest = false
+        fixture.client.releaseManifest(response: ["supported_metrics": HealthQueryWindow.metrics,
+                                                 "confirmed_metrics": HealthQueryWindow.metrics])
+        try await eventually {
+            (try? HealthDeviceStore(directory: fixture.directory).state.confirmedMetrics) == HealthQueryWindow.metrics
+        }
+        XCTAssertNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+        XCTAssertEqual(fixture.credentials.identity, before)
+        XCTAssertEqual(fixture.reader.authorizations, 1)
+    }
+
+    @MainActor
+    func testApprovedHeartExpansionSurvivesTemporaryAccountLossDuringManifest() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        await fixture.coordinator.resume(foreground: false)
+        let before = fixture.credentials.identity
+        fixture.client.holdManifest = true
+        let expanding = Task { await fixture.coordinator.connect(requestID: "heart-request", pairingCode: "heart-code",
+            origin: fixture.origin, options: .init(supportedMetrics: HealthQueryWindow.metrics,
+                requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        try await eventually { fixture.client.manifestContinuation != nil }
+        fixture.coordinator.accountIDProvider = { nil }
+        fixture.coordinator.accountEvent(.authorizationUnavailable)
+        let reply = await expanding.value
+        XCTAssertEqual(reply, "failed")
+        XCTAssertNotNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+        XCTAssertEqual(fixture.credentials.identity, before)
+        try await eventually { fixture.client.manifestContinuation == nil }
+        fixture.client.holdManifest = false
+        fixture.client.manifestResponse = ["supported_metrics": HealthQueryWindow.metrics,
+                                           "confirmed_metrics": HealthQueryWindow.metrics]
+        fixture.coordinator.accountIDProvider = { "account-1" }
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await eventually {
+            (try? HealthDeviceStore(directory: fixture.directory).state.confirmedMetrics) == HealthQueryWindow.metrics
+        }
+        XCTAssertNil(try HealthDeviceStore(directory: fixture.directory).state.pendingConsent)
+        XCTAssertEqual(fixture.credentials.identity, before)
+        XCTAssertEqual(fixture.reader.authorizations, 1)
+    }
+
+    @MainActor
+    func testApprovedHeartExpansionUsesExistingTerminalManifestPolicies() async throws {
+        for status in [404, 410, 401, 422, 426] {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            await fixture.coordinator.resume(foreground: false)
+            let before = fixture.credentials.identity
+            fixture.client.manifestErrors = [HealthSyncError.http(status, "synthetic_failure", nil)]
+            let expanding = Task { await fixture.coordinator.connect(requestID: "heart-request", pairingCode: "heart-code",
+                origin: fixture.origin, options: .init(supportedMetrics: HealthQueryWindow.metrics,
+                    requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
+            try await eventually { fixture.coordinator.consent != nil }
+            fixture.coordinator.answerConsent(true)
+            let reply = await expanding.value
+            XCTAssertEqual(reply, "failed")
+            if status == 401 {
+                XCTAssertNil(fixture.credentials.identity, "Revoked device authority must be removed")
+            } else {
+                XCTAssertEqual(fixture.credentials.identity, before)
+                let state = try HealthDeviceStore(directory: fixture.directory).state
+                XCTAssertEqual(state.confirmedMetrics ?? HealthQueryWindow.legacyMetrics, HealthQueryWindow.legacyMetrics)
+                if status == 404 || status == 410 { XCTAssertNil(state.pendingConsent) }
+                else {
+                    XCTAssertTrue(state.suspended, "Unsupported contracts/payloads suspend existing sync")
+                    XCTAssertEqual(fixture.coordinator.notice, status == 426 ? "health.update_required" : "health.connection_failed")
+                }
+            }
+        }
+    }
+
+    @MainActor
     func testAnOlderManifestResponseCannotUndoApprovedHeartConsent() async throws {
         let fixture = try coordinatorFixture(savedIdentity: true)
         fixture.client.holdManifest = true
@@ -1867,10 +2004,15 @@ final class HealthSyncTests: XCTestCase {
                 requestedMetrics: HealthQueryWindow.heartMetrics, expansion: true)) }
         try await eventually { fixture.coordinator.consent != nil }
         fixture.coordinator.answerConsent(true)
-        let reply = await expanding.value
-        XCTAssertEqual(reply, "connected")
+        try await eventually {
+            (try? HealthDeviceStore(directory: fixture.directory).state.pendingConsent) != nil
+        }
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1,
+                       "Approval coalesces behind the single convergence owner")
         fixture.client.releaseManifest(response: ["supported_metrics": HealthQueryWindow.metrics,
                                                   "confirmed_metrics": HealthQueryWindow.legacyMetrics])
+        let reply = await expanding.value
+        XCTAssertEqual(reply, "connected")
         await resuming.value
         let restored = try HealthDeviceStore(directory: fixture.directory).state
         XCTAssertEqual(restored.confirmedMetrics, HealthQueryWindow.metrics)

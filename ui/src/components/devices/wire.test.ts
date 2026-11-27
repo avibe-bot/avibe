@@ -118,6 +118,23 @@ describe('devicesFromWire', () => {
   });
 });
 
+describe('seven health metrics across Devices consumers', () => {
+  const metrics = ['steps', 'activity', 'workouts', 'sleep', 'heart_rate', 'resting_heart_rate', 'hrv'];
+  it('keeps supported types in linked functions, unlinked connections and reads, filtering unknown types', () => {
+    const data = [...metrics, 'future_metric'];
+    const snapshot = devicesFromWire({
+      mine: [row({ functions: [{ kind: 'health', on: true, can_change: true, data }] })],
+      unlinked_health: [{ pairing_id: 'p1', device_name: 'Synthetic iPhone', data }],
+    });
+    expect(snapshot.devices[0].functions[0]).toMatchObject({ kind: 'health', data: metrics });
+    expect(snapshot.unlinkedHealth[0].data).toEqual(metrics);
+    const read = (data: string[]) => activityFromWire({ id: 'read', at: '2026-11-27T01:00:00Z',
+      kind: 'healthRead', data, from_day: '2026-11-27', to_day: '2026-11-27' }, () => null)?.event;
+    expect(read(data)).toMatchObject({ kind: 'healthRead', data: metrics });
+    expect(read(['hrv', 'future_metric'])).toMatchObject({ kind: 'healthRead', data: ['hrv'] });
+  });
+});
+
 describe('signedOutFromWire', () => {
   it('keeps only which device it was and its name, from a receipt with an id', () => {
     expect(signedOutFromWire({ operation_id: 'o1', device_id: 'chrome', display_name: 'Chrome', kind: 'browser', group: 'mine',

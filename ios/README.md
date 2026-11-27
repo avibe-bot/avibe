@@ -1706,7 +1706,8 @@ Domains was enabled.
 
 The instance conversation and encrypted health-request notifications are the
 entry points. The configured instance main frame can call
-`health.connect({requestId, pairingCode})`; native consent names the destination,
+`health.connect({requestId, pairingCode, supportedMetrics, requestedMetrics, expansion})`;
+native consent names the destination,
 read-only data groups, automatic synchronization, Agent/model access, and how to
 stop. Its response contains only `state`. Every other `health.*` bridge method
 is unsupported, including on Show pages. Health data never returns through the
@@ -1731,14 +1732,27 @@ or restoration. The help names the manual path through Settings, Privacy &
 Security, Health, and Avibe. It offers no settings shortcut: the public
 App-settings URL did not expose a Health entry in the simulator inspection.
 
-The main app reads steps, activity, workouts and sleep. It backfills 30 days
-and refreshes the most recent eight calendar days on foreground activation and
+The main app reads steps, activity, workouts, sleep, heart rate, resting heart
+rate and heart rate variability (SDNN). It uploads only the instance-supported
+metrics the user has confirmed; missing capability metadata means the original
+four types. New connections backfill 30 days
+and refresh the most recent eight calendar days on foreground activation and
 HealthKit observer delivery. Sleep uses the local 18:00 boundary and interval
 unions. Empty results do not identify denied HealthKit read permission. Device
 credentials and the random installation identifier use private, nonsynchronizing
 ThisDeviceOnly Keychain items. Logout deletes the credential, stops observation,
 cancels uploads and removes local sync state; the non-authenticating installation
 identifier remains for repeat-pairing identification.
+
+Adding metrics to an existing connection requires an explicit connect request,
+`health:2`, native confirmation of the added types, and HealthKit authorization.
+The approved intent is persisted before the shared convergence owner sends its
+manifest. A network failure or native reply timeout retains the committed device,
+upload sequence, outbox, and instance history; existing foreground retry or a
+later system wake/resume reconciles the intent. App launch never prompts for
+permission. Only newly confirmed types receive a 30-day backfill. Replacing the
+pairing would destroy retained instance rows that HealthKit can no longer return,
+so expansion preserves the existing pairing.
 
 The protected, backup-excluded outbox uses monotonic persisted sequence numbers
 and one background URLSession upload at a time. Payload and execution dependencies
