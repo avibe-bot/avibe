@@ -74,6 +74,8 @@
     "/settings/diagnostics/logs",
     "/settings/logs",
     "/settings/access",
+    "/settings/experimental",
+    "/settings/experimental/source-filter",
     "/remote-access",
     "/doctor",
     "/doctor/logs"
