@@ -926,8 +926,11 @@ def test_every_rc_runs_the_stable_release_regressions_on_its_package():
     [
         "Avibe 3.1.0rc1\n\nannounce: avibe:update-notification=default in prose",
         "Avibe 3.1.0rc1\n<!-- avibe:update-notification=default -->\n<!-- avibe:update-notification=none -->",
+        "Avibe 3.1.0rc1\n<!-- vibe-remote:update-notification=default -->",
+        "Avibe 3.1.0rc1\n<!--avibe:update-notification = default-->",
+        "Avibe 3.1.0rc1\nWe add `<!-- avibe:update-notification=default -->` to announce.",
     ],
-    ids=["prose-is-not-the-flag", "silent-wins-over-announce"],
+    ids=["prose-is-not-the-flag", "silent-wins-over-announce", "legacy-brand", "loose-spacing", "quoted-in-a-sentence"],
 )
 def test_an_rc_needs_the_exact_announce_comment_and_silent_still_wins(tmp_path, annotation):
     _remote, workspace, env, _tag, _source, command = _notes_git_fixture(
@@ -941,3 +944,37 @@ def test_an_rc_needs_the_exact_announce_comment_and_silent_still_wins(tmp_path, 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert notes.read_text(encoding="utf-8").count("<!-- avibe:update-notification=none -->") == 1
+
+
+def _run_notes(tmp_path, *, annotation, notes_text, tag="gh-v3.1.0rc1"):
+    _remote, workspace, env, _tag, _source, command = _notes_git_fixture(
+        tmp_path, annotation=annotation, existing_body="", tag=tag,
+    )
+    notes = workspace / "release.md"
+    notes.write_text(notes_text, encoding="utf-8")
+    for _ in range(2):
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+            cwd=workspace, env=env, capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    return notes.read_text(encoding="utf-8")
+
+
+def test_the_silent_pair_leads_notes_that_quote_other_markers(tmp_path):
+    quoted = "# Notes\n\n<!-- avibe:update-notification=default -->\n\n<!-- avibe:update-notification=none -->\n"
+    text = _run_notes(tmp_path, annotation=None, notes_text=quoted)
+    assert text.startswith("<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n")
+    assert text.count("<!-- avibe:update-notification=none -->") == 1
+
+
+def test_a_long_flagged_annotation_still_announces(tmp_path):
+    annotation = "Avibe 3.1.0rc1\n<!-- avibe:update-notification=default -->\n" + ("filler line\n" * 20000)
+    text = _run_notes(tmp_path, annotation=annotation, notes_text="# Release\n")
+    assert "update-notification=none" not in text
+
+
+@pytest.mark.parametrize(("tag", "silent"), [("gh-v01.2.3rc04", False), ("gh-v3.1.0rc1", True)], ids=["noncanonical", "canonical"])
+def test_only_canonical_rc_tags_default_to_silent(tmp_path, tag, silent):
+    text = _run_notes(tmp_path, annotation="Plain annotation", notes_text="# Release\n", tag=tag)
+    assert ("<!-- avibe:update-notification=none -->" in text) is silent

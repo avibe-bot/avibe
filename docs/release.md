@@ -114,7 +114,10 @@ remain mandatory.
   every RC it cuts for testers. Without the flag (including a lightweight tag),
   the RC still builds and publishes, but its notes get the silent marker, so no
   automatic updater offers it. A silent marker in the annotation wins over the
-  flag. Stable `v*` tags are unchanged.
+  flag. Stable `v*` tags are unchanged. A tag pushed on a commit from before
+  this rule runs that commit's older workflow and announces by default; put
+  `<!-- avibe:update-notification=none -->` in its annotation when it must be
+  silent.
 - On the Runtime, the periodic check neither notifies about nor automatically
   installs a silent release. It skips releases the mirror index marks silent
   and still finds the newest announced release below them. A release the index

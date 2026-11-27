@@ -816,9 +816,12 @@ jobs:
           # <!-- avibe:update-notification=default -->, which the release lane adds
           # to the RCs it cuts. A colleague's RC tag still ships, but never offers
           # itself to automatic updaters. Stable v* tags are unchanged.
-          ANNOUNCE_RE='<!--[[:space:]]*(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*default[[:space:]]*-->'
-          if [ "$has_marker" != "true" ] && [[ "$TAG" =~ ^gh-v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$ ]] \
-             && ! echo "$TAG_MSG" | grep -qE "$ANNOUNCE_RE"; then
+          # Only the exact comment on a line of its own counts; a here-string avoids a
+          # short-reading pipe under pipefail.
+          ANNOUNCE_FLAG='<!-- avibe:update-notification=default -->'
+          RC_TAG_RE='^gh-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)rc(0|[1-9][0-9]*)$'
+          if [ "$has_marker" != "true" ] && [[ "$TAG" =~ $RC_TAG_RE ]] \
+             && ! grep -qxF -- "$ANNOUNCE_FLAG" <<<"$TAG_MSG"; then
             echo "RC tag without the explicit announce flag: publishing silent by default."
             has_marker="true"
           fi
@@ -828,10 +831,15 @@ jobs:
           # already-installed updaters, and a pre-rebrand client only understands
           # the legacy 'vibe-remote' marker — dropping it would notify exactly the
           # old-version users a silent release is meant not to disturb.
-          if [ "$has_marker" = "true" ] && ! grep -qE "$MARKER_COMMENT_RE" release.md; then
-            echo "Prepending silent-update markers (current + legacy) to the generated release notes."
-            { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md; } > release.md.tmp
-            mv release.md.tmp release.md
+          # Clients read the FIRST policy marker, so the silent pair must lead the body
+          # even when generated text quotes another marker. Drop any standalone
+          # canonical pair first so this stays idempotent, then put it on top.
+          if [ "$has_marker" = "true" ]; then
+            echo "Leading the release notes with the silent-update markers (current + legacy)."
+            grep -vxF -e '<!-- avibe:update-notification=none -->' -e '<!-- vibe-remote:update-notification=none -->' \
+              release.md > release.md.tmp || true
+            { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md.tmp; } > release.md
+            rm -f release.md.tmp
           fi
 
           # The RC's one attested unverified job, as the release gate printed it, bound to
