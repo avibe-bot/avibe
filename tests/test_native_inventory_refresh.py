@@ -145,13 +145,14 @@ async def test_opencode_selects_connected_provider_in_the_requested_directory(tm
     from aiohttp import web
     from aiohttp.test_utils import TestServer
     from modules.agents.opencode.server import OpenCodeServerClient
-    from vibe.opencode_config import get_opencode_auth_path
-
     config = V2Config.default()
     config.agents.opencode.enabled = True
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / ".local/share"))
-    auth = get_opencode_auth_path()
+    data = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    for key in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_AUTH_CONTENT", "OPENCODE_CONFIG_CONTENT"):
+        monkeypatch.delenv(key, raising=False)
+    auth = data / "opencode/auth.json"
     auth.parent.mkdir(parents=True, exist_ok=True)
     auth.write_text('{"one":{"type":"api","key":"fixture-A"}}')
     folder = str(tmp_path / "workspace")
