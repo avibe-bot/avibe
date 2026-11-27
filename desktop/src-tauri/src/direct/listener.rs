@@ -268,11 +268,12 @@ async fn refuse(mut browser: TcpStream) {
         let mut rest = [0; 1024];
         let mut left = HEAD_LIMIT + 4;
         while left > 0 {
-            let read = browser.read(&mut rest).await.ok()?;
+            let most = left.min(rest.len());
+            let read = browser.read(&mut rest[..most]).await.ok()?;
             if read == 0 {
                 break;
             }
-            left = left.saturating_sub(read);
+            left -= read;
         }
         Some(())
     })
