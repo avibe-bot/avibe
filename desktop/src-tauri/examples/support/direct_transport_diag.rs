@@ -61,8 +61,10 @@ where
     let mut steps = client.qualification_steps();
     report(start, "rendezvous_start", None);
     let (outcome, reason) = client
-        .refresh_reply_detailed(|id| async move {
-            let answer = fetch(id).await;
+        .refresh_reply_detailed(|asked| async move {
+            // The diagnostic's request carries the endpoint only: the
+            // client's report of faults and path use is not sent by it.
+            let answer = fetch(asked.endpoint).await;
             report(start, "rendezvous_returned", None);
             answer
         })

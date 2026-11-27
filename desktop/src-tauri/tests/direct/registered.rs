@@ -62,6 +62,13 @@ async fn each_window_presents_its_own_registration_and_has_its_own_connections()
         });
         assert_eq!(handover.window_counts(&view), one_public);
         assert_eq!(handover.window_counts(&show), one_public);
+        // Both in the minute's count for the instance's log, with the one
+        // the fixture made: the tunnel carried them, with no direct path.
+        let counted = client.listener.access.usage.counted();
+        assert_eq!(counted.len(), 1);
+        assert_eq!(counted[0]["path"], "none");
+        assert_eq!(counted[0]["tunnel"], 3);
+        assert_eq!(counted[0]["direct"], 0);
 
         // A page's hand-over is asked with its own window's registration.
         // With no direct link up there is nothing to move to, and nothing

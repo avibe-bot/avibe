@@ -340,6 +340,30 @@ async fn run(changed_selection: bool) {
         .await
         .unwrap()
         .unwrap();
+    // Why the link was withdrawn is on record for the instance's log, once,
+    // under the kind of path it was on, and counted in its minute; the
+    // CONNECTs the link carried are counted there as well.
+    let withdrawn: Vec<_> = client
+        .faults
+        .take()
+        .iter()
+        .map(super::faults::LegFault::json)
+        .filter(|fault| fault["stage"] == "handover")
+        .collect();
+    let last = withdrawn.last().expect("the withdrawal is on record");
+    assert_eq!(
+        last["code"],
+        if changed_selection { "superseded" } else { "expired" },
+        "{withdrawn:?}"
+    );
+    assert_eq!(last["path"], "lan", "{withdrawn:?}");
+    let counted = client.listener.access.usage.counted();
+    let on_lan = counted
+        .iter()
+        .find(|entry| entry["path"] == "lan")
+        .expect("a count on the LAN path");
+    assert!(on_lan["retired"].as_u64().unwrap() >= 1, "{on_lan}");
+    assert!(on_lan["direct"].as_u64().unwrap() >= 1, "{on_lan}");
     assert_eq!(
         client.refresh_reply(|_| async { Reply::Failed }).await,
         RefreshOutcome::Retired

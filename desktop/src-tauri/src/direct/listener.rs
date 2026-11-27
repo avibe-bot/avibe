@@ -4,11 +4,13 @@
 use super::{
     connect::{parse_connect, Authority, Head},
     credentials::Windows,
+    faults::PathWord,
     public,
     quiet::{PublicTicket, SessionPolicy},
     strict,
     transport::{Committed, Link, Stream},
-    PathStatus,
+    usage::Usage,
+    PathStatus, PreferredPath,
 };
 use std::{
     future::Future,
@@ -41,6 +43,8 @@ pub(super) struct Listener {
 pub(super) struct ListenerAccess {
     pub windows: Arc<Windows>,
     pub(super) policy: SessionPolicy,
+    /// Which leg carried the windows' connections, for the instance's log.
+    pub(super) usage: Arc<Usage>,
     retired: AtomicBool,
     health: watch::Receiver<()>,
     task: JoinHandle<()>,
@@ -127,6 +131,8 @@ impl Listener {
         let accept_policy = policy.clone();
         let timing = strict::Timing::default();
         let boot_clock = super::clock::Clock::default();
+        let usage = Arc::new(Usage::new(boot_clock.clone()));
+        let counted = usage.clone();
         let task = tokio::spawn(async move {
             let _live = live;
             let mut clients = JoinSet::new();
@@ -148,9 +154,24 @@ impl Listener {
                 let status = status.clone();
                 let budget = timing.strict_open;
                 let clock = boot_clock.clone();
+                let usage = counted.clone();
+                let paths = status.clone();
                 clients.spawn(async move {
                     let mut failed = false;
-                    serve(socket, &h, &keys, || async {
+                    // Counted under the kind of direct path new connections
+                    // prefer when the CONNECT is decided.
+                    let decided = |what: Decided| {
+                        let path = PathWord::of(match paths.borrow().preferred {
+                            PreferredPath::Direct(path) => Some(path),
+                            PreferredPath::Tunnel => None,
+                        });
+                        match what {
+                            Decided::Direct => usage.direct(path),
+                            Decided::Public => usage.tunnel(path),
+                            Decided::Refused => usage.refused(path),
+                        }
+                    };
+                    serve(socket, &h, &keys, decided, || async {
                         let Some(ticket) = policy.sample() else {
                             let host = &h;
                             let opened = strict::open(links.clone(), &clock, budget, |l| async move {
@@ -191,6 +212,7 @@ impl Listener {
                 task,
                 health,
                 policy,
+                usage,
                 retired: AtomicBool::new(false),
             }),
             port,
@@ -233,10 +255,18 @@ impl Backend<Arc<Link>> {
         }
     }
 }
+/// What became of one authenticated CONNECT.
+enum Decided {
+    Direct,
+    Public,
+    /// Answered `502`: no backend, or a public leg fenced.
+    Refused,
+}
 async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
     host: &Authority,
     keys: &Windows,
+    decided: impl Fn(Decided),
     open: impl FnOnce() -> F,
 ) {
     let mut data = Vec::with_capacity(1024);
@@ -279,6 +309,7 @@ async fn serve<F: Future<Output = Option<Backend>>>(
         .until_revoked(async {
             let Some(backend) = open().await else {
                 grant.counts.refused();
+                decided(Decided::Refused);
                 let _ = browser
                     .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                     .await;
@@ -287,14 +318,17 @@ async fn serve<F: Future<Output = Option<Backend>>>(
             let (mut stream, _direct) = match backend {
                 Backend::Direct(s, guard) => {
                     grant.counts.direct();
+                    decided(Decided::Direct);
                     (s, guard)
                 }
                 Backend::Public(s, ticket) => {
                     if let Some(copy) = ticket.commit(&grant.legs, &browser, &s) {
                         grant.counts.public();
+                        decided(Decided::Public);
                         copy.serve(browser, s, &data[end..]).await;
                     } else {
                         grant.counts.refused();
+                        decided(Decided::Refused);
                         let _ = browser
                             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                             .await;
@@ -356,6 +390,24 @@ mod tests {
             (counts.connects, counts.direct, counts.public, counts.refused),
             (1, 0, 0, 1)
         );
+        // And in the minute's count for the instance's log: no leg carried
+        // it, and there was no direct path.
+        let counted = l.access.usage.counted();
+        assert_eq!(counted.len(), 1);
+        assert_eq!(
+            (
+                &counted[0]["path"],
+                &counted[0]["direct"],
+                &counted[0]["tunnel"],
+                &counted[0]["direct_failed"]
+            ),
+            (
+                &serde_json::json!("none"),
+                &serde_json::json!(0),
+                &serde_json::json!(0),
+                &serde_json::json!(1)
+            )
+        );
     }
     #[tokio::test]
     async fn observed_denial_fails_authenticated_connect_despite_pending_lan_success() {
@@ -368,21 +420,27 @@ mod tests {
         let keys = Windows::default();
         let authorization = basic(&keys.credential("test-window").unwrap());
         let worker = tokio::spawn(async move {
-            serve(accepted, &host, &keys, || async {
-                Selection::default()
-                    .choose(
-                        async {
-                            waiting.await.unwrap();
-                            panic!("a late LAN success must not be polled after refusal")
-                        },
-                        async {
-                            // A LAN success is available if selection polls it again.
-                            release.send(()).unwrap();
-                            Err(public::OpenError::Terminal)
-                        },
-                    )
-                    .await
-            })
+            serve(
+                accepted,
+                &host,
+                &keys,
+                |_| {},
+                || async {
+                    Selection::default()
+                        .choose(
+                            async {
+                                waiting.await.unwrap();
+                                panic!("a late LAN success must not be polled after refusal")
+                            },
+                            async {
+                                // A LAN success is available if selection polls it again.
+                                release.send(()).unwrap();
+                                Err(public::OpenError::Terminal)
+                            },
+                        )
+                        .await
+                },
+            )
             .await;
         });
         browser
