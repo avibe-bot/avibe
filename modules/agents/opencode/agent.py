@@ -1564,6 +1564,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model_hub_config, model_hub_overlay, launch_spec, opencode_settings = await self._prepare_launch(
                 request.context
             )
+            if model_hub_overlay is None and (refresh := getattr(self.controller, "native_inventory_refresh", None)):
+                refresh.remember_opencode_cwd(request.working_path)
             turn.binding = await self._runtime.acquire(launch_spec)
             server = turn.binding.generation.runtime
             self._session_generations[request.base_session_id] = server

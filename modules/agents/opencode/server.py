@@ -1163,6 +1163,35 @@ class OpenCodeServerClient:
                     f"Failed to remove OpenCode auth for {provider_id}: {resp.status} {error_text}"
                 )
 
+    async def direct_picker_providers(self, directory: str) -> list[dict]:
+        """Complete, connected providers for this cwd. A failed GET isn't an empty answer."""
+        if self._active_model_hub_provider_ids():
+            raise ValueError("not a direct generation")
+        async with self._request_scope():
+            session = await self._get_http_session()
+            async with session.get(
+                f"{self.base_url}/provider", headers={"x-opencode-directory": _percent_encode_path(directory)},
+            ) as response:
+                response.raise_for_status()
+                raw = bytearray()
+                async for block in response.content.iter_chunked(65536):
+                    raw.extend(block)
+                    if len(raw) > 8 * 1024 * 1024:
+                        raise ValueError("provider list too large")
+        answer = json.loads(raw)
+        connected = answer["connected"]
+        providers = answer["all"]
+        if not isinstance(connected, list) or not all(isinstance(key, str) and key for key in connected):
+            raise ValueError("invalid connected provider list")
+        if isinstance(providers, list):
+            providers = {p["id"]: p for p in providers}
+        if not isinstance(providers, dict):
+            raise ValueError("invalid provider catalog")
+        selected = [providers[key] for key in connected]
+        if any(p.get("id") != key or not isinstance(p.get("models"), dict) for key, p in zip(connected, selected)):
+            raise ValueError("incomplete connected provider catalog")
+        return selected
+
     async def get_providers(self) -> Dict[str, Any]:
         """Fetch the user-visible provider catalog from the OpenCode server.
 

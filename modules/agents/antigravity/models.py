@@ -551,6 +551,19 @@ def auth_config_fingerprint(antigravity_config: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def account_cache_identity(config: Any) -> str | None:
+    """Only the explicit Gemini key identifies an account across ACP sessions.
+
+    Personal/business OAuth accounts can change without any config field changing.
+    ADC project and location aren't identities either. Live ACP options remain
+    valid inside the reporting session regardless of auth mode.
+    """
+    cfg = _extract_antigravity_config(config)
+    if _canonical_auth_mode(cfg) == "gemini-api-key" and _config_str(cfg, "api_key"):
+        return auth_config_fingerprint(cfg)
+    return None
+
+
 def _extract_option_choices_ordered(option: Mapping[str, Any]) -> list[tuple[str, str | None]]:
     """Read the flat or grouped select choices defined by ACP config options."""
     choices: list[tuple[str, str | None]] = []
@@ -691,7 +704,9 @@ def record_antigravity_live_models(
     if not extracted:
         return
 
-    active_fp = (auth_fingerprint or "").strip() or auth_config_fingerprint(config)
+    active_fp = account_cache_identity(config)
+    if not active_fp or (auth_fingerprint and auth_fingerprint != active_fp):
+        return
     replace_set = isinstance(payload, Mapping)
     cache_path = _antigravity_models_cache_path()
 
@@ -762,20 +777,15 @@ def read_antigravity_live_models(
     if not isinstance(cached_fp, str) or not cached_fp or not isinstance(raw_models, list) or not raw_models:
         return []
 
-    active_fp = (auth_fingerprint or "").strip()
-    if not active_fp:
-        if config is not None:
-            active_fp = auth_config_fingerprint(config)
-        else:
-            try:
-                from config.v2_config import V2Config
+    if config is None:
+        try:
+            from config.v2_config import V2Config
 
-                active_fp = auth_config_fingerprint(V2Config.load().agents.antigravity)
-            except Exception:
-                logger.debug("Could not load V2Config for Antigravity live model cache lookup", exc_info=True)
-                return []
-
-    if cached_fp != active_fp:
+            config = V2Config.load().agents.antigravity
+        except Exception:
+            return []
+    active_fp = account_cache_identity(config)
+    if not active_fp or cached_fp != active_fp or (auth_fingerprint and auth_fingerprint != active_fp):
         return []
 
     entries: list[dict[str, Any]] = []

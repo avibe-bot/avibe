@@ -218,7 +218,7 @@ async def test_oauth_credential_cutover_discards_previous_account_model_menu(
         "id": "model", "category": "model", "currentValue": "account-a-only",
         "options": [{"value": "account-a-only"}],
     }]})
-    assert read_antigravity_live_models(cfg)[0]["id"] == "account-a-only"
+    assert read_antigravity_live_models(cfg) == []  # OAuth mode cannot name the active account.
     service = _make_auth_service()
 
     if transition == "login":

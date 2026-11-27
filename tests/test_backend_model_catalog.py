@@ -799,128 +799,11 @@ def test_merge_sources_applies_tombstones_and_fills_missing_metadata():
     }
 
 
-def test_codex_local_hidden_tombstone_overrides_implicit_remote_entry(
-    monkeypatch,
-    tmp_path,
-):
-    codex_home = tmp_path / ".codex"
-    codex_home.mkdir()
-    (codex_home / "models_cache.json").write_text(
-        json.dumps(
-            {
-                "models": [
-                    {"slug": "account-hidden", "visibility": "hide"},
-                    {"slug": "account-visible", "visibility": "list"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "load_cached_remote_catalog",
-        lambda **kwargs: {
-            "schema_version": 1,
-            "backends": {
-                "codex": {
-                    "models": [
-                        {"id": "account-hidden"},
-                        {"id": "remote-model"},
-                    ]
-                }
-            },
-        },
-    )
-    monkeypatch.setattr(backend_model_catalog, "load_bundled_catalog", lambda: {})
-
-    snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
-
-    assert "account-hidden" not in snapshot["models"]
-    assert snapshot["models"][:2] == ["remote-model", "account-visible"]
-
-
-def test_codex_explicit_catalog_visibility_overrides_local_hidden(
-    monkeypatch,
-    tmp_path,
-):
-    codex_home = tmp_path / ".codex"
-    codex_home.mkdir()
-    (codex_home / "models_cache.json").write_text(
-        json.dumps(
-            {
-                "models": [
-                    {"slug": "gpt-6-astra", "visibility": "hide"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "load_cached_remote_catalog",
-        lambda **kwargs: {},
-    )
-
-    picker_snapshot = backend_model_catalog.backend_model_snapshot(
-        "codex",
-        schedule_refresh=False,
-    )
-    builtin_snapshot = backend_model_catalog.backend_builtin_snapshot(
-        "codex",
-        cli_installed=True,
-        schedule_refresh=False,
-    )
-
-    assert "gpt-6-astra" in picker_snapshot["models"]
-    assert "gpt-6-astra" in {row["id"] for row in builtin_snapshot["models"]}
-
-
-def test_codex_local_efforts_override_remote_metadata(monkeypatch, tmp_path):
-    codex_home = tmp_path / ".codex"
-    codex_home.mkdir()
-    (codex_home / "models_cache.json").write_text(
-        json.dumps(
-            {
-                "models": [
-                    {
-                        "slug": "shared-model",
-                        "visibility": "list",
-                        "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "load_cached_remote_catalog",
-        lambda **kwargs: {
-            "schema_version": 1,
-            "backends": {
-                "codex": {
-                    "models": [
-                        {
-                            "id": "shared-model",
-                            "reasoning_efforts": ["low", "high", "ultra"],
-                        }
-                    ]
-                }
-            },
-        },
-    )
-    monkeypatch.setattr(backend_model_catalog, "load_bundled_catalog", lambda: {})
-
-    snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
-
-    assert [entry["value"] for entry in snapshot["reasoning_options"]["shared-model"]] == [
-        "__default__",
-        "low",
-        "high",
-    ]
+def test_public_codex_catalog_never_imports_the_native_cache(monkeypatch, tmp_path):
+    (tmp_path / "models_cache.json").write_text(json.dumps({"models": [{"slug": "private-previous-account", "visibility": "list"}]}))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    assert "private-previous-account" not in backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
+    assert "private-previous-account" not in {row["id"] for row in backend_model_catalog.backend_builtin_models("codex", schedule_refresh=False)}
 
 
 def test_claude_snapshot_ignores_native_default_models(monkeypatch, tmp_path):
@@ -1478,22 +1361,6 @@ def test_bundled_codex_leading_models_have_declared_reasoning_efforts(position, 
     ] == ["__default__", *expected_efforts]
 
 
-def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):
-    codex_home = tmp_path / "codex-state"
-    codex_home.mkdir()
-    (codex_home / "models_cache.json").write_text(
-        json.dumps({"models": [{"slug": "gpt-expanded", "visibility": "list"}]}),
-        encoding="utf-8",
-    )
-    (codex_home / "config.toml").write_text('model = "gpt-configured"', encoding="utf-8")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("CODEX_HOME", "~/codex-state")
-
-    assert backend_model_catalog._read_codex_models_cache() == [{"id": "gpt-expanded", "visibility": "list"}]
-    snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
-    assert "gpt-configured" not in snapshot["models"]
-
-
 def test_backend_builtin_models_merge_backend_snapshots_but_exclude_user_config(
     monkeypatch,
 ):
@@ -1503,11 +1370,6 @@ def test_backend_builtin_models_merge_backend_snapshots_but_exclude_user_config(
         lambda: {"catalog": {}},
     )
     monkeypatch.setattr(backend_model_catalog, "_read_complete_catalog", lambda _path: {})
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache_with_status",
-        lambda: ([], True),
-    )
     monkeypatch.setattr(
         backend_model_catalog,
         "_codex_sources",
@@ -1557,46 +1419,6 @@ def test_claude_builtin_rows_carry_no_native_1m_suffix_as_their_name(monkeypatch
     assert backend_model_catalog.builtin_display_name("claude", "claude-x", "Claude X") == "Claude X"
 
 
-def test_builtin_snapshot_requires_each_catalog_once_when_cli_is_installed(
-    monkeypatch,
-):
-    reads = {"remote": 0, "bundled": 0, "local": 0}
-
-    def remote(_path, **_kwargs):
-        reads["remote"] += 1
-        return {
-            "catalog": {},
-            "source_key": backend_model_catalog._remote_catalog_source_key(
-                backend_model_catalog.DEFAULT_REMOTE_CATALOG_URL
-            ),
-        }
-
-    def bundled(_path):
-        reads["bundled"] += 1
-        return {}
-
-    def local():
-        reads["local"] += 1
-        return [], False
-
-    monkeypatch.setattr(backend_model_catalog, "_read_cached_remote_payload", remote)
-    monkeypatch.setattr(backend_model_catalog, "_read_complete_catalog", bundled)
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache_with_status",
-        local,
-    )
-
-    snapshot = backend_model_catalog.backend_builtin_snapshot(
-        "codex",
-        cli_installed=True,
-        schedule_refresh=False,
-    )
-
-    assert snapshot["complete"] is False
-    assert reads == {"remote": 1, "bundled": 1, "local": 1}
-
-
 def test_builtin_snapshot_does_not_require_cli_cache_when_cli_is_absent(monkeypatch):
     monkeypatch.setattr(
         backend_model_catalog,
@@ -1609,11 +1431,6 @@ def test_builtin_snapshot_does_not_require_cli_cache_when_cli_is_absent(monkeypa
         },
     )
     monkeypatch.setattr(backend_model_catalog, "_read_complete_catalog", lambda _path: {})
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache_with_status",
-        lambda: ([], False),
-    )
 
     snapshot = backend_model_catalog.backend_builtin_snapshot(
         "codex",
@@ -1656,11 +1473,6 @@ def test_builtin_snapshot_rejects_remote_cache_from_previous_url(
         backend_model_catalog,
         "_read_complete_catalog",
         lambda _path: {},
-    )
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache_with_status",
-        lambda: ([], False),
     )
 
     snapshot = backend_model_catalog.backend_builtin_snapshot(
@@ -1713,11 +1525,6 @@ def test_source_switch_is_not_suppressed_by_previous_source_failure(
         "_read_complete_catalog",
         lambda _path: {},
     )
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache_with_status",
-        lambda: ([], False),
-    )
 
     snapshot = backend_model_catalog.backend_builtin_snapshot(
         "codex",
@@ -1744,11 +1551,6 @@ def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
     bundled = {"schema_version": 1, "backends": {"claude": {"models": []}, "codex": {"models": []}}}
     monkeypatch.setattr(backend_model_catalog, "get_cached_catalog_path", lambda: remote_path)
     monkeypatch.setattr(backend_model_catalog, "_read_complete_catalog", lambda _path: bundled)
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "_read_codex_models_cache_with_status",
-        lambda: ([], True),
-    )
 
     def write_remote(model_id):
         remote_path.write_text(

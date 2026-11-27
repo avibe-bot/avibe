@@ -1291,6 +1291,11 @@ class Controller:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
+        from core.native_inventory_refresh import NativeInventoryRefresh
+
+        self.native_inventory_refresh = NativeInventoryRefresh(self)
+        self.native_inventory_refresh.start()
+
         try:
             self.update_checker.start()
         except Exception as e:
@@ -2254,6 +2259,8 @@ class Controller:
         if callable(drain_activity):
             await drain_activity()
 
+        if refresh := getattr(self, "native_inventory_refresh", None):
+            await refresh.stop()
         await self._stop_model_hub_snapshot_reconciliation()
 
         service_stops: list[tuple[str, asyncio.Task[None]]] = []

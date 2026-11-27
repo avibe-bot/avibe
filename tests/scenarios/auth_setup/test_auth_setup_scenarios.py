@@ -7072,7 +7072,7 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
 
         from modules.agents.antigravity.models import read_antigravity_live_models
 
-        assert read_antigravity_live_models(config)[0]["id"] == "gemini-4-neon"
+        assert read_antigravity_live_models(config) == []  # The live probe succeeded, but OAuth has no account key.
         # Exercise the Web wire contract with valid credentials: the HTTP
         # start must publish the CLI URL and accept code before committing.
         process = FakeProcess()
