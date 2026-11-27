@@ -105,7 +105,24 @@ _PROJECT_CONTEXT = (
     "and update by consolidating and abstracting instead of merely appending.\n\n"
 )
 # The Bots and Agents roster (docs/plans/bots.md "Prompt drafts") and what it replaced, with no Bots listed.
-_BOTS_ROSTER_INTRO = '### Bots and Agents\nYou can address two kinds of workers. Both tables are generated from live definitions; use the first column exactly as listed in commands, and the display name when talking to the user.\n\n- A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation.\n- An **Agent** is a reusable role: backend, model, and instructions. Each run starts a fresh Session with no memory of earlier runs, so several runs can work in parallel.\n\nAsk a Bot when the work needs its memory, ongoing responsibility, or judgment. Run an Agent for a self-contained task or for parallel work. In Chinese, the product calls Bots 伙伴; use that word when you write to the user in Chinese.\n\n| Bot | Display Name | Role |\n| --- | --- | --- |\n\n\n'
+_BOTS_ROSTER_INTRO = (
+    "### Bots and Agents\n"
+    "You are not alone here. Other Bots and Sessions on this machine work for the same user, and you can work with "
+    "them as colleagues do: ask what they know, tell them what you found, agree who takes which part, or bring "
+    "someone in for one part.\n\n"
+    "- A **Bot** is a standing colleague with one permanent Session, its own memory, and matters it looks after. "
+    "Writing to a Bot is talking with it: your words join its conversation.\n"
+    "- An **Agent** is a role (backend, model, and instructions) you can bring in whenever you need it. Each time, "
+    "it is a fresh Session that knows only what you tell it, so several can work at once.\n\n"
+    "What the user entrusted to you stays yours to see through, whoever does the parts. You hold this "
+    "conversation's context and the others do not, so every exchange costs some explaining and some waiting. "
+    "Working together is worth it when someone else knows what you need, when parts can move at the same time, "
+    "or when another mind makes the result better; what you can readily do yourself, you can often just do.\n\n"
+    "Both tables are generated from live definitions; use the first column exactly as listed in commands, and the "
+    "display name when talking to the user. In Chinese, the product calls Bots 伙伴; use that word when you write "
+    "to the user in Chinese.\n\n"
+    "| Bot | Display Name | Role |\n| --- | --- | --- |\n\n\n"
+)
 _PREVIOUS_AGENTS_INTRO = '### Agents\nThe table below is generated from currently enabled Agents at prompt-injection time. It must reflect live Agent definitions; do not hard-code Agent names, backends, or descriptions. The `Agent Name` column is command-safe and can be used directly in `vibe agent` commands.\n\n'
 _BOT_RULES = '\nBot rules:\n- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its running Turn, or starts one if idle; add `--queue` to wait.\n- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.\n\nAgent rules:\n'
 _PREVIOUS_RULES = '\nRules:\n'

@@ -2179,7 +2179,7 @@ async def serve(
             # Freeze the warmed controller heap once, by default. Armed only once this
             # listener is published, so the unfreeze command is reachable for as long
             # as the freeze can last. Stream count does not gate the natural full
-            # collection that triggers the freeze after ten minutes of uptime.
+            # collection that triggers the freeze after two minutes of uptime.
             if watchdog is not None:
                 watchdog.arm_warm_freeze()
             await server.serve(sockets=[bound.listener])
