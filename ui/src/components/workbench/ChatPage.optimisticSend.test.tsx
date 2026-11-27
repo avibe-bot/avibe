@@ -392,17 +392,20 @@ describe('ChatPage optimistic send', () => {
     mocks.readerPrincipal = 'local';
     // The chat has older history; the send is not in it.
     const olderReads: unknown[] = [];
-    mocks.api.listSessionMessages.mockImplementation(async (_id: string, params: unknown) => {
+    const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
+    mocks.api.listSessionMessages.mockImplementation(async (_id: string, params: { tail?: boolean }) => {
       olderReads.push(params);
-      return { messages: [], next_after_id: null, next_before_id: null };
+      return params.tail
+        ? { messages: [latest], next_after_id: null, next_before_id: 'm1' }
+        : { messages: [], next_after_id: null, next_before_id: null };
     });
     mount();
-    await act(async () => live.resolve({ ...bootstrap([message('m1', 'earlier answer')]), next_before_id: 'm1' }));
+    await act(async () => live.resolve({ ...bootstrap([latest]), next_before_id: 'm1' }));
 
     await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(2), { timeout: 3000 });
-    // Older history is read once; the retry only asks the composer again.
-    expect(olderReads).toEqual([expect.objectContaining({ beforeId: 'm1' })]);
+    // The instance is read once (its latest rows, then older ones); the retry only asks the composer again.
+    expect(olderReads).toEqual([expect.objectContaining({ tail: true }), expect.objectContaining({ beforeId: 'm1' })]);
     expect(mocks.restoreUnsent).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'never answered' }));
     expect(Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'))).toEqual([]);
   });

@@ -52,7 +52,8 @@ function receive(chat: Instance, sent: Sent, content: Record<string, unknown> = 
     id: `msg-${chat.held.length + 1}`, scope_id: null, session_id: SESSION_ID, platform: 'avibe', author: 'user',
     type: 'user', source: 'user', author_id: chat.principal, author_name: null, native_message_id: null,
     parent_native_message_id: null, text: sent.text, content, metadata: sent.metadata,
-    created_at: '2026-11-27T13:01:00Z', updated_at: '2026-11-27T13:01:00Z', delivered_at: null, read_at: null,
+    // Taken now, by the clock the page compares a send's time with.
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString(), delivered_at: null, read_at: null,
   };
   chat.held.push(row);
   return row;
@@ -93,7 +94,12 @@ async function serveChat(page: Page, chat: Instance) {
   await page.route(`**/api/sessions/${SESSION_ID}/messages**`, (route) => {
     const request = route.request();
     if (request.method() !== 'POST') {
-      const before = new URL(request.url()).searchParams.get('before_id');
+      const params = new URL(request.url()).searchParams;
+      const before = params.get('before_id');
+      // A deep link's window around an older row: newer rows lie beyond it.
+      if (params.get('around_id')) {
+        return route.fulfill({ json: { messages: chat.older, next_before_id: null, next_after_id: 'msg-window-start', anchor_id: params.get('around_id') } });
+      }
       return route.fulfill({ json: before === 'msg-window-start'
         ? { messages: chat.older, next_before_id: null, next_after_id: null }
         : { messages: chat.held, next_before_id: chat.older.length ? 'msg-window-start' : null, next_after_id: null } });
@@ -219,7 +225,7 @@ test('a received send pushed out of the latest window by later rows is found fur
   chat.older = chat.held.splice(0);
   chat.held.push({
     ...chat.older[0], id: 'msg-later', author: 'agent', type: 'result', source: 'agent', author_id: null,
-    text: 'A later answer', metadata: {}, created_at: '2026-11-27T13:30:00Z', updated_at: '2026-11-27T13:30:00Z',
+    text: 'A later answer', metadata: {}, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   });
   const next = await reopen(page, chat, denied);
 
@@ -227,6 +233,76 @@ test('a received send pushed out of the latest window by later rows is found fur
   await expect.poll(() => records(next)).toEqual([]);
   await expect(editor(next)).toHaveText('');
   expect(chat.sent).toHaveLength(1);
+  expect(denied).toEqual([]);
+});
+
+test('a received send is found in the latest rows when the chat opens on an older stretch', async ({ page }) => {
+  const chat = instance({ receives: true });
+  const denied = await serveChat(page, chat);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await open(page, `/chat/${SESSION_ID}`);
+
+  await send(page, chat, 'Received, newer than the link');
+  await tearDown(page);
+  // Opened from a link to an earlier message, and the reader is confirmed only
+  // after that window is on screen.
+  chat.older = [{
+    ...chat.held[0], id: 'msg-linked', author: 'agent', type: 'result', source: 'agent', author_id: null,
+    text: 'The linked answer', metadata: {}, created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z',
+  }];
+  let confirm!: () => void;
+  const confirmed = new Promise<void>((resolve) => { confirm = resolve; });
+  const next = await page.context().newPage();
+  denied.push(...await serveChat(next, chat));
+  await next.route('**/api/session', async (route) => {
+    await confirmed;
+    await route.fulfill({ json: readerAnswer(chat.principal) });
+  });
+  await next.setViewportSize({ width: 1200, height: 800 });
+  await open(next, `/chat/${SESSION_ID}?msg=msg-linked`);
+  await expect(next.locator('main').getByText('The linked answer')).toBeVisible();
+  confirm();
+
+  await expect.poll(() => records(next)).toEqual([]);
+  await next.waitForTimeout(RESTORE_SETTLED_MS);
+  await expect(editor(next)).toHaveText('');
+  expect(chat.sent).toHaveLength(1);
+  expect(denied).toEqual([]);
+});
+
+test('two pages opening together give a send back once', async ({ page }) => {
+  const chat = instance({ receives: false });
+  const denied = await serveChat(page, chat);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await open(page, `/chat/${SESSION_ID}`);
+
+  await send(page, chat, 'Only once');
+  await tearDown(page);
+  // Both pages check the instance at the same moment: their reads of its latest
+  // rows are held until each has asked, then answered together.
+  const asked = new Set<Page>();
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const holdLatestRows = async (opened: Page) => {
+    await opened.route(`**/api/sessions/${SESSION_ID}/messages**`, async (route) => {
+      if (route.request().method() !== 'GET' || !new URL(route.request().url()).searchParams.get('tail')) return route.fallback();
+      asked.add(opened);
+      await released;
+      return route.fallback();
+    });
+  };
+  const [first, second] = await Promise.all([
+    reopen(page, chat, denied, holdLatestRows),
+    reopen(page, chat, denied, holdLatestRows),
+  ]);
+  await expect.poll(() => asked.size).toBe(2);
+  release();
+  await first.waitForTimeout(RESTORE_SETTLED_MS);
+
+  // Each page's composer was empty when it loaded: only the page that gave it back shows it.
+  const given = await Promise.all([first, second].map((opened) => editor(opened).innerText()));
+  expect(given.map((text) => text.trim()).sort()).toEqual(['', 'Only once']);
+  expect(await records(first)).toEqual([]);
   expect(denied).toEqual([]);
 });
 

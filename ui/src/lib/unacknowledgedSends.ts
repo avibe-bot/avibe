@@ -148,6 +148,25 @@ export async function unacknowledgedSends(sessionId: string): Promise<Unacknowle
   return records.filter((record) => !inFlight.has(record.clientId) && !live.has(`${LOCK_PREFIX}${record.clientId}`));
 }
 
+const CLAIM_PREFIX = 'avibe.unacknowledged-send-claim:';
+
+/** Decide on this chat's records under a lock every tab takes for the chat, so a
+ *  record is given back by one page only: ``decide`` sees each record still
+ *  stored, read again under the lock, and a record it returns true for is deleted. */
+export async function claimUnacknowledgedSends(
+  sessionId: string,
+  decide: (send: UnacknowledgedSend) => boolean,
+): Promise<void> {
+  const run = async () => {
+    for (const send of storedSends(sessionId)) {
+      if (decide(send)) forgetUnacknowledgedSend(sessionId, send.clientId);
+    }
+  };
+  const manager = locks();
+  if (!manager) return run();
+  await manager.request(`${CLAIM_PREFIX}${sessionId}`, run);
+}
+
 function storedSends(sessionId: string): UnacknowledgedSend[] {
   const target = storage();
   if (!target) return [];
