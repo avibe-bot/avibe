@@ -11,6 +11,12 @@
 //! answer; the oldest are dropped past `KEPT`. Best effort: a minute can be
 //! dropped unsent, and can arrive more than once when an answer is lost.
 //!
+//! Each entry also names this app's own build (`app`), when the shell gave
+//! one the instance accepts. The key is optional to an instance that knows
+//! it. One from before it ignores the whole `path_use` list of a request
+//! whose entries carry it, so nothing of this desktop's use is in that
+//! instance's log until the instance is updated.
+//!
 //! What this desktop does not send yet is zero or `none` in the entry: the
 //! race's counts and timings, the hand-overs, and why a connection was not
 //! raced, except `strict`. A
@@ -18,7 +24,10 @@
 //! the instance's own count of requests by arrival path is the number that
 //! sees it.
 use super::{clock::Clock, faults::PathWord, transport::FaultCode};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, OnceLock},
+};
 
 /// The most entries one request carries; the instance ignores a longer list
 /// whole.
@@ -52,9 +61,10 @@ pub(super) struct Entry {
     counts: Counts,
 }
 impl Entry {
-    /// Exactly the 22 keys the instance requires, within its bounds. `now`
-    /// is the minute the request is made in: an age, never a wall time.
-    pub(super) fn json(&self, now: u64) -> serde_json::Value {
+    /// Exactly the 22 keys the instance requires, within its bounds, and
+    /// `app` with them when this app's build is known. `now` is the minute
+    /// the request is made in: an age, never a wall time.
+    fn json(&self, now: u64, app: Option<&str>) -> serde_json::Value {
         let most = self
             .counts
             .retired_for
@@ -65,7 +75,7 @@ impl Entry {
             });
         let retired_rule = most.map_or(serde_json::json!("none"), |(code, _)| serde_json::json!(code));
         let bounded = |count: u64| count.min(MAX);
-        serde_json::json!({
+        let mut entry = serde_json::json!({
             "client": "desktop",
             "age_min": now.saturating_sub(self.minute).min(MAX_AGE),
             "path": self.path.word(),
@@ -80,20 +90,48 @@ impl Entry {
             "handover_rule": "none",
             "retired": bounded(self.counts.retired),
             "retired_rule": retired_rule,
-        })
+        });
+        if let Some(app) = app {
+            entry["app"] = serde_json::json!(app);
+        }
+        entry
     }
+}
+
+/// A build as an entry may name it: what the instance accepts for `app`, 1
+/// to 32 bytes of printable ASCII, exactly as given. `0.0.0` is what a
+/// package that was given no version is stamped with: no build to name.
+fn build_word(build: &str) -> Option<&str> {
+    let printable = build.bytes().all(|byte| (0x20..=0x7e).contains(&byte));
+    (printable && (1..=32).contains(&build.len()) && build != "0.0.0").then_some(build)
 }
 
 pub(super) struct Usage {
     clock: Clock,
     minutes: Mutex<BTreeMap<(u64, PathWord), Counts>>,
+    /// This app's own build, once the shell has said it and only if it is
+    /// one an entry may name (`build_word`).
+    app: OnceLock<String>,
 }
 impl Usage {
     pub(super) fn new(clock: Clock) -> Self {
         Self {
             clock,
             minutes: Mutex::default(),
+            app: OnceLock::new(),
         }
+    }
+    /// The shell says which build this app is. One that an entry may not
+    /// name is no build: the entries then go without `app`.
+    pub(super) fn named(&self, build: &str) {
+        if let Some(build) = build_word(build) {
+            let _ = self.app.set(build.to_owned());
+        }
+    }
+    /// `taken` as the request carries it, at the minute it is made in.
+    pub(super) fn report(&self, taken: &[Entry]) -> Vec<serde_json::Value> {
+        let (now, app) = (self.minute(), self.app.get().map(String::as_str));
+        taken.iter().map(|entry| entry.json(now, app)).collect()
     }
     /// The minute it is now, on the clock that keeps counting during sleep.
     pub(super) fn minute(&self) -> u64 {
@@ -187,7 +225,7 @@ impl Usage {
                     path,
                     counts: counts.clone(),
                 };
-                entry.json(now)[key].as_u64().expect("a count")
+                entry.json(now, None)[key].as_u64().expect("a count")
             })
             .sum()
     }
@@ -246,10 +284,8 @@ mod tests {
             taken.iter().map(|entry| entry.path).collect::<Vec<_>>(),
             [PathWord::None, PathWord::Relay]
         );
-        let entry = taken[1].json(usage.minute());
-        assert_eq!(
-            entry,
-            serde_json::json!({
+        let entry = usage.report(&taken).remove(1);
+        let keys = serde_json::json!({
                 "client": "desktop", "age_min": 1, "path": "relay",
                 "direct": 2, "tunnel": 2,
                 "raced": 0, "direct_won": 0, "tunnel_won": 0,
@@ -259,10 +295,18 @@ mod tests {
                 "handover_asked": 0, "handover_done": 0, "handover_refused": 0,
                 "handover_rule": "none",
                 "retired": 3, "retired_rule": "path_refused_cgnat",
-            })
-        );
+        });
+        assert_eq!(entry, keys);
         assert_eq!(entry.as_object().unwrap().len(), 22);
-        assert_eq!(taken[0].json(usage.minute())["retired_rule"], "none");
+        assert_eq!(usage.report(&taken)[0]["retired_rule"], "none");
+        // Once the shell has said which build this app is, every entry
+        // names it, beside the same 22 keys. It is said once.
+        usage.named("3.2.9-rc.4");
+        usage.named("3.2.10");
+        let mut named = keys;
+        named["app"] = serde_json::json!("3.2.9-rc.4");
+        assert_eq!(usage.report(&taken)[1], named);
+        assert_eq!(usage.report(&taken)[0]["app"], "3.2.9-rc.4");
         // Taken once; the minute still counting stays.
         assert!(usage.take().is_empty());
         // Not answered: kept again, and older by the time it is sent.
@@ -273,7 +317,40 @@ mod tests {
             again.iter().map(|entry| entry.path).collect::<Vec<_>>(),
             [PathWord::None, PathWord::Relay, PathWord::Lan]
         );
-        assert_eq!(again[1].json(usage.minute())["age_min"], 3);
+        assert_eq!(usage.report(&again)[1]["age_min"], 3);
+    }
+
+    /// A build the instance would not accept for `app` is not sent: one
+    /// refused entry would cost the whole list. Nor is the version of a
+    /// package that was given none.
+    #[test]
+    fn only_a_build_the_instance_accepts_is_named() {
+        for build in ["3.2.9", "3.2.9-rc.4", "0.1.0", "57.1 (4)", "x", &"9".repeat(32)] {
+            assert_eq!(build_word(build), Some(build), "{build:?}");
+        }
+        for build in [
+            "",
+            "0.0.0",
+            &"9".repeat(33),
+            "3.2.9\n",
+            "3.2.9\t",
+            "3.2.9\u{7f}",
+            "版本 3",
+        ] {
+            assert_eq!(build_word(build), None, "{build:?}");
+        }
+        let (usage, seconds) = usage();
+        usage.tunnel(PathWord::None);
+        seconds.fetch_add(60, Ordering::SeqCst);
+        let taken = usage.take();
+        // Not a build: the entry goes as it always did, and a build that
+        // is said later is still taken.
+        usage.named("0.0.0");
+        let entry = &usage.report(&taken)[0];
+        assert!(entry.get("app").is_none());
+        assert_eq!(entry.as_object().unwrap().len(), 22);
+        usage.named("3.2.9");
+        assert_eq!(usage.report(&taken)[0]["app"], "3.2.9");
     }
 
     #[test]
@@ -287,7 +364,7 @@ mod tests {
         let first = usage.take();
         assert_eq!(first.len(), LIMIT);
         // The oldest of the thirty kept.
-        assert_eq!(first[0].json(usage.minute())["age_min"], 30);
+        assert_eq!(usage.report(&first)[0]["age_min"], 30);
         let mut total = first.len();
         loop {
             let next = usage.take();
