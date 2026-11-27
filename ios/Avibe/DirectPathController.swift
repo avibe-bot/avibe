@@ -521,6 +521,9 @@ final class DirectPathController {
     private let limits: DirectConnectLimits
     private let timing: DirectPathTiming
     private let notificationCenter: NotificationCenter
+    /// The account of which leg carried the pages' connections, sent to the
+    /// instance with the rendezvous request.
+    private let pathUse: DirectPathUse
     private let onStatusChanged: () -> Void
     /// Called when a load gate or `listenerRecovery` may have changed: the
     /// listener was closed for the background, a return was settled, an
@@ -621,6 +624,46 @@ final class DirectPathController {
     /// The kind of path the usable transport's connection runs on, as last
     /// reported; nil when none is usable or the transport cannot tell.
     private var currentPath: DirectPathKind?
+    /// The path of the last plan that had a direct candidate, as it was
+    /// named for `DirectPathUse` then: connections closed for that path
+    /// are counted under the name they were planned on. Read when the close
+    /// is decided, never after a wait.
+    private var plannedPath: (kind: DirectPathKind, use: DirectPathUse.Path)?
+
+    /// A plan's own facts for `DirectPathUse`, read when the plan is made.
+    private struct PlanUse: Sendable {
+        let scope: DirectPathUse.Scope
+        let path: DirectPathUse.Path
+        let strict: Bool
+        let tunnelOnly: Bool
+    }
+
+    /// The record of a plan's last race, kept from the race's end until the
+    /// listener says what became of the CONNECT.
+    private final class PlanRace: @unchecked Sendable {
+        private let lock = NSLock()
+        private var record: DirectRaceRecord?
+
+        var last: DirectRaceRecord? {
+            get { lock.withLock { record } }
+            set { lock.withLock { record = newValue } }
+        }
+    }
+
+    /// Whose connections a count is of: this account's store and `host`.
+    private func useScope(_ host: String) -> DirectPathUse.Scope {
+        DirectPathUse.Scope(store: websiteDataStore.identifier, host: host)
+    }
+
+    /// The direct path new connections to `host` prefer now, in
+    /// `DirectPathUse`'s words: `none` unless they prefer one.
+    private func pathInUse(for host: String) -> DirectPathUse.Path {
+        guard preferred == .direct, host == target?.authority.host, let currentPath else {
+            return .none
+        }
+        let selected = transport.pathDiagnostics.selected
+        return DirectPathUse.Path(kind: currentPath, local: selected?.kind == currentPath ? selected?.local : nil)
+    }
     /// A sticky plan's direct candidate missed its bound: plans hedge again
     /// until a direct candidate wins, or the path changes.
     private var stickyDropped = false
@@ -685,9 +728,11 @@ final class DirectPathController {
         limits: DirectConnectLimits = .standard,
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
+        pathUse: DirectPathUse = .shared,
         onStatusChanged: @escaping () -> Void,
         onAvailabilityChanged: @escaping () -> Void = {}
     ) {
+        self.pathUse = pathUse
         self.websiteDataStore = websiteDataStore
         self.transport = transport
         self.isCurrentRuntime = isCurrentRuntime
@@ -801,13 +846,16 @@ final class DirectPathController {
             directAuthorized(for: target.authority),
             let listener
         else {
+            pathUse.handover(refused: .notUsable, scope: useScope(origin.host), path: pathInUse(for: origin.host))
             reply(.skipped(.notUsable))
             return
         }
         guard soleDocument == true else {
+            pathUse.handover(refused: .otherDocuments, scope: useScope(origin.host), path: pathInUse(for: origin.host))
             reply(.skipped(.otherDocuments))
             return
         }
+        pathUse.handover(refused: nil, scope: useScope(origin.host), path: pathInUse(for: origin.host))
         let host = origin.host
         Task {
             let result = await listener.closeQuietRelays(
@@ -1291,6 +1339,8 @@ final class DirectPathController {
     /// Every relay of both backends closes; nothing of the old account is
     /// kept. Not a closure: its documents are gone.
     func accountWillChange() {
+        // Nothing counted for this account is sent after it.
+        pathUse.removeAll()
         cancelFirstRouteWait()
         runtime = nil
         settleHeldReplies()
@@ -1379,7 +1429,7 @@ final class DirectPathController {
                 // A new instance endpoint key or address set.
                 replacedGenerations.insert(accepted)
                 advanceGeneration()
-                closeRelays(.direct, countsAsClosure: true, loss: (.generationReplaced, currentPath))
+                closeRelays(.direct, countsAsClosure: true, loss: (.generationReplaced, currentPath, target.authority.host))
             }
             acceptedGeneration = generation
             let wasUsable = isUsable
@@ -1431,7 +1481,7 @@ final class DirectPathController {
             // published in this turn: no status says `direct` for a path
             // that is gone.
             updatePreference()
-            closeRelays(.direct, countsAsClosure: true, loss: (.lost, pathAtLoss))
+            closeRelays(.direct, countsAsClosure: true, loss: (.lost, pathAtLoss, target.authority.host))
         case .lostToBackground:
             // The transport heard the background first. It is this App's
             // background: entered here now, as the background observer
@@ -1529,6 +1579,25 @@ final class DirectPathController {
             && !stickyDropped
         let generation = pathGeneration
         let dropSerial = stickyDropSerial
+        // For the account of which leg carries the pages' connections
+        // (`DirectPathUse`): the plan's own facts, read now, with the plan.
+        let planPath = directTag == nil ? nil : currentPath
+        let selectedPath = planPath == nil ? nil : transport.pathDiagnostics.selected
+        let use = PlanUse(
+            scope: useScope(host),
+            path: DirectPathUse.Path(
+                kind: planPath,
+                local: selectedPath?.kind == planPath ? selectedPath?.local : nil
+            ),
+            strict: strict,
+            // No direct session for this host at all: the choice of the
+            // tunnel alone, no permission, or an instance that is not the
+            // selected one. Otherwise there is one and it has no usable path.
+            tunnelOnly: directTag == nil && target?.authority != authority
+        )
+        if let planPath {
+            plannedPath = (planPath, use.path)
+        }
         var plan = DirectConnectPlan(
             scope: scope,
             generation: pathGeneration,
@@ -1556,7 +1625,9 @@ final class DirectPathController {
                 self?.stickyAttemptMissed(generation: generation, selection: fence.selection)
             }
         }
+        let lastRace = PlanRace()
         plan.recordRace = { [weak self] record in
+            lastRace.last = record
             Task { @MainActor in
                 self?.raceDidFinish(
                     record,
@@ -1565,6 +1636,22 @@ final class DirectPathController {
                     dropSerial: dropSerial
                 )
             }
+        }
+        // Counted once for the CONNECT, when the listener has granted its
+        // relay or given it up: a race that is fenced and planned again is
+        // not a connection. Whichever instance is selected by then, the
+        // connection was made, and it is counted for its own host.
+        plan.connectionSettled = { [pathUse] carried in
+            guard let record = lastRace.last else {
+                return
+            }
+            pathUse.connection(
+                DirectPathUseConnection(
+                    record: record, carried: carried, strict: use.strict, tunnelOnly: use.tunnelOnly
+                ),
+                scope: use.scope,
+                path: use.path
+            )
         }
         return plan
     }
@@ -1771,7 +1858,7 @@ final class DirectPathController {
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
-        loss: (cause: DirectLossRecord.Cause, path: DirectPathKind?)? = nil,
+        loss: (cause: DirectLossRecord.Cause, path: DirectPathKind?, host: String?)? = nil,
         then: (@MainActor () -> Void)? = nil
     ) {
         guard let listener else {
@@ -1797,13 +1884,26 @@ final class DirectPathController {
         // its cause and the path the relays ran on.
         let cause = loss?.cause
         let pathAtClose = loss?.path
+        // Whose connections these are and what their path was called, read
+        // now: by the time the listener has closed them, a newer link may
+        // have been planned on and named differently.
+        var useAtClose: (scope: DirectPathUse.Scope, path: DirectPathUse.Path)?
+        if let loss, let host = loss.host {
+            let planned = plannedPath.flatMap { $0.kind == loss.path ? $0.use : nil }
+            useAtClose = (
+                scope: useScope(host),
+                path: planned ?? DirectPathUse.Path(kind: loss.path, local: nil)
+            )
+        }
         let epoch = accountEpoch
         Task { [weak self] in
             let result = await listener.closeRelaysTimed(backend: backend, before: generation)
             await MainActor.run {
                 self?.closeDidIssue()
                 if let cause {
-                    self?.recordLoss(result.quietMs, cause: cause, path: pathAtClose, accountEpoch: epoch)
+                    self?.recordLoss(
+                        result.quietMs, cause: cause, path: pathAtClose, use: useAtClose, accountEpoch: epoch
+                    )
                 }
                 then?()
             }
@@ -1816,6 +1916,7 @@ final class DirectPathController {
         _ quietMs: [Int],
         cause: DirectLossRecord.Cause,
         path: DirectPathKind?,
+        use: (scope: DirectPathUse.Scope, path: DirectPathUse.Path)?,
         accountEpoch epoch: Int
     ) {
         guard !quietMs.isEmpty, epoch == accountEpoch else {
@@ -1827,6 +1928,15 @@ final class DirectPathController {
             quietMs: Array(quietMs.prefix(DirectLossRecord.quietLimit)),
             path: path
         )
+        let rule: DirectPathUse.RetiredRule
+        switch cause {
+        case .lost: rule = .pathMonitor
+        case .generationReplaced: rule = .superseded
+        case .background: rule = .background
+        }
+        if let use {
+            pathUse.retired(rule, scope: use.scope, path: use.path)
+        }
         losses.append(record)
         if losses.count > Self.raceLimit {
             losses.removeFirst(losses.count - Self.raceLimit)
@@ -2456,6 +2566,7 @@ final class DirectPathController {
         // stop, which closes its streams: a relay whose stream ended first
         // would no longer be there to count.
         let pathAtBackground = currentPath
+        let hostAtBackground = target?.authority.host
         deselect(stoppingTransport: false, keepingDiagnostics: true)
         advanceGeneration()
         // Out of service now, before any close runs, and on purpose: what a
@@ -2486,7 +2597,7 @@ final class DirectPathController {
             completionAwaitingCloses = nil
             rebindDidComplete(kept)
         }
-        closeRelays(.direct, countsAsClosure: true, loss: (.background, pathAtBackground)) { [weak self] in
+        closeRelays(.direct, countsAsClosure: true, loss: (.background, pathAtBackground, hostAtBackground)) { [weak self] in
             // Unless a new selection was made meanwhile: selecting already
             // stops the transport's work for the previous target.
             guard let self, self.target == nil else {

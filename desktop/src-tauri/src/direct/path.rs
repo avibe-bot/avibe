@@ -77,6 +77,15 @@ fn global_v4(ip: Ipv4Addr) -> bool {
         && !(a == 198 && matches!(b, 18 | 19))
 }
 
+/// IPv4 shared address space, 100.64.0.0/10 (RFC 6598): a carrier's NAT, or
+/// an overlay network such as a tailnet. A selected path there is a local
+/// one (`Offer::selected`), as the phone App and the instance's own report
+/// have it. Never a destination to dial first: no offer lists such an
+/// address.
+pub(super) fn shared_v4(a: SocketAddr) -> bool {
+    matches!(a.ip(), IpAddr::V4(ip) if a.port() != 0 && ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
+}
+
 pub(super) fn punched_family(a: SocketAddr) -> Option<AddressFamily> {
     match a.ip() {
         IpAddr::V4(ip) if a.port() != 0 && global_v4(ip) => Some(AddressFamily::Ipv4),
