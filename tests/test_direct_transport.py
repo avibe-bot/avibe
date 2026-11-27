@@ -522,6 +522,10 @@ async def test_device_sideband_projection_is_independent_of_log_budget(caplog):
     for family, scope, kind in (("relay", None, "relay"), ("ipv4", "local", "lan"), ("ipv6", "global", "punched")):
         supervisor._handle_path_report({**msg, "phase": "change", "selected": family, "scope": scope})
         assert rv.session_paths("binding") == {("owner", "sid"): {"kind": kind, "family": None if kind == "relay" else family, "rtt_ms": 19}}
+        # The log line says the class of the selected path's address, and
+        # `none` where there is none: through the relay.
+        line = [r.getMessage() for r in caplog.records if r.getMessage().startswith("direct path ")][-1]
+        assert f" selected={family} scope={scope or 'none'} partial=" in line
     for ordinal in range(2, 100):
         supervisor._handle_path_report({**msg, "ordinal": ordinal})
     assert len(rv._admissions[PEER].connections) == 32
@@ -551,6 +555,8 @@ async def test_path_budget_reserves_terminal_ipv6_evidence(caplog):
     supervisor._handle_path_report({**msg, "phase": "close"})
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("direct path ")]
     assert len(lines) == 60 and "phase=close" in lines[-1] and "ipv6.rx_bytes=17" in lines[-1]
+    # A sidecar that does not report the class: `none`, never a guess.
+    assert all(" selected=relay scope=none partial=" in line for line in lines)
     reader = asyncio.StreamReader()
     reader.feed_data(json.dumps({**msg, "endpoint_id": PEER}).encode() + b"\n")
     reader.feed_eof()
