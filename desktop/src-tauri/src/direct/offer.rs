@@ -3,7 +3,7 @@
 //! nominate an address, wall-clock comparison, or DNS for direct bootstrap.
 use super::{
     connect::Authority,
-    path::{global_v6, punched_family, AddressFamily, SelectedPath, TrialRelay},
+    path::{global_v6, punched_family, shared_v4, AddressFamily, SelectedPath, TrialRelay},
 };
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use serde::Deserialize;
@@ -56,6 +56,16 @@ pub(super) struct Offer {
     pub until: Duration,
 }
 
+/// What the open paths of an authenticated connection come to under a grant.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Verdict {
+    /// No path is selected in this snapshot.
+    Unselected,
+    /// The selected path is one the grant does not permit.
+    Refused,
+    Accepted(SelectedPath),
+}
+
 pub(super) fn lan(addr: SocketAddr) -> bool {
     addr.port() != 0
         && match addr.ip() {
@@ -75,8 +85,24 @@ impl Offer {
         addr
     }
 
+    /// Judges an authenticated connection by its selected path alone: iroh
+    /// sends application data on that one. A path that is open and not
+    /// selected, whatever its address, neither ends the link nor names it.
+    pub(super) fn judge(&self, peer: EndpointId, paths: impl IntoIterator<Item = (bool, TransportAddr)>) -> Verdict {
+        let Some((_, remote)) = paths.into_iter().find(|(selected, _)| *selected) else {
+            return Verdict::Unselected;
+        };
+        self.selected(peer, &remote).map_or(Verdict::Refused, Verdict::Accepted)
+    }
+
     /// Called only with a path snapshot of the authenticated connection, never
     /// to authorize bootstrap. A LAN-only grant still requires exact membership.
+    ///
+    /// Under a grant that reaches across networks, a path the authenticated
+    /// peer answers on in IPv4 shared address space (100.64/10) is a local
+    /// one, as an unlisted private address is: two computers on one overlay
+    /// network (a tailnet) or behind one carrier's NAT. `parse` lists no such
+    /// address, so none is dialled before the peer is authenticated.
     pub(super) fn selected(&self, peer: EndpointId, remote: &TransportAddr) -> Option<SelectedPath> {
         if peer != self.id {
             return None;
@@ -92,7 +118,7 @@ impl Offer {
                 if !listed && self.relay.is_none() && !self.candidates.iter().copied().any(global_v6) {
                     return None;
                 }
-                if lan(*a) || (listed && a.ip().is_loopback()) {
+                if lan(*a) || shared_v4(*a) || (listed && a.ip().is_loopback()) {
                     // The private loopback address can be listed only by the confined interop fixture.
                     Some(SelectedPath::Lan(if a.is_ipv4() {
                         AddressFamily::Ipv4
