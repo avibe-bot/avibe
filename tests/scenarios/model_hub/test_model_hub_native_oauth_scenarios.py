@@ -107,12 +107,14 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     )
     assert "current" not in claude
     assert claude["selected_model_id"] == "claude-opus-4-6"
-    assert claude["supply_status"] == "ok"
+    assert sources[0]["models"] == []
+    assert sources[0]["last_discovered_at"] is None
+    assert claude["supply_status"] == "interrupted"
     chain = client.get(
         "/api/models/agents/claude/chain?model=claude-opus-4-6",
         base_url=BASE_URL,
     ).get_json()["chain"]
-    assert next(item for item in chain["chain"] if item["runnable"])["source_id"] == started["source_id"]
+    assert not any(item["runnable"] for item in chain["chain"])
 
 
 def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_path):

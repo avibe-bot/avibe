@@ -1079,6 +1079,11 @@ def test_mh_mig_002_oauth_grants_move_into_engine_custody(
     assert {position["source_id"] for position in result["added_to"]} == {
         source.id for source in store.config.sources
     }
+    # These are compatibility routes, not an inventory observed from either
+    # credential. Migration must preserve the former without advertising the latter.
+    for source in store.config.sources:
+        assert source.models and source.last_discovered_at is None
+        assert all(model.discovered_at is None for model in source.models)
     assert {
         (source.vendor, source.kind, source.supply_channel, bool(source.credential_ref))
         for source in store.config.sources

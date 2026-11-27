@@ -126,12 +126,8 @@ async def dispatch_model_hub_rpc(
         )
     if operation == "agent_model_candidates":
         service.request_inventory_refresh()
-        backend = payload.get("backend")
-        if backend in MODEL_HUB_NATIVE_BACKENDS:
-            await _refresh_agent_presence(service, (backend,))
-            if backend != "opencode":
-                await service.reconcile_builtin_models((backend,))
-        return await asyncio.to_thread(service.agent_model_candidates, backend)
+        # Opening Add is a read, not a native CLI probe or a catalog write.
+        return await asyncio.to_thread(service.agent_model_candidates, payload.get("backend"))
     if operation == "set_agent_sources":
         await _refresh_payload_backend(service, payload.get("backend"))
         return await service.set_agent_sources(

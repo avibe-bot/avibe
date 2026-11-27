@@ -3244,6 +3244,7 @@ class Controller:
             backend_enabled_override=backend_enabled,
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=self._model_hub_catalog_changed,
+            source_inventory_changed=self._model_hub_snapshot_refresh_completed,
             repair_model_selections=repair_model_selections,
         )
         set_remote_catalog_refresh_completed(

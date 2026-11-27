@@ -1331,20 +1331,8 @@ def _validated_source_name(value: object) -> str:
 
 
 def _builtin_model_ids(backend: str) -> tuple[str, ...]:
-    """Real built-in model ids for a fixed-menu backend, from the bundled catalog.
-
-    Single source of truth for both the native-subscription supply list
-    (_native_model_ids) and the agents endpoint's read-only builtin_models
-    projection (agent-supply.schema.json v1.2), so the two never diverge.
-    """
+    """Bundled IDs for catalog admission, not evidence a Source supplies a model."""
     return model_hub_fixed_menu_ids(backend)
-
-
-def _native_model_ids(vendor: str) -> tuple[str, ...]:
-    backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
-    if backend is None:
-        return ()
-    return _builtin_model_ids(backend)
 
 
 async def _acquire_credential_ref_with_cancellation_ownership(
@@ -1663,6 +1651,7 @@ class ModelHubService:
         backend_catalog_changed: Optional[
             Callable[[BackendName], Awaitable[None]]
         ] = None,
+        source_inventory_changed: Callable[[], None] | None = None,
         repair_model_selections: Optional[
             Callable[[frozenset[str]], Awaitable[int]]
         ] = None,
@@ -1673,6 +1662,7 @@ class ModelHubService:
         capability_evidence: CapabilityEvidenceStore | None = None,
         opaque_provenance: OpaqueProvenanceRegistry | None = None,
     ):
+        self.source_inventory_changed = source_inventory_changed
         self.store = store
         self.adapter = adapter
         self.events = events
@@ -1795,7 +1785,6 @@ class ModelHubService:
         # Per Source, the discovered rows it refused as models it does not serve,
         # filed under the identity (key, base URL, protocol) that refused them.
         self._stale_listings: dict[str, dict[tuple, frozenset[str]]] = {}
-        self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         # Reset-card uses: the durable claim per account, and the presses being handled now.
@@ -2405,8 +2394,16 @@ class ModelHubService:
         # SourceBinding order is the engine-config serialization order. Agent
         # Route target order is not part of this projection, so a pure chain reorder
         # compares equal and does not touch the engine.
+        menu_inputs_changed = self.source_inventory_changed is not None and (
+            previous.sources != updated.sources or any(
+                (a.mode, a.sources.order) != (updated.agents[b].mode, updated.agents[b].sources.order)
+                for b, a in previous.agents.items()
+            )
+        )
         if previous_bindings == updated_bindings:
             await self._save_config(updated)
+            if menu_inputs_changed:
+                self.source_inventory_changed()
             return
         self._engine_synced = False
         await self._save_config(updated)
@@ -2429,6 +2426,8 @@ class ModelHubService:
                 self._engine_synced = True
             raise
         self._engine_synced = True
+        if menu_inputs_changed:
+            self.source_inventory_changed()
 
     async def _ensure_engine_synced(self) -> None:
         pending_revocations = self.revocations.list()
@@ -3710,12 +3709,8 @@ class ModelHubService:
                             detail_key="models.source.needs_action.oauth_expired",
                         )
                     )
-                    discovered = [
-                        DiscoveredModel(id=model_id)
-                        for model_id in _native_model_ids(vendor)
-                    ]
-                if channel == "native_cli" and not discovered:
-                    raise ModelHubError("discovery_failed")
+                    # Login status identifies no credential-scoped native inventory.
+                    discovered = None
                 source_payload: dict[str, Any] = {
                     "id": source_id,
                     "created_at": created_at,
@@ -3997,33 +3992,11 @@ class ModelHubService:
                         detail_key="models.source.needs_action.oauth_expired",
                     )
                 )
-                manual = [
-                    model for model in source.models if model.provenance == "manual"
-                ]
-                discovered = [
-                    DiscoveredModel(id=model_id)
-                    for model_id in _native_model_ids(binding.vendor)
-                ]
-                if not discovered:
-                    source.models = [
-                        model
-                        for model in source.models
-                        if model.provenance == "manual" or model.retired
-                    ]
-                    source.state = ModelHubSourceStateConfig(
-                        status="error",
-                        detail_key="models.source.error.unclassified",
-                    )
-                    await self._commit_synced(previous, config)
-                    interrupted_pairs = self._would_interrupt(config)
-                    raise ModelHubError(
-                        "discovery_failed",
-                        status=502,
-                        data={"interrupted_pairs": interrupted_pairs},
-                    )
-                overrides = self._apply_discovered_models(source, manual, discovered)
+                # A re-login may have changed accounts. Keep deliberate entries and
+                # retirements, never promote the old account's list to the new one.
+                source.models = [m for m in source.models if m.provenance == "manual" or m.retired]
+                source.last_discovered_at = None
                 await self._commit_synced(previous, config)
-                self._record_reasoning_tier_overrides(source, overrides)
                 interrupted_pairs = self._would_interrupt(config)
                 self._complete_reauth_flow(
                     flow_id,
@@ -6643,12 +6616,58 @@ class ModelHubService:
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
 
+    def vibey_hint_candidates(self) -> list[dict]:
+        """Read eligible not-in-menu rows for the Owner hint; never equip a model on read."""
+        return [row.to_payload() for row in self._source_menu_offers(self.store.load(), "vibey")]
+
+    def _source_menu_offers(self, config: ModelHubConfig, backend: BackendName) -> list[ModelHubBackendModelConfig]:
+        """Candidates for automatic addition (or a Vibey hint), not the manual Add catalog."""
+        agent = config.agents[backend]
+        if agent.mode != "hub":
+            return []
+        excluded = {m.id for m in agent.models} | set(agent.removed_model_ids) | self._withdrawn_builtin_model_ids(backend)
+        by_source = {source.id: source for source in config.sources}
+        # The first eligible assigned Source determines the OpenCode protocol. In
+        # particular, a compatible model name cannot make a Google-only hop speak Responses.
+        listed = {}
+        for sid in agent.sources.order:
+            source = by_source.get(sid)
+            # Released OAuth takeovers stamped their bundled rows at the exact
+            # creation instant. Until a later credential inventory replaces
+            # that ambiguous snapshot, it may route but must not grow a menu.
+            if (source is not None and source.kind == "subscription" and source.created_at
+                and source.last_discovered_at == source.created_at):
+                continue
+            if (source is None or source.supply_channel != "hub" or source.last_discovered_at is None
+                or not self._eligible_for_agent(source, backend)
+                or source.state.status in {"needs_action", "error"}
+                or (backend == "opencode" and source.protocol not in OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL)):
+                continue
+            for model in source.models:
+                if not model.retired and model.provenance == "discovered" and model.id not in excluded:
+                    listed.setdefault(model.id, source.protocol)
+        descriptions = self._models_dev_descriptions(list(listed))
+        rows = []
+        for model_id, protocol in listed.items():
+            match = descriptions.get(model_id)
+            if (not match or not match.get("first_party") or match.get("match_kind") != "exact"
+                or not _described_as_fit_for_agent_turns(match)
+                or (backend in {"codex", "claude"} and _NATIVE_VENDOR_BACKENDS.get(match.get("provider_id")) != backend)):
+                continue
+            candidate = self._provider_candidate(config, backend, model_id, match,
+                                                 opencode_protocol=protocol if backend == "opencode" else None)
+            if candidate is not None and candidate[1]:
+                rows.append(candidate[0])
+        return rows
+
     def _provider_candidate(
         self,
         config: ModelHubConfig,
         backend: BackendName,
         model_id: str,
         match: Mapping[str, Any] | None,
+        *,
+        opencode_protocol: str | None = None,
     ) -> tuple[ModelHubBackendModelConfig, list[dict], tuple[str, ...]] | None:
         """Build the catalog row a provider-supplied model is added as.
 
@@ -6682,7 +6701,7 @@ class ModelHubService:
         if backend != "vibey" and not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
             request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
                 backend
-            ) or native_protocol_for_model_id(model_id)
+            ) or opencode_protocol or native_protocol_for_model_id(model_id)
             reasoning_efforts = list(PROTOCOL_REASONING_EFFORT_DEFAULTS[request_protocol])
         admitted = admissible_backend_model(
             backend,
@@ -6693,7 +6712,7 @@ class ModelHubService:
                 "reasoning_efforts": reasoning_efforts,
                 **enrichment,
                 **(
-                    {"native_protocol": native_protocol_for_model_id(model_id)}
+                    {"native_protocol": opencode_protocol or native_protocol_for_model_id(model_id)}
                     if backend == "opencode"
                     else {}
                 ),
@@ -8391,95 +8410,26 @@ class ModelHubService:
         except Exception as exc:
             raise ModelHubError("engine_down", status=503) from exc
 
-    @staticmethod
-    def _insert_builtin_model(
-        agent: ModelHubAgentSupplyConfig,
-        model: ModelHubBackendModelConfig,
-        builtin_order: tuple[str, ...],
-    ) -> None:
-        """Place a new built-in relative to built-ins already in the menu."""
-
-        snapshot_index = builtin_order.index(model.id)
-        positions = {item.id: index for index, item in enumerate(agent.models)}
-        following = next(
-            (
-                positions[model_id]
-                for model_id in builtin_order[snapshot_index + 1 :]
-                if model_id in positions
-            ),
-            None,
-        )
-        if following is not None:
-            agent.models.insert(following, model)
-            return
-        preceding = next(
-            (
-                positions[model_id] + 1
-                for model_id in reversed(builtin_order[:snapshot_index])
-                if model_id in positions
-            ),
-            None,
-        )
-        agent.models.insert(
-            preceding if preceding is not None else len(agent.models),
-            model,
-        )
-
-    def _apply_builtin_reconcile(
-        self,
-        config: ModelHubConfig,
-        snapshots: Mapping[str, Mapping[str, Any]],
+    def _apply_source_menu_reconcile(
+        self, config: ModelHubConfig, backends: tuple[BackendName, ...],
     ) -> list[BackendName]:
-        changed: list[BackendName] = []
-        for backend in ("claude", "codex"):
+        changed = []
+        for backend in backends:
+            if backend not in {"claude", "codex", "opencode"}:
+                continue  # Vibey only offers hints; it never imports discoveries.
             agent = config.agents[backend]
-            raw_snapshot = snapshots.get(backend, {})
-            snapshot: list[ModelHubBackendModelConfig] = []
-            for item in raw_snapshot.get("models", []):
-                display_name, reasoning_efforts = _storable_backend_model_metadata(
-                    item.get("display_name"),
-                    item.get("reasoning_efforts"),
-                )
-                admitted = admissible_backend_model(
-                    cast(BackendName, backend),
-                    item.get("id"),
-                    {
-                        "origin": "builtin",
-                        "display_name": display_name,
-                        "reasoning_efforts": reasoning_efforts,
-                    },
-                    claude_builtin_ids=_builtin_model_ids("claude"),
-                )
-                if admitted is not None:
-                    snapshot.append(admitted)
-            builtin_order = tuple(model.id for model in snapshot)
-            present = {model.id for model in agent.models}
-            removed = set(agent.removed_model_ids)
             touched = False
-            # Earlier releases stored a Claude row's native ` [1M]` suffix as its
-            # name (see `builtin_display_name`); give those rows back their id.
-            if backend in snapshots:
-                for model in agent.models:
-                    if (
-                        model.origin == "builtin"
-                        and model.display_name is not None
-                        and builtin_display_name(backend, model.id, model.display_name) is None
-                    ):
-                        model.display_name = None
-                        touched = True
-            for model in snapshot:
-                model_id = model.id
-                if model_id in present or model_id in removed:
-                    continue
-                self._insert_builtin_model(
-                    agent,
-                    model,
-                    builtin_order,
-                )
-                present.add(model_id)
+            for model in agent.models:
+                if (model.origin == "builtin" and model.display_name is not None
+                    and builtin_display_name(backend, model.id, model.display_name) is None):
+                    model.display_name = None
+                    touched = True
+            offers = self._source_menu_offers(config, backend)
+            if offers:
+                agent.models.extend(offers)
                 touched = True
             if touched:
-                changed.append(cast(BackendName, backend))
+                changed.append(backend)
         return changed
 
     def _builtin_snapshots(
@@ -8505,24 +8455,6 @@ class ModelHubService:
                 raise
             return False
         return True
-
-    @staticmethod
-    def _builtin_snapshot_generation(snapshot: Mapping[str, Any]) -> str:
-        generation = snapshot.get("generation")
-        if isinstance(generation, str) and generation:
-            return generation
-        content = {
-            "complete": snapshot.get("complete") is True,
-            "models": snapshot.get("models", []),
-        }
-        return hashlib.sha256(
-            json.dumps(
-                content,
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
 
     def _flagship_first(self, model_ids: Iterable[str]) -> list[str]:
         """``model_ids`` with the models the built-in menus know first, newest first.
@@ -8621,24 +8553,15 @@ class ModelHubService:
 
     async def reconcile_builtin_models(
         self,
-        backends: Iterable[BackendName] = ("claude", "codex"),
+        backends: Iterable[BackendName] = ("claude", "codex", "opencode"),
         *,
         notify: bool = True,
     ) -> list[BackendName]:
         async with self._mutation_lock:
             selected_backends = tuple(backends)
             previous = self.store.load()
-            snapshots = self._builtin_snapshots(selected_backends)
+            snapshots = await asyncio.to_thread(self._builtin_snapshots, selected_backends)
             store_writable = self._reconcile_store_writable()
-            changed_snapshots = {
-                backend: snapshot
-                for backend, snapshot in snapshots.items()
-                if store_writable
-                if self._builtin_snapshot_generations.get(
-                    cast(BackendName, backend)
-                )
-                != self._builtin_snapshot_generation(snapshot)
-            }
             self._builtin_snapshot_cache.update(
                 {
                     cast(BackendName, backend): list(snapshot.get("models", []))
@@ -8646,9 +8569,9 @@ class ModelHubService:
                 }
             )
             changed: list[BackendName] = []
-            if changed_snapshots:
+            if store_writable:
                 config = self._clone_config(previous)
-                changed = self._apply_builtin_reconcile(config, changed_snapshots)
+                changed = await asyncio.to_thread(self._apply_source_menu_reconcile, config, selected_backends)
                 if changed:
                     try:
                         await self._commit_synced(previous, config)
@@ -8656,14 +8579,6 @@ class ModelHubService:
                         if exc.code != "config_recovery":
                             raise
                         return []
-                self._builtin_snapshot_generations.update(
-                    {
-                        cast(BackendName, backend): self._builtin_snapshot_generation(
-                            snapshot
-                        )
-                        for backend, snapshot in changed_snapshots.items()
-                    }
-                )
                 if notify:
                     self._pending_builtin_catalog_refresh.update(changed)
             if notify:
@@ -12591,6 +12506,7 @@ def create_default_service(
     backend_catalog_changed: Optional[
         Callable[[BackendName], Awaitable[None]]
     ] = None,
+    source_inventory_changed: Callable[[], None] | None = None,
     repair_model_selections: Optional[
         Callable[[frozenset[str]], Awaitable[int]]
     ] = None,
@@ -12649,5 +12565,6 @@ def create_default_service(
         backend_enabled_override=backend_enabled_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
+        source_inventory_changed=source_inventory_changed,
         repair_model_selections=repair_model_selections,
     )

@@ -3162,7 +3162,25 @@ def test_concurrent_same_id_add_keeps_the_route_matched_by_the_first_writer(tmp_
     ]
 
 
-def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_row(
+def _discovered_chat_supply(service, backend, ids, *, label=None):
+    """Independent inputs: the assigned Source lists IDs; first-party catalog describes capability."""
+    vendor, protocol = {"codex": ("openai", "openai_responses"), "claude": ("anthropic", "anthropic")}[backend]
+    source = ModelHubSourceConfig(
+        id="src_observed01", kind="api_key", vendor=vendor, display_name="Discovered supplier",
+        protocol=protocol, supply_channel="hub", billing="metered", credential_ref="cred_observed01",
+        state=ModelHubSourceStateConfig(status="standby"), last_discovered_at="2026-11-27T10:00:00Z",
+        models=[ModelHubModelConfig(id=mid, provenance="discovered", display_name=label) for mid in ids],
+    )
+    config = service.store.config
+    config.sources = [source]
+    config.agents[backend].sources.order = [source.id]
+    rows = {mid: {"name": label or mid, "tool_call": True,
+                  "modalities": {"input": ["text"], "output": ["text"]}} for mid in ids}
+    service.models_dev_catalog = lambda: {vendor: {"name": vendor, "models": rows}}
+    return source
+
+
+def test_source_reconcile_appends_without_displacing_saved_rows_or_restoring_deletions(
     monkeypatch,
     tmp_path,
 ):
@@ -3184,20 +3202,8 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     ]
     agent.routes = {model.id: ModelHubRouteConfig() for model in agent.models}
     agent.removed_model_ids = ["gpt-hidden"]
-    source = ModelHubSourceConfig(
-        id="src_builtin001",
-        kind="api_key",
-        vendor="openai",
-        display_name="Built-in supplier",
-        protocol="openai_responses",
-        supply_channel="hub",
-        billing="metered",
-        state=ModelHubSourceStateConfig(status="standby"),
-        models=[ModelHubModelConfig(id="gpt-new", provenance="manual")],
-        credential_ref="cred_builtin001",
-    )
-    store.config.sources = [source]
-    agent.sources.order = [source.id]
+    source = _discovered_chat_supply(service, "codex", ["gpt-new", "gpt-hidden"], label="GPT New")
+    source.models[0].reasoning_efforts = ["low", "high"]
     snapshot = [
         {"id": "gpt-alpha"},
         {
@@ -3225,9 +3231,9 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
         "provider-row",
         "models-dev-row",
         "manual-row",
-        "gpt-new",
         "gpt-omega",
         "gpt-withdrawn",
+        "gpt-new",
     ]
     created = next(model for model in agent.models if model.id == "gpt-new")
     assert created.display_name == "GPT New"
@@ -3498,6 +3504,7 @@ def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp
     for store_writable in (False, True):
         service, store, _adapter = _service(tmp_path)
         agent = store.config.agents["codex"]
+        _discovered_chat_supply(service, "codex", ["gpt-partial-snapshot"])
         before = copy.deepcopy(agent.to_payload())
         store.recovery = not store_writable
         saves = []
@@ -3611,6 +3618,7 @@ def test_model_producers_emit_admissible_backend_payloads(
                 }
             },
         )
+        _discovered_chat_supply(service, "codex", [admitted_id, rejected_id], label=long_display_name)
         asyncio.run(service.reconcile_builtin_models(("codex",)))
         payload = next(
             model.to_payload()
@@ -3705,7 +3713,7 @@ def test_models_dev_route_passes_the_nonblocking_refresh_mode(monkeypatch):
     assert calls == [("claude", True)]
 
 
-def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, tmp_path):
+def test_claude_reconcile_ignores_cli_overrides_without_matching_hub_supply(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     monkeypatch.setattr(
         service,
@@ -3724,58 +3732,54 @@ def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, 
     asyncio.run(service.reconcile_builtin_models(("claude",)))
 
     model_ids = {model.id for model in store.config.agents["claude"].models}
-    assert "deepseek-v3.2" in model_ids
-    assert "claude-sonnet-9" in model_ids
+    assert "deepseek-v3.2" not in model_ids
+    assert "claude-sonnet-9" not in model_ids
 
 
-def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
-    monkeypatch,
-    tmp_path,
-):
-    service, store, _adapter = _service(tmp_path)
-    existing = store.config.agents["codex"].models[0].id
-    snapshot = {
-        "codex": {
-            "complete": True,
-            "generation": "generation-one",
-            "models": [{"id": existing}],
-        }
-    }
-    applies = []
-    original_apply = service._apply_builtin_reconcile
+def test_hub_offers_use_assigned_observed_supply_and_opencode_wire_protocol(tmp_path):
+    service, store, _ = _service(tmp_path)
+    eligible, unfit, manual = "gpt-source-chat", "gpt-embedding-only", "gpt-manual-only"
+    source = _discovered_chat_supply(service, "codex", [eligible, unfit, manual])
+    source.protocol = "anthropic"  # A relay listing an OpenAI model on Messages.
+    source.models[-1].provenance = "manual"
+    catalog = service.models_dev_catalog()
+    catalog["openai"]["models"][unfit]["tool_call"] = False
+    for backend in ("opencode", "claude", "vibey"):
+        store.config.agents[backend].sources.order = [source.id]
+    original_vibey = [m.id for m in store.config.agents["vibey"].models]
+    assert [m["id"] for m in service.vibey_hint_candidates()] == [eligible]
+    before_claude = [m.id for m in store.config.agents["claude"].models]
+    asyncio.run(service.reconcile_builtin_models())
+    config = store.config
+    assert [m.id for m in config.agents["claude"].models] == before_claude
+    assert [m.id for m in config.agents["vibey"].models] == original_vibey
+    opencode = {m.id: m.native_protocol for m in config.agents["opencode"].models}
+    assert opencode[eligible] == "anthropic"
+    assert unfit not in opencode and manual not in opencode
+    assert eligible not in {m.id for m in config.agents["claude"].models}
+    config.sources[0].protocol = "openai_chat"
+    config.agents["opencode"].models.clear()
+    assert asyncio.run(service.reconcile_builtin_models(("opencode",))) == []
+    assert not config.agents["opencode"].models
 
-    def apply(config, snapshots):
-        applies.append(tuple(snapshots))
-        return original_apply(config, snapshots)
 
-    monkeypatch.setattr(service, "_builtin_snapshots", lambda _backends: snapshot)
-    monkeypatch.setattr(service, "_apply_builtin_reconcile", apply)
-
+def test_hub_menu_changes_on_source_discovery_not_builtin_generation(monkeypatch, tmp_path):
+    service, store, _ = _service(tmp_path)
+    source = _discovered_chat_supply(service, "codex", ["gpt-source-refresh"])
+    observed, source.models = source.models, []
+    monkeypatch.setattr(service, "_builtin_snapshots", lambda _: {
+        "codex": {"generation": "constant", "models": [{"id": "gpt-builtin-only"}]},
+    })
     assert asyncio.run(service.reconcile_builtin_models(("codex",))) == []
+    source.models = observed
+    assert "gpt-source-refresh" not in service.get_agent_sources("codex")["builtin_models"]
+    assert asyncio.run(service.reconcile_builtin_models(("codex",))) == ["codex"]
     assert asyncio.run(service.reconcile_builtin_models(("codex",))) == []
-    assert applies == [("codex",)]
-
-    snapshot["codex"] = {
-        "complete": True,
-        "generation": "generation-two",
-        "models": [{"id": existing}, {"id": "gpt-controller-refreshed"}],
-    }
-    before_read = copy.deepcopy(store.config.to_payload())
-    payload = service.get_agent_sources("codex")
-
-    assert "gpt-controller-refreshed" not in payload["builtin_models"]
-    assert store.config.to_payload() == before_read
-    assert applies == [("codex",)]
-
-    asyncio.run(service.reconcile_builtin_models(("codex",)))
-
-    assert "gpt-controller-refreshed" in {
-        model.id for model in store.config.agents["codex"].models
-    }
-    assert applies == [("codex",), ("codex",)]
+    ids = [m.id for m in store.config.agents["codex"].models]
+    assert ids.count("gpt-source-refresh") == 1 and "gpt-builtin-only" not in ids
 
 
-def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
+def test_candidate_and_agent_reads_do_not_add_builtin_rows(
     monkeypatch,
     tmp_path,
 ):
@@ -3819,7 +3823,7 @@ def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
             {"backend": "codex"},
         )
     )
-    assert "gpt-cli-refresh" in {
+    assert "gpt-cli-refresh" not in {
         model.id for model in store.config.agents["codex"].models
     }
 
@@ -3865,6 +3869,7 @@ def test_builtin_reconcile_retries_failed_runtime_refresh(
             }
         },
     )
+    _discovered_chat_supply(service, "codex", ["gpt-refresh-retry"])
     attempts = []
 
     async def refresh(backend):
@@ -5414,13 +5419,13 @@ async def _shorten_chain_past_a_newer_family_member(service):
 
 
 async def _reconcile_builtin_supplied_model(service):
+    service.store.config.sources[0].last_discovered_at = "2026-11-27T10:00:00Z"
     service.store.config.sources[0].models.append(
-        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+        ModelHubModelConfig(id="claude-extra-model", provenance="discovered")
     )
-    catalog = [{"id": model.id} for model in service.store.config.agents["claude"].models]
-    service._builtin_snapshots = lambda _backends: {
-        "claude": {"complete": True, "models": [*catalog, {"id": "claude-extra-model"}]},
-    }
+    service.models_dev_catalog = lambda: {"anthropic": {"models": {"claude-extra-model": {
+        "name": "New chat", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
+    }}}}
     return await service.reconcile_builtin_models(("claude",))
 
 
@@ -10533,12 +10538,9 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
 
     _assert_valid("source.schema.json", source)
     assert source["supply_channel"] == "native_cli"
-    assert any(model["id"] == "claude-opus-4-6" for model in source["models"])
-    assert {model["origin"] for model in source["models"]} == {"discovered"}
+    assert source["models"] == []
+    assert source["last_discovered_at"] is None
     assert store.config.effective_source_order("claude") == [source["id"]]
-    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
-    assert resolved.source_id == source["id"]
-    assert resolved.supply_channel == "native_cli"
     assert native.synced == []
 
     store.config.sources[0].state = ModelHubSourceStateConfig(
@@ -10552,6 +10554,30 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
     assert store.config.sources[0].state.status == "cooldown"
     assert store.config.sources[0].state.retry_at == "2026-07-23T03:05:00Z"
     assert native.synced == []
+
+
+def test_upgrade_retains_a_native_session_route_but_does_not_import_legacy_supply(tmp_path):
+    service, store, _ = _service(tmp_path)
+    selected, other = "claude-opus-4-6", "claude-sonnet-4-6"
+    # Released source payloads marked the bundled table as discovered. Load the
+    # persisted shape, not a new OAuth Source or a post-upgrade Direct snapshot.
+    payload = store.config.to_payload()
+    source_id = "src_legacy0001"
+    payload["sources"] = [dict(
+        id=source_id, kind="subscription", vendor="anthropic", display_name="Native",
+        protocol="anthropic", supply_channel="native_cli", billing="monthly",
+        state={"status": "standby"}, usage={},
+        models=[{"id": mid, "origin": "discovered", "reasoning_efforts": []} for mid in (selected, other)],
+    )]
+    agent = payload["agents"]["claude"]
+    agent.update(mode="hub", models=[{"id": selected, "origin": "builtin"}],
+                 sources={"order": [source_id]}, routes={})
+    store.config = ModelHubConfig.from_payload(payload)
+    asyncio.run(service.reconcile_builtin_models(("claude",)))
+    resolved = asyncio.run(service.resolve(backend="claude", model_id=selected, request={}))
+    assert (resolved.supply_channel, resolved.source_id) == ("native_cli", source_id)
+    assert [model.id for model in store.config.agents["claude"].models] == [selected]
+    assert [m.id for m in store.config.sources[0].models] == [selected, other]
 
 
 def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):

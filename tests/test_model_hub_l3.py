@@ -2437,6 +2437,7 @@ def test_runtime_resolution_sees_controller_reconcile_after_remote_catalog_refre
             "Refresh provider",
             model_id=model_id,
         )
+        source.last_discovered_at = "2026-11-27T10:00:00Z"
         service = _service(tmp_path, sources=[source])
         for backend in ("claude", "codex"):
             fixed_agent = service.store.config.agents[backend]
@@ -2455,13 +2456,14 @@ def test_runtime_resolution_sees_controller_reconcile_after_remote_catalog_refre
             "_builtin_snapshots",
             lambda _backends: snapshot,
         )
+        service.models_dev_catalog = lambda: {}
         await service.reconcile_builtin_models(("codex",), notify=False)
-
-        snapshot["codex"]["models"] = [
-            *snapshot["codex"]["models"],
-            {"id": model_id, "display_name": "Runtime refresh"},
-        ]
-        snapshot["codex"]["generation"] = "refreshed-upstream-generation"
+        assert model_id not in {model.id for model in service.store.config.agents["codex"].models}
+        # Supply was already assigned. The classification copy now confirms a
+        # first-party agent model; the native CLI catalog need not change.
+        service.models_dev_catalog = lambda: {"openai": {"models": {model_id: {
+            "name": "Runtime refresh", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
+        }}}}
         controller = Controller.__new__(Controller)
         controller.model_hub_service = service
         controller._loop = asyncio.get_running_loop()

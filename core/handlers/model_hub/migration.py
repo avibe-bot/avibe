@@ -310,11 +310,6 @@ def _ids(
     return item_id, source_id
 
 
-def _native_model_ids(backend: str) -> tuple[str, ...]:
-    catalog = load_bundled_catalog()
-    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
-
-
 def _safe_account_label(value: object) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -1604,11 +1599,10 @@ def _validated_source(
     discovered_at = now.isoformat()
     models = []
     if keep_native or imported_oauth:
-        model_ids = (
-            tuple(model.id for model in discovered)
-            if imported_oauth and discovered
-            else _native_model_ids(item.backend)
-        )
+        # Keep the released migration's route targets. The bundle is not a
+        # credential observation: these routing-only rows have no discovery time.
+        model_ids = (tuple(model.id for model in discovered) if imported_oauth and discovered else
+                     tuple(row["id"] for row in backend_model_entries(item.backend, load_bundled_catalog())))
         for model_id in model_ids:
             resolution = resolve_reasoning_tiers(
                 protocol=protocol,
@@ -1622,7 +1616,7 @@ def _validated_source(
                     "origin": "discovered",
                     "reasoning_efforts": list(resolution.efforts),
                     "reasoning_efforts_source": resolution.source,
-                    "discovered_at": discovered_at,
+                    "discovered_at": discovered_at if imported_oauth and discovered else None,
                 }
             )
     else:
@@ -1645,7 +1639,7 @@ def _validated_source(
     payload: dict[str, object] = {
         "id": item.source_id,
         "created_at": discovered_at,
-        "last_discovered_at": discovered_at if models and (keep_native or imported_oauth) else None,
+        "last_discovered_at": discovered_at if imported_oauth and discovered else None,
         "kind": "subscription" if keep_native or controlled or imported_oauth else "api_key",
         "vendor": item.vendor,
         "display_name": item.display_name,
@@ -1833,8 +1827,10 @@ async def _prepare_takeover(
                 replacement.update({
                     "supply_channel": "hub", "credential_ref": credential_ref,
                     "account_label": item.account_label or existing.account_label,
-                    "state": source.state.to_payload(),
+                    "state": source.state.to_payload(), "last_discovered_at": None,
                 })
+                # Preserve old routing rows, but the new Hub credential has not
+                # listed them. Only its first successful discovery is supply evidence.
                 if not existing.models:
                     replacement["models"] = [model.to_payload() for model in source.models]
                 source = ModelHubSourceConfig.from_payload(replacement)
