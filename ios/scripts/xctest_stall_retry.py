@@ -21,8 +21,10 @@ passes only on its second run still shows on the run with its evidence. The
 matched lines also go to ``--evidence``, which the workflow uploads as the
 ``ios-simulator-stall`` artifact.
 
-``count``: how many ios-shell jobs reran a test after a stall, per week, from
-those artifacts (``gh`` signed in).
+``count``: how many workflow runs reran an ios-shell test after a stall, per
+week, from those artifacts (``gh`` signed in). A second attempt of a run
+replaces the first one's artifact, so each run counts once; the evidence names
+its attempt.
 """
 
 from __future__ import annotations
@@ -171,7 +173,7 @@ def _rerun(args: argparse.Namespace) -> int:
     if reason:
         print(f"Not rerun: {reason}.", file=sys.stderr)
         return 1
-    record = []
+    record = [f"run attempt: {os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')}"]
     for case in failed:
         print(
             f"::warning title=Simulator stall::{case.name} failed through a "
@@ -216,7 +218,7 @@ def _count(args: argparse.Namespace) -> int:
         ],
         capture_output=True, text=True, check=True,
     ).stdout.split()
-    print(f"ios-shell jobs that reran a test after a simulator stall ({ARTIFACT} artifacts):")
+    print(f"Workflow runs that reran an ios-shell test after a simulator stall ({ARTIFACT} artifacts):")
     for monday, count in weekly_counts(listed, args.weeks, datetime.now(timezone.utc).date()):
         print(f"  week of {monday.isoformat()}: {count}")
     return 0
@@ -231,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     rerun.add_argument("--evidence", type=Path, required=True, help="where the matched lines go")
     rerun.add_argument("--max-tests", type=int, default=3)
     rerun.set_defaults(run=_rerun)
-    count = commands.add_parser("count", help="jobs that reran a stalled test, per week")
+    count = commands.add_parser("count", help="workflow runs that reran a stalled test, per week")
     count.add_argument("--repo", default="avibe-bot/avibe")
     count.add_argument("--weeks", type=int, default=4)
     count.set_defaults(run=_count)

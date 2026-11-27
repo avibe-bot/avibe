@@ -1033,15 +1033,16 @@ simulator can exceed before the request is sent; it retries such an attempt
 within the fixture budget instead of counting it. `ios-shell` uploads any available
 `AvibeTests.xcresult` as `ios-shell-xcresult` after success or failure, including
 compile failures. The hosted simulator now and then stalls WebKit's processes
-for 30 s or more; a failed test whose own log lines show such a stall (a
-WebKit process launch of 20 s or more, a WebKit process reported unresponsive,
-or a fixture bootstrap of 60 s or more) runs once more alone, and that rerun's
-`AvibeTestsRerun.xcresult` joins the same artifact. Any other failure, a crash,
-or more than three failed tests fails the job without a rerun
+for 30 s or more. A failed test runs once more alone only when its first
+failure is a wait that ran out and its own log lines before that failure show
+such a stall (a WebKit process launch of 20 s or more, a WebKit process
+reported unresponsive, or a fixture bootstrap of 60 s or more); that rerun's
+`AvibeTestsRerun.xcresult` joins the same artifact. An assertion failure, a
+crash, or more than three failed tests fails the job without a rerun
 (`ios/scripts/xctest_stall_retry.py`). A rerun is a warning on the run and a
 line in its job summary, and its matched log lines are kept for 90 days as the
 `ios-simulator-stall` artifact; `python3 ios/scripts/xctest_stall_retry.py
-count` prints how many jobs reran a test per week. Signed-in App fixtures require a settled bootstrap and the
+count` prints how many workflow runs reran a test per week. Signed-in App fixtures require a settled bootstrap and the
 expected account and instance IDs: the picker route alone also occurs after a
 bootstrap error. Fixture request attachments contain elapsed time, method, path,
 and response status, not headers, query strings, or bodies. The password-error

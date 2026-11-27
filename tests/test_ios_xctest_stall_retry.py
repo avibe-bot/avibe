@@ -181,6 +181,7 @@ def run_step(
         "RUNNER_TEMP": str(runner_temp),
         "SIMULATOR_ID": "SIM",
         "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+        "GITHUB_RUN_ATTEMPT": "2",
     }
     result = subprocess.run(
         [shutil.which("bash") or "bash", "-e", "-c", step["run"]],
@@ -210,6 +211,7 @@ def test_a_failure_the_simulator_stalled_runs_once_more_alone(tmp_path: Path, ca
     stalls = [SLOW_LAUNCH, UNRESPONSIVE, GPU_UNRESPONSIVE, SLOW_BOOTSTRAP]
     printed = result.stdout.split("Matched lines of ", 1)[1]
     evidence = (tmp_path / "temp/ios-simulator-stall.txt").read_text(encoding="utf-8")
+    assert evidence.startswith("run attempt: 2\n")
     for line in RERUN[case]:
         assert (f"  {line}\n" in printed) == (line in stalls)
         assert (f"  {line}\n" in evidence) == (line in stalls)
