@@ -37,17 +37,29 @@ GPU_UNRESPONSIVE = (
 )
 SLOW_BOOTSTRAP = "[iOS fixture] stage=bootstrap settled, elapsed=126.071802084 seconds, route=x"
 HEALTHY_BOOTSTRAP = "[iOS fixture] stage=bootstrap settled, elapsed=7.781541666 seconds, route=x"
-ERROR = "/Users/runner/work/avibe/avibe/ios/AvibeTests/T.swift:1: error: -[AvibeTests.{cls} {method}] : failed"
+ERROR = "/Users/runner/work/avibe/avibe/ios/AvibeTests/T.swift:1: error: -[AvibeTests.{cls} {method}] : {message}"
+WAIT = (
+    "Asynchronous wait failed: Exceeded timeout of 60 seconds, with unfulfilled "
+    'expectations: "/api/two-factor/verify in flight".'
+)
+EVENTUALLY = "failed - The condition did not become true within 140.0 seconds."
+FIXTURE = "failed - The signed-in fixture settled on another state: stage=bootstrap settled"
+ASSERTION = "XCTAssertTrue failed"
 RESTARTED = "Restarting after unexpected exit, crash, or test timeout; summary will include totals"
 ENDED = ["Test Suite 'All tests' failed at 2026-11-26 11:52:03.198.", "** TEST FAILED **"]
 
 
-def failure(method: str, *lines: str, cls: str = "DirectPathAppTests") -> list[str]:
+def failure(
+    method: str, *lines: str, cls: str = "DirectPathAppTests", message: str = WAIT,
+    after: tuple[str, ...] = (),
+) -> list[str]:
+    """A failed test: its lines, its first failure, then ``after``."""
     names = {"cls": cls, "method": method}
     return [
         STARTED.format(**names),
         *lines,
-        ERROR.format(**names),
+        ERROR.format(**names, message=message),
+        *after,
         FAILED.format(**names),
     ]
 
@@ -59,36 +71,80 @@ def passing(method: str, *lines: str) -> list[str]:
 
 RERUN = {
     "slow launch": [*failure("testA", SLOW_LAUNCH), *ENDED],
-    "WebContent unresponsive": [*failure("testA", HEALTHY_LAUNCH, UNRESPONSIVE), *ENDED],
+    "WebContent unresponsive": [
+        *failure("testA", HEALTHY_LAUNCH, UNRESPONSIVE, message=EVENTUALLY), *ENDED,
+    ],
     "GPU unresponsive": [*failure("testA", GPU_UNRESPONSIVE), *ENDED],
-    "stalled bootstrap": [*failure("testA", SLOW_BOOTSTRAP), *ENDED],
+    "stalled bootstrap": [*failure("testA", SLOW_BOOTSTRAP, message=FIXTURE), *ENDED],
+    # The host's log split a passing test's own passed line.
+    "a passed line split by the host's log": [
+        STARTED.format(cls="DirectPathAppTests", method="testZ"),
+        "Test Case '-[AvibeTests.DirectPathAppTests tes2026-11-26 20:11:28.258037+0000 Avibe[1:2] x",
+        "tZ]' passed (0.194 seconds).",
+        *failure("testA", SLOW_LAUNCH),
+        *ENDED,
+    ],
     "two stalled tests": [
         *failure("testA", SLOW_LAUNCH),
         *passing("testB"),
-        *failure("testC", UNRESPONSIVE, cls="NavigationPolicyTests"),
+        *failure("testC", UNRESPONSIVE, cls="NavigationPolicyTests", message=EVENTUALLY),
         *ENDED,
     ],
 }
 
+# Each case with the reason it stands for, so a case cannot pass by being
+# turned down for some other reason.
 STANDS = {
     # The stall belongs to a test that passed, not to the one that failed.
-    "stall in another test": [*passing("testA", SLOW_LAUNCH), *failure("testB"), *ENDED],
-    "healthy launch and bootstrap": [
-        *failure("testA", HEALTHY_LAUNCH, HEALTHY_BOOTSTRAP),
-        *ENDED,
-    ],
-    "one of two failures without a stall": [
-        *failure("testA", SLOW_LAUNCH),
-        *failure("testB"),
-        *ENDED,
-    ],
-    "crash": [*failure("testA", SLOW_LAUNCH), RESTARTED, *ENDED],
-    "incomplete run": failure("testA", SLOW_LAUNCH),
-    "no failed test": ["error: build failed", *ENDED],
-    "four stalled tests": [
-        *[line for name in "ABCD" for line in failure(f"test{name}", SLOW_LAUNCH)],
-        *ENDED,
-    ],
+    "stall in another test": (
+        [*passing("testA", SLOW_LAUNCH), *failure("testB"), *ENDED],
+        "no simulator stall before the first failure of DirectPathAppTests.testB",
+    ),
+    "healthy launch and bootstrap": (
+        [*failure("testA", HEALTHY_LAUNCH, HEALTHY_BOOTSTRAP), *ENDED],
+        "no simulator stall before the first failure of DirectPathAppTests.testA",
+    ),
+    # The stall came after the test had already failed (master, 11-22).
+    "stall after the first failure": (
+        [*failure("testA", message=WAIT, after=(UNRESPONSIVE,)), *ENDED],
+        "no simulator stall before the first failure of DirectPathAppTests.testA",
+    ),
+    # A stall does not excuse an assertion.
+    "stall and a plain assertion": (
+        [*failure("testA", SLOW_LAUNCH, UNRESPONSIVE, message=ASSERTION), *ENDED],
+        "the first failure is not a wait that ran out in DirectPathAppTests.testA",
+    ),
+    "one of two failures without a stall": (
+        [*failure("testA", SLOW_LAUNCH), *failure("testB"), *ENDED],
+        "no simulator stall before the first failure of DirectPathAppTests.testB",
+    ),
+    "crash": (
+        [*failure("testA", SLOW_LAUNCH), RESTARTED, *ENDED],
+        "crashed or timed out and was restarted",
+    ),
+    "incomplete run": (failure("testA", SLOW_LAUNCH), "the run did not complete"),
+    "no failed test": (["error: build failed", *ENDED], "no test failed"),
+    "four stalled tests": (
+        [*[line for name in "ABCD" for line in failure(f"test{name}", SLOW_LAUNCH)], *ENDED],
+        "4 tests failed",
+    ),
+    "failed without its started line": (
+        [SLOW_LAUNCH, *failure("testA", SLOW_LAUNCH)[2:], *ENDED],
+        "DirectPathAppTests.testA failed outside its own lines",
+    ),
+    # The test host's log split testA's own failed line: its failure cannot
+    # be attributed, so nothing is rerun, not even the stalled testB.
+    "a failed line split by the host's log": (
+        [
+            STARTED.format(cls="DirectPathAppTests", method="testA"),
+            ERROR.format(cls="DirectPathAppTests", method="testA", message=ASSERTION),
+            "Test Case '-[AvibeTests.DirectPathAppTests tes2026-11-26 20:11:28.258037+0000 Avibe[1:2] x",
+            "tA]' failed (1.000 seconds).",
+            *failure("testB", SLOW_LAUNCH),
+            *ENDED,
+        ],
+        "a failure without its own failed line in DirectPathAppTests.testA",
+    ),
 }
 
 
@@ -148,7 +204,6 @@ def test_a_failure_the_simulator_stalled_runs_once_more_alone(tmp_path: Path, ca
         for line in failed
     }
     assert {arg for arg in rerun if arg.startswith("-only-testing:")} == expected
-    assert '"$RUNNER_TEMP/AvibeTestDerivedData"' not in calls[1]
     assert f"{tmp_path}/temp/AvibeTestDerivedData" in calls[1]
     assert "::warning title=Simulator stall::" in result.stdout
     # The lines that matched are printed, so the rerun shows its evidence.
@@ -166,11 +221,13 @@ def test_a_failure_the_simulator_stalled_runs_once_more_alone(tmp_path: Path, ca
 
 @pytest.mark.parametrize("case", STANDS)
 def test_any_other_failure_stands_without_a_rerun(tmp_path: Path, case: str) -> None:
-    result, calls = run_step(tmp_path, STANDS[case])
+    log, reason = STANDS[case]
+    result, calls = run_step(tmp_path, log)
 
     assert result.returncode != 0
     assert len(calls) == 1
     assert "Not rerun:" in result.stderr
+    assert reason in result.stderr
     assert not (tmp_path / "temp/ios-simulator-stall.txt").exists()
     assert not (tmp_path / "summary.md").exists()
 

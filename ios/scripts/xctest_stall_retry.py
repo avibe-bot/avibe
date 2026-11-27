@@ -9,9 +9,11 @@ bound, and the same test on the same head passes on the next run.
 
 ``rerun``: given the log of one ``xcodebuild test`` run, this writes the
 ``-only-testing:`` arguments that run every failed test once more to ``--out``,
-one per line, and exits 0, only when the run completed, no test process crashed or was restarted, at most
-``--max-tests`` tests failed, and every failed test's own lines show one of
-these stalls. Anything else exits 1 with the reason: that failure stands.
+one per line, and exits 0, only when the run completed, no test process
+crashed or was restarted, at most ``--max-tests`` tests failed, and every
+failed test's first failure is a wait that ran out and its own lines before
+that failure show one of these stalls. Anything else exits 1 with the reason:
+that failure stands.
 
 Each stalled test is written as a ``::warning::`` annotation, followed by the
 log lines that matched, and as a line of the job summary, so a test that
@@ -34,12 +36,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-# A process WebKit launched for the App took this long to come up. A healthy
-# launch on the hosted runner takes 1-17 s; the stalls behind failed tests
-# took 28-41 s.
+# A process WebKit launched for the App took this long to come up. The stalls
+# behind failed tests took 28-41 s; a passing test can also see one, so a
+# stall alone proves nothing: it counts only before the test's first failure,
+# and only when that failure is a wait that ran out.
 LAUNCH_STALL_SECONDS = 20.0
-# The test fixture's App took this long to settle its account bootstrap. A
-# healthy one settles in 1-9 s; the stalled ones took 120-126 s.
+# The test fixture's App took this long to settle its account bootstrap; the
+# stalled ones behind failed tests took 120-126 s.
 BOOTSTRAP_STALL_SECONDS = 60.0
 
 _CASE = re.compile(
@@ -54,6 +57,17 @@ _UNRESPONSIVE = re.compile(r"\b(?P<process>\w+)ProcessProxy::didBecomeUnresponsi
 _BOOTSTRAP = re.compile(
     r"\[iOS fixture\] stage=bootstrap settled, elapsed=(?P<seconds>\d+(?:\.\d+)?) seconds"
 )
+# A test's own failure line, and the failures that are a wait running out:
+# XCTest's expectation timeout, the tests' `eventually`, and the App
+# fixture's bootstrap wait. Any other first failure (an assertion, a thrown
+# error) stands whatever the log shows around it.
+_ERROR = ": error: -["
+_ERROR_OF = re.compile(r": error: -\[\w+\.(?P<cls>\w+) (?P<method>\w+)\]")
+_WAIT_RAN_OUT = re.compile(
+    r"Asynchronous wait failed: Exceeded timeout"
+    r"|The condition did not become true within"
+    r"|The signed-in fixture (?:did not bootstrap|settled on another state)"
+)
 _RUN_ENDED = "Test Suite 'All tests' failed"
 ARTIFACT = "ios-simulator-stall"
 _RESTARTED = "Restarting after unexpected exit, crash, or test timeout"
@@ -66,6 +80,7 @@ class _Case:
     method: str
     stalls: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
+    first_error: str | None = None
 
     @property
     def name(self) -> str:
@@ -94,8 +109,12 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
     """Return the failed tests and ``None``, or ``[]`` and why they stand."""
     current: _Case | None = None
     failed: list[_Case] = []
+    erred: set[str] = set()
     ended = False
     for line in lines:
+        error_of = _ERROR_OF.search(line)
+        if error_of:
+            erred.add(f"{error_of['cls']}.{error_of['method']}")
         if _RESTARTED in line:
             return [], "a test process crashed or timed out and was restarted"
         if _RUN_ENDED in line:
@@ -103,6 +122,9 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
         case = _CASE.search(line)
         if case:
             if case["event"] == "started":
+                # The test host's own log can split the previous test's end
+                # line, so a start also ends that test. Should that test have
+                # failed, its failure is never attributed, and the run stands.
                 current = _Case(case["target"], case["cls"], case["method"])
             elif case["event"] == "failed":
                 name = f"{case['cls']}.{case['method']}"
@@ -113,7 +135,10 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
             else:
                 current = None
             continue
-        if current is not None:
+        if current is not None and current.first_error is None:
+            if _ERROR in line:
+                current.first_error = line.strip()
+                continue
             stall = _stall(line)
             if stall:
                 current.evidence.append(line.strip())
@@ -123,11 +148,20 @@ def stalled_failures(lines: list[str], max_tests: int) -> tuple[list[_Case], str
         return [], "the run did not complete"
     if not failed:
         return [], "no test failed: the run failed for another reason"
+    unattributed = sorted(erred - {case.name for case in failed})
+    if unattributed:
+        return [], "a failure without its own failed line in " + ", ".join(unattributed)
     if len(failed) > max_tests:
         return [], f"{len(failed)} tests failed, more than one stall explains"
+    not_a_wait = [
+        case.name for case in failed
+        if case.first_error is None or not _WAIT_RAN_OUT.search(case.first_error)
+    ]
+    if not_a_wait:
+        return [], "the first failure is not a wait that ran out in " + ", ".join(not_a_wait)
     unexplained = [case.name for case in failed if not case.stalls]
     if unexplained:
-        return [], "no simulator stall during " + ", ".join(unexplained)
+        return [], "no simulator stall before the first failure of " + ", ".join(unexplained)
     return failed, None
 
 
