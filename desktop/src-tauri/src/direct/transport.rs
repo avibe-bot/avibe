@@ -239,8 +239,8 @@ impl Link {
     pub(super) fn selected_in(&self, paths: iroh::endpoint::PathList<'_>) -> Option<SelectedPath> {
         let paths = paths.iter().map(|p| (p.is_selected(), p.remote_addr().clone()));
         match self.offer.judge(self.conn.remote_id(), paths) {
-            Verdict::Accepted(path) => Some(path),
-            Verdict::Unselected | Verdict::Refused => None,
+            Verdict::Accepted(path, _) => Some(path),
+            Verdict::Unselected | Verdict::Refused(_) => None,
         }
     }
     pub(super) fn selected_path(&self) -> Option<SelectedPath> {

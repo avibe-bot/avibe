@@ -1,6 +1,6 @@
 //! The wire grants an identity, not arbitrary UDP destinations or relay URLs.
 //! Before authentication only the offer's `lan` and `ipv6` sockets are dialled.
-use iroh::{RelayMap, RelayMode, RelayUrl};
+use iroh::{RelayMap, RelayMode, RelayUrl, TransportAddr};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +84,57 @@ fn global_v4(ip: Ipv4Addr) -> bool {
 /// address.
 pub(super) fn shared_v4(a: SocketAddr) -> bool {
     matches!(a.ip(), IpAddr::V4(ip) if a.port() != 0 && ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
+}
+
+/// The class of the address a path runs to, for the reports: a fixed word,
+/// never the address. It names what was seen and decides nothing; what a
+/// grant permits is `Offer::selected`'s to say.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddressClass {
+    Relay,
+    /// 10/8, 172.16/12, 192.168/16.
+    Private,
+    /// 100.64/10, shared address space.
+    Cgnat,
+    /// fc00::/7.
+    Ula,
+    /// 169.254/16, fe80::/10.
+    Linklocal,
+    Loopback,
+    /// A public IPv4 address.
+    Public,
+    /// A global unicast IPv6 address.
+    Global,
+    /// 64:ff9b::/96.
+    Nat64,
+    /// An IPv4 address written as an IPv6 one.
+    Mapped,
+    Other,
+}
+
+pub(super) fn class(remote: &TransportAddr) -> AddressClass {
+    use AddressClass::*;
+    let ip = match remote {
+        TransportAddr::Relay(_) => return Relay,
+        TransportAddr::Ip(a) => a.ip(),
+        _ => return Other,
+    };
+    match ip {
+        IpAddr::V4(ip) if ip.is_loopback() => Loopback,
+        IpAddr::V4(ip) if ip.is_private() => Private,
+        IpAddr::V4(ip) if ip.is_link_local() => Linklocal,
+        IpAddr::V4(ip) if shared_v4(SocketAddr::new(ip.into(), 1)) => Cgnat,
+        IpAddr::V4(ip) if global_v4(ip) => Public,
+        IpAddr::V4(_) => Other,
+        IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some() => Mapped,
+        IpAddr::V6(ip) if ip.segments()[..6] == [0x64, 0xff9b, 0, 0, 0, 0] => Nat64,
+        IpAddr::V6(ip) if ip.is_loopback() => Loopback,
+        IpAddr::V6(ip) if ip.is_unicast_link_local() => Linklocal,
+        IpAddr::V6(ip) if ip.is_unique_local() => Ula,
+        IpAddr::V6(ip) if global_v6(SocketAddr::new(ip.into(), 1)) => Global,
+        IpAddr::V6(_) => Other,
+    }
 }
 
 pub(super) fn punched_family(a: SocketAddr) -> Option<AddressFamily> {

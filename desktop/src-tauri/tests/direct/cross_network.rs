@@ -1,7 +1,7 @@
 use super::{
     connect::Authority,
     offer::{Offer, Verdict},
-    path::TrialRelay,
+    path::{class, AddressClass, TrialRelay},
     AddressFamily::{Ipv4, Ipv6},
     SelectedPath::{Lan, Punched, Relay},
 };
@@ -196,24 +196,32 @@ fn a_link_is_judged_by_its_selected_path_alone() {
     let offer = parse(json!([]), json!({"policy":"public-trial-v1","url":home})).unwrap();
     let judge = |paths: Vec<(bool, TransportAddr)>| offer.judge(offer.id, paths);
 
-    assert_eq!(judge(vec![(true, relay())]), Verdict::Accepted(Relay));
+    assert_eq!(
+        judge(vec![(true, relay())]),
+        Verdict::Accepted(Relay, AddressClass::Relay)
+    );
     // A refused candidate beside the selected relay, or beside a selected
     // local path: the link stays as it is.
-    for refused in ["198.18.0.1:80", "169.254.1.2:80", "[64:ff9b::1]:80"] {
+    for (refused, named) in [
+        ("198.18.0.1:80", AddressClass::Other),
+        ("169.254.1.2:80", AddressClass::Linklocal),
+        ("[64:ff9b::1]:80", AddressClass::Nat64),
+    ] {
         assert_eq!(
             judge(vec![(false, ip(refused)), (true, relay())]),
-            Verdict::Accepted(Relay),
+            Verdict::Accepted(Relay, AddressClass::Relay),
             "{refused}"
         );
         assert_eq!(
             judge(vec![(true, ip("10.1.1.2:80")), (false, ip(refused)), (false, relay())]),
-            Verdict::Accepted(Lan(Ipv4)),
+            Verdict::Accepted(Lan(Ipv4), AddressClass::Private),
             "{refused}"
         );
-        // Selected, it carries the data: refused, though the relay is open.
+        // Selected, it carries the data: refused, though the relay is open,
+        // and the report can say what class of address it was.
         assert_eq!(
             judge(vec![(false, relay()), (true, ip(refused))]),
-            Verdict::Refused,
+            Verdict::Refused(named),
             "{refused}"
         );
     }
@@ -221,7 +229,7 @@ fn a_link_is_judged_by_its_selected_path_alone() {
     // the link goes on, as a local one.
     assert_eq!(
         judge(vec![(false, relay()), (true, ip("100.100.1.2:4433"))]),
-        Verdict::Accepted(Lan(Ipv4))
+        Verdict::Accepted(Lan(Ipv4), AddressClass::Cgnat)
     );
     // Nothing selected is not a refusal.
     assert_eq!(
@@ -231,5 +239,44 @@ fn a_link_is_judged_by_its_selected_path_alone() {
     assert_eq!(judge(Vec::new()), Verdict::Unselected);
     // Another peer's path is refused, whatever its address.
     let other = SecretKey::from_bytes(&[3; 32]).public();
-    assert_eq!(offer.judge(other, vec![(true, relay())]), Verdict::Refused);
+    assert_eq!(
+        offer.judge(other, vec![(true, relay())]),
+        Verdict::Refused(AddressClass::Relay)
+    );
+}
+
+/// The reports name a path's address by a fixed word and nothing more. The
+/// word is what was seen; it permits nothing.
+#[test]
+fn an_address_is_reported_by_its_class_alone() {
+    use AddressClass::*;
+    let ip = |a: &str| TransportAddr::Ip(a.parse().unwrap());
+    let home = "https://aps1-1.relay.n0.iroh.link./";
+    assert_eq!(class(&TransportAddr::Relay(home.parse().unwrap())), Relay);
+    for (addr, named, word) in [
+        ("10.1.1.2:80", Private, "private"),
+        ("172.31.255.255:80", Private, "private"),
+        ("192.168.0.1:80", Private, "private"),
+        ("100.63.255.255:80", Public, "public"),
+        ("100.64.0.0:80", Cgnat, "cgnat"),
+        ("100.127.255.255:0", Cgnat, "cgnat"),
+        ("100.128.0.0:80", Public, "public"),
+        ("8.8.8.8:80", Public, "public"),
+        ("169.254.1.2:80", Linklocal, "linklocal"),
+        ("127.0.0.1:80", Loopback, "loopback"),
+        ("198.18.0.1:80", Other, "other"),
+        ("192.0.2.1:80", Other, "other"),
+        ("224.0.0.1:80", Other, "other"),
+        ("[fdab::1]:80", Ula, "ula"),
+        ("[fe80::1]:80", Linklocal, "linklocal"),
+        ("[::1]:80", Loopback, "loopback"),
+        ("[2606:4700::2]:80", Global, "global"),
+        ("[64:ff9b::808:808]:80", Nat64, "nat64"),
+        ("[::ffff:8.8.8.8]:80", Mapped, "mapped"),
+        ("[2001:db8::1]:80", Other, "other"),
+        ("[2002::1]:80", Other, "other"),
+    ] {
+        assert_eq!(class(&ip(addr)), named, "{addr}");
+        assert_eq!(serde_json::to_value(named).unwrap(), json!(word), "{addr}");
+    }
 }

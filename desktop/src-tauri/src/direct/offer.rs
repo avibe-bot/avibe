@@ -3,7 +3,7 @@
 //! nominate an address, wall-clock comparison, or DNS for direct bootstrap.
 use super::{
     connect::Authority,
-    path::{global_v6, punched_family, shared_v4, AddressFamily, SelectedPath, TrialRelay},
+    path::{class, global_v6, punched_family, shared_v4, AddressClass, AddressFamily, SelectedPath, TrialRelay},
 };
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use serde::Deserialize;
@@ -61,9 +61,10 @@ pub(super) struct Offer {
 pub(super) enum Verdict {
     /// No path is selected in this snapshot.
     Unselected,
-    /// The selected path is one the grant does not permit.
-    Refused,
-    Accepted(SelectedPath),
+    /// The selected path is one the grant does not permit: the class of its
+    /// address, for the report.
+    Refused(AddressClass),
+    Accepted(SelectedPath, AddressClass),
 }
 
 pub(super) fn lan(addr: SocketAddr) -> bool {
@@ -92,7 +93,9 @@ impl Offer {
         let Some((_, remote)) = paths.into_iter().find(|(selected, _)| *selected) else {
             return Verdict::Unselected;
         };
-        self.selected(peer, &remote).map_or(Verdict::Refused, Verdict::Accepted)
+        let class = class(&remote);
+        self.selected(peer, &remote)
+            .map_or(Verdict::Refused(class), |path| Verdict::Accepted(path, class))
     }
 
     /// Called only with a path snapshot of the authenticated connection, never
