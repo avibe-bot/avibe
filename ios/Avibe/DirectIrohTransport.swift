@@ -1597,16 +1597,20 @@ final class DirectRendezvousWebViewSource {
             let use = DirectPathUse.shared.pending(
                 for: DirectPathUse.Scope(store: selection.storeIdentifier, host: selection.host)
             )
+            // And this App's measured cold starts, the same way.
+            let starts = ColdStartTimings.shared.pending
             let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,
                 clientEndpointID: clientEndpointID,
                 listenerFaults: faults,
                 slowStoreRemovalsMs: removals.map(\.milliseconds),
-                pathUse: use
+                pathUse: use,
+                startup: starts.map(\.json)
             )
             self?.faultReport.answered(faults)
             SlowStoreRemovals.shared.answered(removals)
+            ColdStartTimings.shared.answered(starts)
             DirectPathUse.shared.answered(use)
             return answer
         }

@@ -111,6 +111,8 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // The start of a cold start's measured times (`ColdStartTimings`).
+        MainActor.assumeIsolated { ColdStartTimings.shared.launched() }
         // Before any scene draws: a locked App opens behind its lock (docs/plans/app-lock.md).
         if LaunchServices.current.appLock {
             MainActor.assumeIsolated { AppLockController.shared.start() }

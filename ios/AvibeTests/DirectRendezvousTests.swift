@@ -725,3 +725,96 @@ final class DirectRendezvousTests: XCTestCase {
         try! JSONSerialization.data(withJSONObject: object)
     }
 }
+
+/// The App's cold starts of a restored instance, as the rendezvous request
+/// reports them (`startup`): exactly the four keys the instance accepts, one
+/// entry per launch only when both times were measured, at most five.
+@MainActor
+final class ColdStartTimingsTests: XCTestCase {
+    private let client = DirectEndpointID(bytes: Data(repeating: 0x11, count: 32))!
+
+    func testAnEntryNeedsTheRestoredOpenTheBindAndAVisibleFrame() throws {
+        let timings = ColdStartTimings()
+        timings.launched()
+        timings.firstBindConfirmed(took: .milliseconds(240), late: false)
+        timings.firstVisible(.cached)
+        // Not a restored instance's open (a launch from a tap, or the list).
+        XCTAssertTrue(timings.pending.isEmpty)
+        timings.openingRestoredInstance()
+        let entry = try XCTUnwrap(timings.pending.first)
+        XCTAssertEqual(timings.pending.count, 1)
+        XCTAssertEqual(entry.bindMs, 240)
+        XCTAssertFalse(entry.late)
+        XCTAssertEqual(entry.visible, .cached)
+        XCTAssertGreaterThanOrEqual(entry.visibleMs, 0)
+        // Later binds, frames or opens in the same process add nothing.
+        timings.firstBindConfirmed(took: .seconds(3), late: true)
+        timings.firstVisible(.live)
+        timings.openingRestoredInstance()
+        XCTAssertEqual(timings.pending, [entry])
+
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.json.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["bind_ms", "visible_ms", "late", "visible"])
+        XCTAssertEqual(object["bind_ms"] as? Int, 240)
+        XCTAssertEqual(object["late"] as? Bool, false)
+        XCTAssertEqual(object["visible"] as? String, "cached")
+    }
+
+    func testNoEntryWithoutABindOrAVisibleFrame() {
+        let noBind = ColdStartTimings()
+        noBind.launched()
+        noBind.openingRestoredInstance()
+        noBind.firstVisible(.live)
+        XCTAssertTrue(noBind.pending.isEmpty)
+
+        let nothingShown = ColdStartTimings()
+        nothingShown.launched()
+        nothingShown.openingRestoredInstance()
+        nothingShown.firstBindConfirmed(took: .milliseconds(1_800), late: true)
+        XCTAssertTrue(nothingShown.pending.isEmpty)
+
+        // A frame before `launched` is not measured.
+        let unlaunched = ColdStartTimings()
+        unlaunched.openingRestoredInstance()
+        unlaunched.firstBindConfirmed(took: .milliseconds(10), late: false)
+        unlaunched.firstVisible(.live)
+        XCTAssertTrue(unlaunched.pending.isEmpty)
+    }
+
+    func testTheRequestCarriesTheEntriesUntilAnswered() throws {
+        let timings = ColdStartTimings()
+        timings.launched()
+        timings.openingRestoredInstance()
+        timings.firstBindConfirmed(took: .milliseconds(2_400), late: true)
+        timings.firstVisible(.live)
+        let sent = timings.pending
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: []),
+            head + "}"
+        )
+        let body = DirectRendezvous.requestBody(
+            clientEndpointID: client, listenerFaults: [], startup: sent.map(\.json)
+        )
+        XCTAssertTrue(body.hasPrefix(head + ",\"startup\":[{\"bind_ms\":2400,\"visible_ms\":"))
+        XCTAssertTrue(body.hasSuffix(",\"late\":true,\"visible\":\"live\"}]}"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        XCTAssertEqual((object["startup"] as? [[String: Any]])?.count, 1)
+        // At most five, the newest.
+        let six = (0..<6).map { "{\"bind_ms\":\($0),\"visible_ms\":0,\"late\":false,\"visible\":\"live\"}" }
+        let capped = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], startup: six).utf8)
+        ) as? [String: Any])
+        let entries = try XCTUnwrap(capped["startup"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["bind_ms"] as? Int }, [1, 2, 3, 4, 5])
+
+        timings.answered(sent)
+        XCTAssertTrue(timings.pending.isEmpty)
+    }
+
+    func testMillisecondsAreWholeAndNeverNegative() {
+        XCTAssertEqual(ColdStartTimings.milliseconds(.milliseconds(1_234)), 1_234)
+        XCTAssertEqual(ColdStartTimings.milliseconds(.microseconds(999)), 0)
+        XCTAssertEqual(ColdStartTimings.milliseconds(.zero - .seconds(1)), 0)
+    }
+}

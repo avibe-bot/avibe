@@ -2564,3 +2564,105 @@ final class SlowStoreRemovals {
         pending.removeAll { ids.contains($0.id) }
     }
 }
+
+/// This launch's cold start of a restored instance, measured on every such
+/// launch and kept until an answered rendezvous request has carried it
+/// (`DirectRendezvous.requestBody`, `startup`), so the instance's log says
+/// how long the listener's first bind and the first visible frame take on a
+/// phone. Numbers and a flag only; at most `limit` entries, the newest.
+///
+/// - `bindMs`: the listener's first bind, from its start to its
+///   confirmation (`DirectPathController`).
+/// - `late`: that confirmation came after the host's first load had gone
+///   ahead without its route (the late route).
+/// - `visibleMs`: from `didFinishLaunching` to the first frame that
+///   uncovers the instance: its cached page shown uncovered, or its live
+///   document loaded, whichever came first.
+/// - `visible`: which of the two it was.
+///
+/// One entry per launch whose bootstrap opened a restored instance, made
+/// only when both times were measured: no bind (Cloudflare tunnel only, no
+/// transport, a failed bind) or nothing uncovered (the open failed or was
+/// left) records nothing.
+@MainActor
+final class ColdStartTimings {
+    static let shared = ColdStartTimings()
+    nonisolated static let limit = 5
+
+    enum Visible: String, Equatable {
+        case cached
+        case live
+    }
+
+    struct Entry: Equatable {
+        let id: Int
+        let bindMs: Int
+        let visibleMs: Int
+        let late: Bool
+        let visible: Visible
+
+        /// Exactly the four keys the instance accepts, in a fixed order.
+        var json: String {
+            "{\"bind_ms\":\(bindMs),\"visible_ms\":\(visibleMs),\"late\":\(late),\"visible\":\"\(visible.rawValue)\"}"
+        }
+    }
+
+    private(set) var pending: [Entry] = []
+    private var nextID = 0
+    private let clock = ContinuousClock()
+    private var launchedAt: ContinuousClock.Instant?
+    /// The bootstrap opened a restored instance in this launch.
+    private var restoring = false
+    private var bind: (ms: Int, late: Bool)?
+    private var shown: (ms: Int, visible: Visible)?
+    /// This launch's entry was made, or can no longer be.
+    private var settled = false
+
+    /// `didFinishLaunching`. Once per process.
+    func launched() {
+        guard launchedAt == nil else { return }
+        launchedAt = clock.now
+    }
+
+    /// The bootstrap is opening the instance restored from the last session.
+    func openingRestoredInstance() {
+        guard !settled, launchedAt != nil else { return }
+        restoring = true
+        complete()
+    }
+
+    /// The listener's first bind in this process was confirmed.
+    func firstBindConfirmed(took: Duration, late: Bool) {
+        guard !settled, bind == nil else { return }
+        bind = (Self.milliseconds(took), late)
+        complete()
+    }
+
+    /// The first frame that uncovers the instance in this process.
+    func firstVisible(_ visible: Visible) {
+        guard !settled, shown == nil, let launchedAt else { return }
+        shown = (Self.milliseconds(launchedAt.duration(to: clock.now)), visible)
+        complete()
+    }
+
+    /// A request that carried `sent` was answered.
+    func answered(_ sent: [Entry]) {
+        let ids = Set(sent.map(\.id))
+        pending.removeAll { ids.contains($0.id) }
+    }
+
+    private func complete() {
+        guard restoring, let bind, let shown else { return }
+        settled = true
+        pending.append(Entry(id: nextID, bindMs: bind.ms, visibleMs: shown.ms, late: bind.late, visible: shown.visible))
+        nextID &+= 1
+        if pending.count > Self.limit {
+            pending.removeFirst(pending.count - Self.limit)
+        }
+    }
+
+    nonisolated static func milliseconds(_ took: Duration) -> Int {
+        let (seconds, attoseconds) = took.components
+        return max(0, Int(clamping: seconds) &* 1_000 &+ Int(attoseconds / 1_000_000_000_000_000))
+    }
+}

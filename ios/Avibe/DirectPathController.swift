@@ -2178,6 +2178,14 @@ final class DirectPathController {
                 self.listenerPort = binding.port
                 self.listenerGeneration = binding.generation
                 self.disarmWatchdog()
+                if let started = self.firstBindStarted {
+                    // A host that loaded while this bind was under way gets
+                    // its route late (`lateRoute`).
+                    ColdStartTimings.shared.firstBindConfirmed(
+                        took: started.duration(to: ContinuousClock.now),
+                        late: self.lateRoute != nil
+                    )
+                }
                 return true
             }
         }
