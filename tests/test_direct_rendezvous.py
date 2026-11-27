@@ -688,6 +688,30 @@ def test_invalid_path_use_batches_are_ignored_in_full(instance, caplog):
     assert not any("path_use" in line for line in caplog.messages)
 
 
+def test_startup_is_bounded_and_independent_of_the_offer_and_path_use(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    cached = dict(bind_ms=240, visible_ms=320, late=False, visible="cached")
+    live = dict(bind_ms=2**31-1, visible_ms=0, late=True, visible="live")
+    def ask(entries):
+        caplog.clear()
+        response = _post(client, {**_body(), "path_use": [_path_use(app="56.1")], "startup": entries})
+        assert response.get_json() == baseline
+        assert any(" path_use " in line and line.endswith(" app=56.1") for line in caplog.messages)
+        return [line for line in caplog.messages if " startup " in line]
+    first = "direct rendezvous startup bind_ms=240 visible_ms=320 late=no visible=cached"
+    last = "direct rendezvous startup bind_ms=2147483647 visible_ms=0 late=yes visible=live"
+    assert ask([cached] * 4 + [live]) == [first] * 4 + [last]
+    for invalid in (None, [], cached, [cached] * 6, [cached, None], [cached, {"late": True}],
+                    *([cached, {**cached, key: value}] for key, value in (
+                        ("app", "56.1"), ("bind_ms", True), ("bind_ms", -1), ("visible_ms", 2**31),
+                        ("visible_ms", 0.5), ("late", 1), ("visible", {}), ("visible", "none")))):
+        assert ask(invalid) == []
+
+
 def test_slow_store_removals_are_logged_in_milliseconds_without_changing_the_offer(instance, caplog):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))

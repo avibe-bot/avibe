@@ -222,6 +222,23 @@ def log_path_use(entries: Any) -> None:
         )
 
 
+def log_startup(entries: Any) -> None:
+    """One bounded observation per restored cold start with both measurements."""
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 5:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.keys() != {"bind_ms", "visible_ms", "late", "visible"}:
+            return
+        if type(entry["late"]) is not bool or entry["visible"] not in ("cached", "live"):
+            return
+        for key in ("bind_ms", "visible_ms"):
+            if type(entry[key]) is not int or not 0 <= entry[key] < 2**31:
+                return
+    for entry in entries:
+        logger.info("direct rendezvous startup bind_ms=%d visible_ms=%d late=%s visible=%s",
+                    entry["bind_ms"], entry["visible_ms"], "yes" if entry["late"] else "no", entry["visible"])
+
+
 def log_slow_store_removals(durations: Any) -> None:
     """Log how long the iPhone App's slow WebKit store removals took.
 
