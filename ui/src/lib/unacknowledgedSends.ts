@@ -26,7 +26,10 @@ import type { SessionDraftAttachment } from './sessionDraftAttachmentsCache';
 //    named, a record of another reader is deleted and never restored, and the
 //    records go when the reader's local data does (sign-out, revocation; an
 //    authorization change keeps only the current reader's).
-//  * A send still out in this document is its own page's: no page restores it.
+//  * A send still out is its sending page's, in this tab or another: no page
+//    restores it. The sending page holds a Web Lock named for it until the answer
+//    settles it, and the browser releases that lock when the page is torn down,
+//    so a record whose lock nobody holds belongs to a page that is gone.
 
 export const UNACKNOWLEDGED_SEND_PREFIX = 'avibe.unacknowledged-send.v1.';
 
@@ -42,7 +45,17 @@ export type UnacknowledgedSend = {
 
 type SendStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>;
 
-const inFlight = new Set<string>();
+const inFlight = new Map<string, () => void>();
+const LOCK_PREFIX = 'avibe.unacknowledged-send:';
+
+type Locks = Pick<LockManager, 'request' | 'query'>;
+function locks(): Locks | undefined {
+  try {
+    return typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function storage(): SendStorage | undefined {
   try {
@@ -88,7 +101,10 @@ function parse(raw: string | null): UnacknowledgedSend | null {
 export function rememberSend(send: Omit<UnacknowledgedSend, 'version' | 'principal' | 'sentAt'>): void {
   const principal = getLocalSnapshotPrincipal();
   if (!principal) return;
-  inFlight.add(send.clientId);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  inFlight.set(send.clientId, release);
+  void locks()?.request(`${LOCK_PREFIX}${send.clientId}`, () => held).catch(() => {});
   try {
     storage()?.setItem(keyOf(send.sessionId, send.clientId), JSON.stringify({
       version: 1,
@@ -103,8 +119,9 @@ export function rememberSend(send: Omit<UnacknowledgedSend, 'version' | 'princip
 
 /** The send's answer arrived (or this page withdrew it): nothing is left to recover. */
 export function settleSend(sessionId: string, clientId: string): void {
-  inFlight.delete(clientId);
   forgetUnacknowledgedSend(sessionId, clientId);
+  inFlight.get(clientId)?.();
+  inFlight.delete(clientId);
 }
 
 export function forgetUnacknowledgedSend(sessionId: string, clientId: string): void {
@@ -115,8 +132,22 @@ export function forgetUnacknowledgedSend(sessionId: string, clientId: string): v
   }
 }
 
-/** Every record of this chat, oldest first, except sends still out in this document. */
-export function unacknowledgedSends(sessionId: string): UnacknowledgedSend[] {
+/** Every record of this chat, oldest first, except sends whose page is still
+ *  waiting for the answer: this one's, or another tab's (its lock is held). */
+export async function unacknowledgedSends(sessionId: string): Promise<UnacknowledgedSend[]> {
+  const records = storedSends(sessionId);
+  if (records.length === 0) return records;
+  let live = new Set<string>();
+  try {
+    const state = await locks()?.query();
+    live = new Set((state?.held ?? []).map((lock) => lock.name ?? ''));
+  } catch {
+    // Without Web Locks only this document's own sends are known to be out.
+  }
+  return records.filter((record) => !inFlight.has(record.clientId) && !live.has(`${LOCK_PREFIX}${record.clientId}`));
+}
+
+function storedSends(sessionId: string): UnacknowledgedSend[] {
   const target = storage();
   if (!target) return [];
   try {
@@ -127,7 +158,7 @@ export function unacknowledgedSends(sessionId: string): UnacknowledgedSend[] {
         target.removeItem(key);
         continue;
       }
-      if (!inFlight.has(record.clientId)) found.push(record);
+      found.push(record);
     }
     return found.sort((left, right) => left.sentAt - right.sentAt);
   } catch {

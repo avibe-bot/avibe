@@ -167,7 +167,6 @@ import {
   usePendingSends,
 } from './usePendingSends';
 import type { ChatSnapshot } from '../../lib/chatSnapshots';
-import { getLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 import {
   forgetUnacknowledgedSend,
   rememberSend,
@@ -362,6 +361,7 @@ export const ChatPage: React.FC = () => {
   const {
     capabilities,
     readerPrincipal,
+    provisional: readerProvisional,
   } = useInstanceAuthorization();
   // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
   // Bot, and the Session cannot be archived or renamed. The id namespace says so
@@ -1841,42 +1841,67 @@ export const ChatPage: React.FC = () => {
   // goes back into the composer as a draft, never sent again by itself. Should the
   // conversation show a restored one after all (the instance took that send after
   // this read), the composer gives it back up unless the reader has changed it.
-  const restoredSendsRef = useRef<{ sessionId: string; sends: Map<string, UnacknowledgedSend> } | null>(null);
+  type RestorePass = {
+    sessionId: string;
+    /** Restored here, until the conversation shows them or the page moves on. */
+    sends: Map<string, UnacknowledgedSend>;
+    running: boolean;
+    /** The composer refused one (busy sending, voice owns the draft): try again on the next change. */
+    retry: boolean;
+  };
+  const restorePassRef = useRef<RestorePass | null>(null);
+  // What the transcript and the queue last showed, by client id: a pass reads it
+  // after its asynchronous check, and every later change runs this effect again.
+  const heldClientIdsRef = useRef<{ sessionId: string; ids: Set<string> } | null>(null);
   useEffect(() => {
     if (!sessionId || hydratedTranscriptSessionId !== sessionId || !writable) return;
-    const composer = composerRef.current;
-    if (!composer) return;
     const held = new Set<string>();
     for (const row of [...messages, ...queue]) {
       const clientId = row.metadata?.client_message_id;
       if (typeof clientId === 'string' && clientId) held.add(clientId);
     }
-    const restored = restoredSendsRef.current;
-    if (restored?.sessionId === sessionId) {
-      for (const [clientId, send] of restored.sends) {
+    heldClientIdsRef.current = { sessionId, ids: held };
+    if (!composerRef.current) return;
+    let pass = restorePassRef.current;
+    if (pass?.sessionId === sessionId) {
+      for (const [clientId, send] of pass.sends) {
         if (!held.has(clientId)) continue;
-        restored.sends.delete(clientId);
-        composer.withdrawUnsent(send);
+        pass.sends.delete(clientId);
+        composerRef.current.withdrawUnsent(send);
       }
-      return;
+      if (!pass.retry || pass.running) return;
     }
-    // Records are kept per reader: while the page does not know who reads, they wait.
-    const principal = getLocalSnapshotPrincipal();
-    if (!principal) return;
-    const sends = new Map<string, UnacknowledgedSend>();
-    restoredSendsRef.current = { sessionId, sends };
-    for (const send of unacknowledgedSends(sessionId)) {
-      // Another reader's never comes back; one the instance holds is already shown.
-      if (send.principal !== principal || held.has(send.clientId)) {
+    // Records are kept per reader, and only a reader the instance has confirmed
+    // may get one back: a replayed boot session may name the last one.
+    const principal = readerPrincipal ?? null;
+    if (!principal || readerProvisional) return;
+    if (pass?.sessionId !== sessionId) {
+      pass = { sessionId, sends: new Map(), running: false, retry: false };
+      restorePassRef.current = pass;
+    }
+    const current = pass;
+    current.running = true;
+    current.retry = false;
+    void unacknowledgedSends(sessionId).then((unsent) => {
+      current.running = false;
+      const composer = composerRef.current;
+      const shown = heldClientIdsRef.current;
+      if (restorePassRef.current !== current || !composer || shown?.sessionId !== sessionId) return;
+      for (const send of unsent) {
+        // Another reader's never comes back; one the instance holds is already shown.
+        if (send.principal !== principal || shown.ids.has(send.clientId)) {
+          forgetUnacknowledgedSend(sessionId, send.clientId);
+          continue;
+        }
+        if (!composer.restoreUnsent(send)) {
+          current.retry = true;
+          continue;
+        }
         forgetUnacknowledgedSend(sessionId, send.clientId);
-        continue;
+        current.sends.set(send.clientId, send);
       }
-      // Refused while voice capture owns the draft: it stays for the next open.
-      if (!composer.restoreUnsent(send)) continue;
-      forgetUnacknowledgedSend(sessionId, send.clientId);
-      sends.set(send.clientId, send);
-    }
-  }, [sessionId, hydratedTranscriptSessionId, writable, messages, queue]);
+    });
+  }, [sessionId, hydratedTranscriptSessionId, writable, messages, queue, readerPrincipal, readerProvisional]);
 
   // The fire-and-forget turn survives browser disconnects, so a freshly loaded /
   // reconnected page asks the controller whether a turn is still in flight and
@@ -2478,7 +2503,9 @@ export const ChatPage: React.FC = () => {
       // The composer emptied in this same task: until the answer settles this send,
       // its words stay on the device, so a page torn down meanwhile can give them
       // back (lib/unacknowledgedSends).
-      if (fromComposer) {
+      // A spoken message is kept by its voice take until it lands (lib/voiceTakeStore).
+      const keepUntilAnswered = fromComposer && metadata?.input !== 'voice';
+      if (keepUntilAnswered) {
         rememberSend({
           sessionId,
           clientId,
@@ -2696,7 +2723,7 @@ export const ChatPage: React.FC = () => {
         // replaces it (or the error and restored draft that withdraw it).
         if (!settledLater) settlePendingSend(clientId);
         // Answered either way: the instance holds it, or the composer gets it back.
-        if (fromComposer) settleSend(sessionId, clientId);
+        if (keepUntilAnswered) settleSend(sessionId, clientId);
       }
     },
     [

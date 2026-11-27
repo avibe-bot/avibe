@@ -38,6 +38,11 @@ const saveDraft = (chat: Instance, text: string) => {
   chat.draft = { text, updated_at: `2026-11-27T13:00:${String(chat.revision).padStart(2, '0')}Z` };
 };
 
+const readerAnswer = (principal: string) => ({
+  remote: false, authenticated: true, authorization_state: 'current', instance_kind: 'personal',
+  instance_role: 'owner', author_id: principal,
+});
+
 /** The instance takes a send: it is in the conversation, and the saved draft is cleared. */
 function receive(chat: Instance, sent: Sent, content: Record<string, unknown> = {}) {
   saveDraft(chat, '');
@@ -66,10 +71,7 @@ async function serveChat(page: Page, chat: Instance) {
     pending_input_count: 0, background_activities: [], pending_activity_output_count: 0, connection: 'connected',
   };
   // Records belong to the reader the instance names here.
-  await page.route('**/api/session', (route) => route.fulfill({ json: {
-    remote: false, authenticated: true, authorization_state: 'current', instance_kind: 'personal',
-    instance_role: 'owner', author_id: chat.principal,
-  } }));
+  await page.route('**/api/session', (route) => route.fulfill({ json: readerAnswer(chat.principal) }));
   await page.route(`**/api/sessions/${SESSION_ID}/bootstrap`, (route) => route.fulfill({ json: {
     session, capabilities: { can_chat: true },
     agents: [{ id: 'agt-codex', name: 'codex', backend: 'codex', enabled: true }],
@@ -194,7 +196,7 @@ test('a send the instance received before the page went shows in the conversatio
   expect(denied).toEqual([]);
 });
 
-test('a send is never given back to another reader', async ({ page }) => {
+test('a send is never given back to another reader, even while the page still names the last one', async ({ page }) => {
   const chat = instance({ receives: false });
   const denied = await serveChat(page, chat);
   await page.setViewportSize({ width: 1200, height: 800 });
@@ -203,13 +205,46 @@ test('a send is never given back to another reader', async ({ page }) => {
   await send(page, chat, 'Only for the one who wrote it');
   expect(await records(page)).toHaveLength(1);
   await tearDown(page);
-  // The next page on this device is someone else's.
+  // The next page on this device is someone else's. It starts from the boot
+  // session it stored, which names the last reader, until the instance answers
+  // who reads now, after the chat itself has loaded.
   chat.principal = 'reader-b';
-  const next = await reopen(page, chat, denied);
+  let confirm!: () => void;
+  const confirmed = new Promise<void>((resolve) => { confirm = resolve; });
+  const next = await reopen(page, chat, denied, async (opened) => {
+    await opened.route('**/api/session', async (route) => {
+      await confirmed;
+      await route.fulfill({ json: readerAnswer(chat.principal) });
+    });
+  });
 
   await expect(sendButton(next)).toBeVisible();
   await expect(editor(next)).toHaveText('');
+  confirm();
   await expect.poll(() => records(next)).toEqual([]);
+  await expect(editor(next)).toHaveText('');
+  expect(chat.draft.text).toBe('');
+  expect(denied).toEqual([]);
+});
+
+test('a send still out in another tab is not given back there', async ({ page }) => {
+  const chat = instance({ receives: false });
+  const denied = await serveChat(page, chat);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await open(page, `/chat/${SESSION_ID}`);
+
+  await send(page, chat, 'Still on its way');
+  // The sending page stays open, waiting for the answer.
+  const other = await reopen(page, chat, denied);
+  await expect(sendButton(other)).toBeVisible();
+  await expect(editor(other)).toHaveText('');
+  expect(await records(other)).toHaveLength(1);
+  // Once the sending page is gone, the next page gives it back.
+  await tearDown(page);
+  await tearDown(other);
+  const third = await reopen(other, chat, denied);
+  await expect(editor(third)).toHaveText('Still on its way');
+  expect(chat.sent).toHaveLength(1);
   expect(denied).toEqual([]);
 });
 

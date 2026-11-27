@@ -374,6 +374,30 @@ afterEach(async () => {
 });
 
 describe('ChatPage optimistic send', () => {
+  it('keeps a typed send on the device until it is answered, and leaves a spoken one to its voice take', async () => {
+    // lib/unacknowledgedSends: a typed message lives only there once the composer
+    // empties. A spoken one is kept by its voice take (lib/voiceTakeStore) until
+    // it lands; a second copy would come back beside it and could be sent twice.
+    await openChat();
+    const kept = () => Object.keys(window.localStorage).filter((key) => key.startsWith('avibe.unacknowledged-send.'));
+
+    let spoken!: Promise<boolean | void>;
+    act(() => {
+      spoken = Promise.resolve(mocks.composer!.onSend('spoken words', [], undefined, { input: 'voice' }));
+    });
+    expect(posts).toHaveLength(1);
+    expect(kept()).toEqual([]);
+
+    const { post, result } = send('typed words');
+    expect(kept()).toHaveLength(1);
+    await act(async () => {
+      post.reply.resolve(new Response(JSON.stringify(serverRow(post, 'd2')), { status: 201 }));
+      posts[0].reply.resolve(new Response(JSON.stringify(serverRow(posts[0], 'd1')), { status: 201 }));
+      await Promise.all([result, spoken]);
+    });
+    expect(kept()).toEqual([]);
+  });
+
   it('shows the sent message at once, as sending, before the server answers', async () => {
     await openChat();
 
