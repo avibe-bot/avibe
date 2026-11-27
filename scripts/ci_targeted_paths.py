@@ -20,7 +20,7 @@ BOUNDARIES = {
     'engine-wire': frozenset({'vibe/model_hub_runtime/cliproxyapi_manifest.json'}),
     'engine-publication': frozenset({
         '.github/workflows/model-hub-engine-manifest.yml', 'scripts/model_hub_engine_manifest_publish.py',
-        'scripts/model_hub_engine_rehearsal.py',
+        'scripts/model_hub_engine_rehearsal.py', 'scripts/model_hub_engine_signing_key.py',
     }),
     'admission': frozenset({'vibe/binding_admission.py', 'vibe/personal_claims.py', 'core/agent_auth_service.py'}),
     'vault-policy': frozenset({'storage/vault_policy.py', 'storage/vault_service.py', 'storage/vault_protected.py', 'storage/vault_protected_hd.py', 'storage/vault_crypto.py', 'vibe/avault_authorization.py'}),
