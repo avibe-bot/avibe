@@ -34,7 +34,17 @@ struct LaunchServices: Equatable {
     }
 
     /// This process's.
-    static let current = forProcess(runningTests: AvibeAppDelegate.isRunningTests)
+    static let current = forProcess(runningTests: AvibeAppDelegate.isRunningTests || showsOnlyAFixtureCard)
+
+    /// A DEBUG launch that only shows a fixture Turn card starts nothing else
+    /// (`TurnActivityFixtureLaunch`).
+    private static var showsOnlyAFixtureCard: Bool {
+        #if DEBUG
+        TurnActivityFixtureLaunch.requested != nil
+        #else
+        false
+        #endif
+    }
 }
 
 final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
@@ -106,6 +116,9 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
             MainActor.assumeIsolated { AppLockController.shared.start() }
         }
         VoiceCaptureLaunch.markLaunched()
+        #if DEBUG
+        Task { @MainActor in await TurnActivityFixtureLaunch.run() }
+        #endif
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in

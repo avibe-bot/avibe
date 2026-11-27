@@ -1381,6 +1381,13 @@ class TurnCorrelationRegistry:
                 )
             return authorized
 
+    def credential_scope(self, backend: str, token: str) -> Optional[str]:
+        """The process scope a token was minted for, or None when it answers for nothing."""
+
+        with self._lock:
+            credential = self._credential(backend, token)
+            return credential.scope_key[1] if credential is not None else None
+
     def _credential(self, backend: str, token: str) -> Optional[GatewayCredential]:
         """Resolve a token to what it answers for; call under `_lock`."""
 

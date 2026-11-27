@@ -863,26 +863,43 @@ final class DirectMeasureTests: XCTestCase {
             second.finish()
         }
 
-        // One session: its first request makes the connection, and every
-        // later one uses it again, with one attempt each.
+        // One session: its first request makes the connection, and a later
+        // one uses it again, with one attempt each. Using it again is the
+        // system's choice, not a promise: on a loaded machine it has opened
+        // a new connection for a session's next request. What a sample
+        // needs, and what is held here for every request, is that the
+        // answer says which it was: `reused` exactly when no new connection
+        // was made. And the session does keep its connection: at least one
+        // of its later requests is on it.
+        var made = 0
+        var reusedLater = 0
         for index in 0..<4 {
             let observed = try await first.get()
             XCTAssertTrue(observed.healthy, "\(index)")
-            XCTAssertEqual(observed.reused, index > 0, "\(index)")
+            if index == 0 {
+                XCTAssertFalse(observed.reused)
+            }
+            made += observed.reused ? 0 : 1
+            reusedLater += observed.reused ? 1 : 0
+            XCTAssertEqual(server.connections, made, "\(index): \(observed)")
             XCTAssertEqual(observed.transactions, 1, "\(index)")
             XCTAssertFalse(observed.viaProxy, "\(index)")
             XCTAssertGreaterThan(observed.elapsed, .zero)
         }
-        XCTAssertEqual(server.connections, 1)
+        XCTAssertGreaterThan(reusedLater, 0)
         // The other session shares nothing with it: its first request is
         // on a connection of its own, though one to the same place is open.
         let other = try await second.get()
         XCTAssertFalse(other.reused)
-        XCTAssertEqual(server.connections, 2)
+        made += 1
+        XCTAssertEqual(server.connections, made)
         let otherAgain = try await second.get()
-        XCTAssertTrue(otherAgain.reused)
-        XCTAssertEqual(server.connections, 2)
+        made += otherAgain.reused ? 0 : 1
+        XCTAssertEqual(server.connections, made, "\(otherAgain)")
         XCTAssertEqual(server.requests, 6)
+        if made > 2 {
+            print("[iOS fixture] stage=measure the system opened \(made - 2) more connections than two sessions need")
+        }
 
         // The connection is closed under the session. The system may send
         // the next request again on a new connection and answer it as if
@@ -893,7 +910,7 @@ final class DirectMeasureTests: XCTestCase {
         do {
             let renewed = try await first.get()
             XCTAssertTrue(!renewed.reused || renewed.transactions > 1, "\(renewed)")
-            XCTAssertEqual(server.connections, 3)
+            XCTAssertEqual(server.connections, made + 1)
             print("[iOS fixture] stage=measure a cut connection was answered on a new one, reused=\(renewed.reused) transactions=\(renewed.transactions)")
         } catch {
             print("[iOS fixture] stage=measure a cut connection failed its next request: \((error as NSError).code)")

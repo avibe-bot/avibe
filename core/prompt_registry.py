@@ -93,7 +93,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("quick-replies-prompt", "Quick Replies Prompt", "quick-replies.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("vault-routing-prompt", "Vault Routing Prompt", "vault.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-routing-prompt", "Harness Routing Prompt", "harness.md", leading_newlines=1, trailing_newlines=1),
-    PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("bots_rows", "enabled_agents_rows")),
+    PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("bots_rows", "enabled_agents_rows", "own_work")),
     # Two leading newlines: the Agents block before it ends without one.
     PromptModule("projects-prompt", "Projects Prompt", "projects-prompt.md", leading_newlines=2, trailing_newlines=1, placeholders=("project_catalog",)),
     PromptModule("project-context-prompt", "Project Context and History Prompt", "project-context.md", leading_newlines=1, trailing_newlines=1),

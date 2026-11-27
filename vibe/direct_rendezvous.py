@@ -56,6 +56,10 @@ def log_listener_faults(faults: Any) -> None:
     Listener faults obey the same body limits as every other field. Bodies the
     decoder rejects are still rejected; a malformed or over-five batch in a
     decoded request is ignored in full and does not change the offer.
+
+    ``late`` is not a failure: the listener's first bind was confirmed after
+    the page's first load had gone ahead without a route, and ``code`` is how
+    long that bind took, in milliseconds (never negative).
     """
     if not isinstance(faults, list) or len(faults) > 5:
         return
@@ -63,9 +67,10 @@ def log_listener_faults(faults: Any) -> None:
         if (
             not isinstance(fault, dict)
             or fault.keys() != {"step", "code", "background_seconds"}
-            or fault["step"] not in ("bind", "waiting", "ownership", "deadline", "foreign", "socket")
+            or fault["step"] not in ("bind", "waiting", "ownership", "deadline", "foreign", "socket", "late")
             or type(fault["code"]) is not int
             or not -(2**31) <= fault["code"] < 2**31
+            or (fault["step"] == "late" and fault["code"] < 0)
             or type(fault["background_seconds"]) is not int
             or not 0 <= fault["background_seconds"] < 2**31
         ):

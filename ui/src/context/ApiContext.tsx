@@ -682,29 +682,46 @@ function isDirectAddressPath(path: NativeDirectPathKind | null): boolean {
   return path === 'ipv4' || path === 'ipv6';
 }
 
-/** At most one direct hand-over this often. */
+/**
+ * No two direct hand-overs closer than this. The short one is for the first
+ * hand-over after the shell arrives at a direct path, so a page follows a
+ * path that comes up within seconds; the long one is for every repeat on the
+ * path it is already on.
+ */
+const DIRECT_HANDOVER_ARRIVAL_SPACING_MS = 5_000;
 const DIRECT_HANDOVER_SPACING_MS = 30_000;
 /**
- * The bounds on hand-overs that come back by themselves, counted on one path
- * of the shell (they start again when its kind of path changes, or after
- * DIRECT_HANDOVER_BOUNDS_RESET_MS without a hand-over): at most this many in
- * all, and no more after this many in a row whose stream still came in
- * another way.
+ * The bounds on hand-overs: at most DIRECT_HANDOVER_MAX of them, whatever
+ * the shell's path does, until DIRECT_HANDOVER_BOUNDS_RESET_MS have passed
+ * without one; and no more after DIRECT_HANDOVER_MAX_FRUITLESS in a row whose
+ * stream still came in another way, until the shell's kind of path changes
+ * or the same time has passed.
  */
-const DIRECT_HANDOVER_MAX_PER_PATH = 6;
+const DIRECT_HANDOVER_MAX = 6;
 const DIRECT_HANDOVER_MAX_FRUITLESS = 3;
 const DIRECT_HANDOVER_BOUNDS_RESET_MS = 10 * 60_000;
-/** How long a hand-over waits for the page to be quiet before skipping. */
-const DIRECT_HANDOVER_QUIET_WAIT_MS = 10_000;
+/** How often a hand-over that waits for a quiet page looks again. */
 const DIRECT_HANDOVER_QUIET_POLL_MS = 250;
+const DIRECT_HANDOVER_QUIET_SLOW_POLL_MS = 1_000;
+const DIRECT_HANDOVER_QUIET_SLOW_AFTER_MS = 10_000;
 
-/** Resolves true once nothing of this page uses the network, false after `limitMs`. */
-async function waitForQuietPage(limitMs: number): Promise<boolean> {
-  const until = Date.now() + limitMs;
+/**
+ * Resolves true once nothing of this page uses the network, for as long as
+ * `wanted` says the hand-over is still wanted; false once it is not. It
+ * looks every DIRECT_HANDOVER_QUIET_POLL_MS at first and more slowly later,
+ * so the hand-over follows the end of the page's last request closely and a
+ * page that stays busy (an open terminal) costs little.
+ */
+async function waitForQuietPage(wanted: () => boolean): Promise<boolean> {
+  const started = Date.now();
   for (;;) {
+    if (!wanted()) return false;
     if (pageConnectionsQuiet()) return true;
-    if (Date.now() >= until) return false;
-    await new Promise((resolve) => window.setTimeout(resolve, DIRECT_HANDOVER_QUIET_POLL_MS));
+    const slow = Date.now() - started >= DIRECT_HANDOVER_QUIET_SLOW_AFTER_MS;
+    await new Promise((resolve) => window.setTimeout(
+      resolve,
+      slow ? DIRECT_HANDOVER_QUIET_SLOW_POLL_MS : DIRECT_HANDOVER_QUIET_POLL_MS,
+    ));
   }
 }
 
@@ -3012,27 +3029,28 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const directHandoverRef = useRef({
     armed: true,
     running: false,
+    // The provider is gone: a hand-over still waiting for a quiet page ends.
+    disposed: false,
     lastAt: -Infinity,
-    // The shell's path is a direct address (not the relay), as last heard.
+    // The shell is on a path a page is handed over to, as last heard: a
+    // direct address, or, with a shell that names no path, direct at all.
     onDirectPath: false,
-    // In this usable stretch the shell was seen on the relay, or on a path
-    // it could not name: only then is reaching a direct address an upgrade.
-    sawOtherPath: false,
-    // The one re-arm for the relay-to-direct upgrade of this usable stretch
-    // was given; and the next hand-over is not held to the spacing.
-    upgradeUsed: false,
-    skipSpacingOnce: false,
-    // The bounds (DIRECT_HANDOVER_MAX_PER_PATH, DIRECT_HANDOVER_MAX_FRUITLESS):
-    // hand-overs made on the shell's current kind of path, and how many of
-    // the latest in a row were followed by a stream that still came in
-    // another way.
+    // The shell arrived there since the last hand-over: the next one is
+    // held to the short spacing only.
+    arrived: false,
+    // The bounds (DIRECT_HANDOVER_MAX, DIRECT_HANDOVER_MAX_FRUITLESS):
+    // hand-overs made since the bounds last started again, and how many of
+    // the latest in a row, on the shell's current kind of path, were
+    // followed by a stream that still came in another way.
     boundsPath: null as NativeDirectPathKind | null,
-    onPathCount: 0,
+    count: 0,
     fruitless: 0,
     // A hand-over was made and its stream has not said yet how it came in.
     awaitingVerdict: false,
-    // The one pending retry, for when the spacing ends.
+    // The one pending retry, and when it is due: for when the spacing ends,
+    // or sooner if something asks to look again before that.
     retryTimer: null as number | null,
+    retryAt: 0,
   });
   const attemptDirectHandoverRef = useRef<() => Promise<void>>(async () => {});
   const openWorkbenchEventsRef = useRef<() => void>(() => {});
@@ -3981,86 +3999,100 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * The App's direct path became usable while this page's live stream still
    * runs on the public connection it loaded on. WebKit keeps reusing a pooled
    * connection, so a rebuilt stream alone would stay on it
-   * (docs/plans/remote-direct-ios.md section 2). Once per usable stretch, and
-   * at most every DIRECT_HANDOVER_SPACING_MS: when nothing of this page is
-   * using the network (no request waiting for its answer, no WebSocket open),
-   * the stream is closed, the shell closes the public connections for this
-   * host that have gone quiet (`direct.handover`), and the stream is opened
-   * again, now over a new connection that takes the direct path. A page that
-   * is not quiet within DIRECT_HANDOVER_QUIET_WAIT_MS skips it; the next
-   * status read on a resume, or the next change, tries again. Nothing is
-   * replayed. Without `direct` version 2 nothing happens.
+   * (docs/plans/remote-direct-ios.md section 2). So the page moves itself:
+   * as soon as nothing of it is using the network (no request waiting for
+   * its answer, no WebSocket open, no same-origin frame), the stream is
+   * closed, the shell closes the public connections for this host that have
+   * gone quiet (`direct.handover`), and the stream is opened again, now over
+   * a new connection that takes the direct path. Nothing is replayed, and
+   * nothing that is in flight is touched: a busy page is waited for, for as
+   * long as the hand-over is still wanted, and handed over when its last
+   * request ends. Without `direct` version 2 nothing happens.
    *
-   * It comes back by itself: an attempt that the spacing or a busy page held
-   * off is made again when the spacing ends, but only while the live stream
-   * itself says it came in another way; and such a stream arms it again while
-   * the shell is on a direct address. That is bounded, so a page cannot flap:
-   * never sooner than the spacing; at most DIRECT_HANDOVER_MAX_PER_PATH
-   * hand-overs on one path of the shell; and none after
+   * It is wanted while the shell prefers direct, on a direct address if the
+   * shell names its path (never on the relay), and the live stream has not
+   * said it came in directly. One hand-over per usable stretch, and it comes
+   * back by itself: a stream that says it came in another way while the
+   * shell is on a direct address arms it again, and an attempt the spacing
+   * held off is made again when the spacing ends, but only while the live
+   * stream itself says it came in another way.
+   *
+   * That is bounded, so a page cannot flap. Never two hand-overs closer than
+   * DIRECT_HANDOVER_ARRIVAL_SPACING_MS, which is all that holds the first
+   * one after the shell arrives at a direct path; every repeat on the same
+   * path waits DIRECT_HANDOVER_SPACING_MS. At most DIRECT_HANDOVER_MAX in
+   * all, whatever the path does, and none after
    * DIRECT_HANDOVER_MAX_FRUITLESS in a row whose stream still came in another
-   * way. The counts start again when the shell's kind of path changes, or
-   * after DIRECT_HANDOVER_BOUNDS_RESET_MS without a hand-over. A stream that
-   * says it came in directly is never handed over.
+   * way, until the shell's kind of path changes; both start again after
+   * DIRECT_HANDOVER_BOUNDS_RESET_MS without a hand-over. A stream that says
+   * it came in directly is never handed over.
    */
   const scheduleDirectHandoverRetry = (delayMs: number) => {
     const state = directHandoverRef.current;
-    if (state.retryTimer !== null) return;
+    const delay = Math.max(0, delayMs);
+    const due = Date.now() + delay;
+    if (state.retryTimer !== null) {
+      // One retry at a time, at the earlier of the two moments.
+      if (state.retryAt <= due) return;
+      window.clearTimeout(state.retryTimer);
+    }
+    state.retryAt = due;
     state.retryTimer = window.setTimeout(() => {
       state.retryTimer = null;
       // Only on the stream's own word. One that has not said how it came in
       // (it is still opening, or the instance does not report it) is left
       // alone: unknown is not "not direct".
       if (liveStreamVia() === 'other') void attemptDirectHandoverRef.current();
-    }, Math.max(0, delayMs));
+    }, delay);
   };
   const attemptDirectHandover = async () => {
     const state = directHandoverRef.current;
-    if (!state.armed || state.running || !nativeDirectHandoverAvailable()) return;
-    // Only while the shell prefers direct. Its events come here with that
-    // preference; a retry set earlier can fire after it went to the public
-    // path, and a shell that does not report its path has no other gate.
-    if (nativeDirectPreference() !== 'direct') return;
-    // With a shell that reports its path: only onto a direct address, never
-    // while its connection runs through the relay. A stream moved there would
-    // race the public path over the relay and lose, and nothing would move it
-    // again when the direct address comes.
-    if (nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind())) return;
+    // Wanted: armed, and only while the shell prefers direct (its events
+    // come here with that preference; a retry set earlier can fire after it
+    // went to the public path, and a shell that does not report its path has
+    // no other gate). With a shell that reports its path, only onto a direct
+    // address, never while its connection runs through the relay: a stream
+    // moved there would race the public path over the relay and lose, and
+    // nothing would move it again when the direct address comes. And not a
+    // stream that already said it came in through the direct ingress.
+    // Asked now, again each time a busy page is looked at, and so once more
+    // before anything is closed: the wait can take long, and the shell's
+    // path may have gone back to the relay or to the public path meanwhile;
+    // a later return to a direct address tries again.
+    const wanted = () => (
+      state.armed
+      && !state.disposed
+      && nativeDirectPreference() === 'direct'
+      && (!nativeDirectPathReported() || isDirectAddressPath(nativeDirectPathKind()))
+      && liveStreamVia() !== 'direct'
+    );
+    if (state.running || !nativeDirectHandoverAvailable() || !wanted()) return;
     const sinceLast = Date.now() - state.lastAt;
     if (sinceLast >= DIRECT_HANDOVER_BOUNDS_RESET_MS) {
-      state.onPathCount = 0;
+      state.count = 0;
       state.fruitless = 0;
     }
     if (
-      state.onPathCount >= DIRECT_HANDOVER_MAX_PER_PATH
+      state.count >= DIRECT_HANDOVER_MAX
       || state.fruitless >= DIRECT_HANDOVER_MAX_FRUITLESS
     ) return;
-    if (!state.skipSpacingOnce && sinceLast < DIRECT_HANDOVER_SPACING_MS) {
-      scheduleDirectHandoverRetry(DIRECT_HANDOVER_SPACING_MS - sinceLast);
+    const spacing = state.arrived ? DIRECT_HANDOVER_ARRIVAL_SPACING_MS : DIRECT_HANDOVER_SPACING_MS;
+    if (sinceLast < spacing) {
+      scheduleDirectHandoverRetry(spacing - sinceLast);
       return;
     }
+    // Before the shell's first answer there is no stream to hand over: the
+    // one that opens with it says how it came in, and that is heard here.
     if (nativeDirectBaselineState() !== 'ready' || eventHandlersRef.current.size === 0) return;
-    // Already there: the live stream said it came in through the direct
-    // ingress.
-    if (liveStreamVia() === 'direct') return;
     state.running = true;
     try {
-      const quiet = await waitForQuietPage(DIRECT_HANDOVER_QUIET_WAIT_MS);
-      if (!quiet) {
-        // Nothing was closed. Tried again a spacing from now, if the stream
-        // still says it came in another way.
-        if (state.armed) scheduleDirectHandoverRetry(DIRECT_HANDOVER_SPACING_MS);
-        return;
-      }
-      if (!state.armed) return;
-      // The wait can take seconds: the shell's path may have gone back to
-      // the relay meanwhile. Checked again before the arm is spent and
-      // anything is closed; a later return to a direct address tries again.
-      if (nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind())) return;
-      if (liveStreamVia() === 'direct') return;
+      // Nothing is closed while the page uses the network. The arm is not
+      // spent by waiting.
+      if (!(await waitForQuietPage(wanted))) return;
       state.armed = false;
-      state.skipSpacingOnce = false;
+      state.arrived = false;
       state.lastAt = Date.now();
-      state.onPathCount += 1;
+      state.count += 1;
       state.awaitingVerdict = true;
       closeActiveWorkbenchEventSource();
       setWorkbenchEventConnectionState('reconnecting');
@@ -4105,43 +4137,35 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
     // One object for the provider's life; named here for the clean-up.
     const handover = directHandoverRef.current;
+    handover.disposed = false;
     const stopDirectPreference = onNativeDirectPreference((preferred, path) => {
       const state = handover;
       if (preferred === 'tunnel') {
         state.armed = true;
         state.onDirectPath = false;
-        state.sawOtherPath = false;
-        state.upgradeUsed = false;
-        state.skipSpacingOnce = false;
         // The bounds are kept: a preference that goes to the public path and
         // comes back on the same kind of path is not a new path.
         return;
       }
       // Another kind of path (the relay, IPv4, IPv6, or one the shell cannot
-      // name) is a new path: its hand-overs are counted from the start.
+      // name) may carry what the last one did not: the hand-overs in a row
+      // that moved nothing are counted from the start. The total is not: a
+      // path that flaps between two kinds must not hand over without end.
       if (path !== state.boundsPath) {
         state.boundsPath = path;
-        state.onPathCount = 0;
         state.fruitless = 0;
       }
-      const onDirectPath = isDirectAddressPath(path);
-      if (!onDirectPath) state.sawOtherPath = true;
-      // The shell's connection moved from the relay (or an unknown path) to a
-      // direct address within this usable stretch: armed once more, and that
-      // one hand-over is not held to the spacing. A stretch that starts on a
-      // direct address is no upgrade, and every later change keeps the
-      // spacing, so flaps between the public path and a direct address
-      // cannot hand over more often than it allows.
-      if (
-        nativeDirectPathReported()
-        && onDirectPath
-        && !state.onDirectPath
-        && state.sawOtherPath
-        && !state.upgradeUsed
-      ) {
-        state.upgradeUsed = true;
+      // A path a page is handed over to: a direct address, or, with a shell
+      // that names no path, direct at all.
+      const onDirectPath = !nativeDirectPathReported() || isDirectAddressPath(path);
+      // The shell arrived there, from the public path, from the relay, or
+      // from a path it could not name: armed, and that one hand-over waits
+      // only for the short spacing, so the page follows within seconds. A
+      // path that flaps arrives again and again; the short spacing and the
+      // total bound are what hold that.
+      if (onDirectPath && !state.onDirectPath) {
         state.armed = true;
-        state.skipSpacingOnce = true;
+        state.arrived = true;
       }
       state.onDirectPath = onDirectPath;
       void attemptDirectHandoverRef.current();
@@ -4155,6 +4179,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       stopDirectBaseline();
       if (handover.retryTimer !== null) window.clearTimeout(handover.retryTimer);
       handover.retryTimer = null;
+      handover.disposed = true;
       window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };

@@ -55,6 +55,7 @@
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs",
     "check:first-load": "node scripts/check-first-load-budget.mjs",
+    "i18n:surfaces": "vite build --mode i18n-surfaces",
     "build:desktop-account": "vite build --config vite.desktop.config.ts"
   },
   "dependencies": {

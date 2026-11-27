@@ -102,7 +102,8 @@ fn linked(wiring: &mut Wiring, runtime: &str, now: Instant) -> u64 {
 }
 
 /// A direct-only instance gets its client and its route before its view's
-/// first load on its very first open, where every other instance is routed
+/// first load on its very first open, whichever way this system routes;
+/// where a route is given only at creation, every other instance is routed
 /// only once it has answered. Its route allows no failover, and no session
 /// is ever started for a view of it that is already open.
 #[test]
@@ -114,7 +115,9 @@ fn a_direct_only_instance_is_routed_before_its_first_load_from_its_first_open() 
         assert!(!wiring.only(&target(TWO)));
         // It has never answered, and starts at creation all the same.
         assert!(wiring.starts_at_creation(&target(ONE)));
-        assert!(!wiring.starts_at_creation(&target(TWO)));
+        // An automatic instance that has never answered: only where a
+        // window is routed live.
+        assert_eq!(wiring.starts_at_creation(&target(TWO)), routing == Routing::Live);
         let session = wiring.open(target(ONE), material(), None, now);
         // Routed as it is made, whichever way this system routes.
         let routed = wiring.window_created(session, VIEW);

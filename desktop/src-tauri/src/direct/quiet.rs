@@ -34,6 +34,10 @@ impl SessionPolicy {
     pub fn set_direct_only(&self, on: bool) {
         self.0.lock().unwrap().strict = on;
     }
+    /// Only the direct path and the relay are allowed for new connections.
+    pub fn direct_only(&self) -> bool {
+        self.0.lock().unwrap().strict
+    }
     pub fn sample(&self) -> Option<PublicTicket> {
         let p = self.0.lock().unwrap();
         (!p.strict).then(|| PublicTicket {

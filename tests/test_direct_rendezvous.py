@@ -400,7 +400,9 @@ def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
     assert (grant.subject, grant.until) == ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)
 
 
-@pytest.mark.parametrize("steps", [("bind", "waiting", "ownership", "deadline", "foreign"), ("socket",)])
+@pytest.mark.parametrize("steps", [("bind", "waiting", "ownership", "deadline", "foreign"), ("socket",),
+                                   # A duration, never negative: after two other entries its codes here are 0 and 1.
+                                   ("bind", "bind", "late", "late")])
 def test_listener_faults_log_only_the_three_fields_without_changing_the_offer(instance, caplog, steps):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
@@ -433,7 +435,9 @@ def test_invalid_listener_fault_batches_are_ignored_in_full(instance, caplog):
                    [good, {**good, "code": 1.5}], [good, {**good, "background_seconds": True}],
                    [good, {**good, "code": -(2**31) - 1}], [good, {**good, "code": 2**31}],
                    [good, {**good, "background_seconds": 2**31}],
-                   [good, {**good, "background_seconds": "1"}], [good, {**good, "background_seconds": -1}]):
+                   [good, {**good, "background_seconds": "1"}], [good, {**good, "background_seconds": -1}],
+                   # A late first bind carries how long it took: not a negative number.
+                   [good, {**good, "step": "late", "code": -1}]):
         response = _post(client, {**_body(), "listener_faults": faults})
         assert response.status_code == 200 and response.get_json() == baseline
     assert not any("listener_fault" in line for line in caplog.messages)

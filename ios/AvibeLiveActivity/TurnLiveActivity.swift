@@ -21,7 +21,7 @@ struct TurnLiveActivity: Widget {
                 VoiceCaptureMark()
             } compactTrailing: {
                 if shown.runsTimer && context.state.phase == .working {
-                    TurnActivityClock(state: context.state).frame(maxWidth: 64)
+                    TurnActivityClock(state: context.state)
                         .foregroundStyle(VoiceCaptureStyle.accent)
                 } else {
                     TurnActivityGlyph(shown: shown)
@@ -51,7 +51,7 @@ struct TurnActivityShown {
         case .needsYou: return "hand.raised"
         case .done: return "checkmark"
         case .failed: return "xmark"
-        case .stopped: return "stop"
+        case .stopped: return "stop.fill"
         }
     }
     var tint: Color {
@@ -86,12 +86,21 @@ struct TurnActivityGlyph: View {
     }
 }
 
+/// The running time, trailing in a slot as wide as its longest value
+/// (`0:00:00`, in the same font). A timer's text has no bounded width of its
+/// own: fixed at its ideal size it laid the whole card out infinitely wide and
+/// the system drew a black card and island (11-26). Checked on the simulator
+/// by TurnLiveActivityLayoutUITests.
 struct TurnActivityClock: View {
     let state: TurnActivityAttributes.ContentState
     var body: some View {
         let start = Date(timeIntervalSince1970: Double(state.startedAt))
-        Text(timerInterval: start...start.addingTimeInterval(28800), countsDown: false)
-            .monospacedDigit().fixedSize().lineLimit(1)
+        Text(verbatim: "0:00:00").hidden()
+            .overlay(alignment: .trailing) {
+                Text(timerInterval: start...start.addingTimeInterval(28800), countsDown: false)
+                    .multilineTextAlignment(.trailing).lineLimit(1)
+            }
+            .monospacedDigit()
     }
 }
 
@@ -114,11 +123,15 @@ struct TurnActivityCard: View {
                         .lineLimit(1).truncationMode(.tail)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    TurnActivityGlyph(shown: shown)
+                    // One width for every state's symbol, so the words start
+                    // at the same place after a dot, a tick or a hand.
+                    TurnActivityGlyph(shown: shown).frame(width: 16)
                     (Text(LocalizedStringKey(shown.statusKey), tableName: "TurnActivity")
                         .fontWeight(.semibold).foregroundColor(shown.tint)
                      + Text(" · " + shown.detail(locale: locale)).foregroundColor(.secondary))
-                        .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                        // One line in every state (Product, 11-27); a width
+                        // no one measured truncates rather than wraps.
+                        .font(.system(size: 13)).lineLimit(1)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
             if shown.runsTimer {

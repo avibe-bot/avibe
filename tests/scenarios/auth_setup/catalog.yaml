@@ -1657,7 +1657,7 @@ scenarios:
       - tests/test_antigravity_auth_and_install.py::test_antigravity_auth_save_validation_uses_configured_language
       - tests/test_antigravity_auth_and_install.py::test_agent_platform_adc_detection_and_gcp_settings
   - id: AUTH-SETUP-931
-    name: Antigravity Web re-login with valid credentials shows a link without opening a browser, accepts the callback URL, and reaches account-scoped catalog cutover
+    name: Antigravity Web re-login shadows the system opener for the login child, shows a link, accepts the callback URL, and reaches account-scoped catalog cutover
     status: covered
     kind: recovery
     layer: scenario
