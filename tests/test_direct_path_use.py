@@ -197,16 +197,45 @@ def test_only_an_answer_no_cache_may_keep_says_how_its_request_arrived(
         ("no-cache", False),
         ("private, max-age=31536000, immutable", False),
         ("public, max-age=3600", False),
-        # A Show runtime's own policy, forwarded: the quoted name is an
-        # argument, not a directive.
+        # A Show runtime's own policy, forwarded. Nothing with a quoted
+        # string is read at all: its text is an argument, may hold commas,
+        # and may hold an escaped quote, so a "no-store" inside it is
+        # extension text to a cache.
         ('private, max-age=3600, no-cache="Set-Cookie"', False),
         ('private, no-cache="no-store"', False),
+        ('private, max-age=3600, ext="a\\", no-store, \\"b"', False),
+        ('no-store, ext="a"', False),
+        ("max-age=3600, ext=a\\, no-store", False),
+        # Only the whole token, by itself.
         ("x-no-store", False),
+        ("no-store-x", False),
+        ("no-store=1", False),
+        ("max-age=3600; no-store", False),
+        ("private,\tno-store ", True),
     ],
 )
 def test_an_answer_is_never_stored_only_by_its_own_directive(cache_control, never_stored):
     headers = {} if cache_control is None else {"Cache-Control": cache_control}
     assert ui_server._answer_is_never_stored(ui_server.Response(b"", headers=headers)) is never_stored
+
+
+@pytest.mark.parametrize(
+    ("lines", "never_stored"),
+    [
+        # A cache reads several lines as one list.
+        (["private", "no-store"], True),
+        (["max-age=3600", "no-store"], True),
+        # A quoted string that begins on one line and ends on another: the
+        # line between them is its text, whichever line is looked at.
+        (['max-age=3600, ext="a', "no-store", 'b"'], False),
+        (["no-store", 'max-age=3600, ext="a"'], False),
+    ],
+)
+def test_every_cache_control_line_of_an_answer_is_read_as_one_list(lines, never_stored):
+    response = ui_server.Response(b"")
+    for line in lines:
+        response.headers.append("Cache-Control", line)
+    assert ui_server._answer_is_never_stored(response) is never_stored
 
 
 def test_a_later_request_of_the_session_logs_the_minutes_that_are_over(instance, counted, caplog):  # noqa: F811

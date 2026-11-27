@@ -3255,14 +3255,23 @@ def add_public_show_representation_vary(response: Response) -> Response:
 # a Show runtime can then never carry it. The page's session check, which
 # begins every stream, is such an answer.
 REQUEST_VIA_HEADER = "X-Avibe-Via"
-_QUOTED_HEADER_VALUE = re.compile(r'"[^"]*"')
 
 
 def _answer_is_never_stored(response: Response) -> bool:
-    """The answer carries an actual ``no-store`` directive."""
-    # A quoted argument (``no-cache="Set-Cookie"``) is not a directive.
-    directives = _QUOTED_HEADER_VALUE.sub("", response.headers.get("Cache-Control", "")).split(",")
-    return any(directive.split("=", 1)[0].strip().lower() == "no-store" for directive in directives)
+    """The answer carries an actual ``no-store`` directive, read without parsing.
+
+    This is no HTTP parser and must not become one: a value it cannot read as
+    plainly as a cache does is declined. Any quoted string is (its text may
+    hold commas, and an escaped quote, so ``no-store`` inside it would look
+    like a directive here and be extension text to a cache), and then a whole
+    comma-separated token must be exactly ``no-store``. Every ``Cache-Control``
+    line of the answer is read as the one list a cache makes of them: a
+    quoted string may begin on one line and end on another.
+    """
+    value = ", ".join(response.headers.getlist("Cache-Control"))
+    if '"' in value or "\\" in value:
+        return False
+    return any(token.strip(" \t").lower() == "no-store" for token in value.split(","))
 
 
 @app.after_request
