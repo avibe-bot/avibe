@@ -695,8 +695,10 @@ function isDirectAddressPath(path: NativeDirectPathKind | null): boolean {
 /**
  * No two direct hand-overs closer than this. The short one is for the first
  * hand-over after the shell arrives at a direct path, so a page follows a
- * path that comes up within seconds; the long one is for every repeat on the
- * path it is already on.
+ * path that comes up within seconds, and for the one after a hand-over that
+ * was half met (it moved part of the page, or was the first to be refused
+ * because another document of the instance was open); the long one is for
+ * every other repeat on the path it is already on.
  */
 const DIRECT_HANDOVER_ARRIVAL_SPACING_MS = 5_000;
 const DIRECT_HANDOVER_SPACING_MS = 30_000;
@@ -3048,6 +3050,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // The shell arrived there since the last hand-over: the next one is
     // held to the short spacing only.
     arrived: false,
+    // The last hand-over was half met: the next one is held to the short
+    // spacing only. And how many in a row the shell refused because another
+    // document of the instance was open: only the first of them is.
+    halfMet: false,
+    refusedForDocument: 0,
     // The bounds (DIRECT_HANDOVER_MAX, DIRECT_HANDOVER_MAX_FRUITLESS):
     // hand-overs made since the bounds last started again, and how many of
     // the latest in a row, on the shell's current kind of path, were
@@ -3619,17 +3626,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           // hand-over is the stream's word and the latest request's
           // together. The stream's own reconnect begins with a request, so
           // that request's word is the newer of the two.
+          // This handshake is the verdict on the hand-over before it,
+          // whatever it says: a stream that does not say how it came in
+          // must not leave the next hand-over waiting for one.
+          const judged = handover.awaitingVerdict;
+          handover.awaitingVerdict = false;
           if (pageOnDirectPath()) {
             // The page is on the direct path: nothing more is handed over
             // while both say so.
-            handover.awaitingVerdict = false;
             handover.fruitless = 0;
+            handover.halfMet = false;
           } else if (pageVia() === 'other') {
-            if (handover.awaitingVerdict) {
-              // The hand-over before this stream did not move the page.
-              handover.awaitingVerdict = false;
-              handover.fruitless += 1;
-            }
+            // The hand-over before this stream did not move the page.
+            if (judged) handover.fruitless += 1;
             askForDirectHandoverRef.current();
           }
         }
@@ -4074,6 +4083,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       && !pageOnDirectPath()
     );
     if (state.running || !nativeDirectHandoverAvailable() || !wanted()) return;
+    // The last hand-over has no verdict yet (its stream has not opened
+    // again): the next one waits for it, so that each is judged by its own
+    // stream and a short retry cannot run ahead of the bound on fruitless
+    // ones. The handshake asks again. An arrival at a direct address does
+    // not wait: it is a new path.
+    if (state.awaitingVerdict && !state.arrived) return;
     const sinceLast = Date.now() - state.lastAt;
     if (sinceLast >= DIRECT_HANDOVER_BOUNDS_RESET_MS) {
       state.count = 0;
@@ -4083,7 +4098,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       state.count >= DIRECT_HANDOVER_MAX
       || state.fruitless >= DIRECT_HANDOVER_MAX_FRUITLESS
     ) return;
-    const spacing = state.arrived ? DIRECT_HANDOVER_ARRIVAL_SPACING_MS : DIRECT_HANDOVER_SPACING_MS;
+    const spacing = state.arrived || state.halfMet
+      ? DIRECT_HANDOVER_ARRIVAL_SPACING_MS
+      : DIRECT_HANDOVER_SPACING_MS;
     if (sinceLast < spacing) {
       scheduleDirectHandoverRetry(spacing - sinceLast);
       return;
@@ -4098,6 +4115,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!(await waitForQuietPage(wanted))) return;
       state.armed = false;
       state.arrived = false;
+      state.halfMet = false;
       state.lastAt = Date.now();
       state.count += 1;
       state.awaitingVerdict = true;
@@ -4120,6 +4138,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // connection again. Armed for the next resume or change, still no sooner
       // than the spacing allows.
       if (!result || result.skipped !== undefined || result.kept > 0) state.armed = true;
+      // A goal half met is tried again as soon as the page is quiet and the
+      // short spacing has passed, not after the long one: the shell closed
+      // some connections and kept busy ones, so what is left is probably
+      // quiet by then; or another document of the instance was open, which
+      // is usually a hidden one that lives a second or two. Only the first
+      // refusal in a row: one that stays open for a minute must not spend
+      // every hand-over the bounds allow in half a minute. A hand-over that
+      // moved nothing at all, or that the shell could not make, waits the
+      // long spacing as before. The bounds on how many are unchanged.
+      const refused = result?.skipped === 'other_documents';
+      state.refusedForDocument = refused ? state.refusedForDocument + 1 : 0;
+      const movedPart = result !== null && result.skipped === undefined && result.closed > 0 && result.kept > 0;
+      if (movedPart || (refused && state.refusedForDocument === 1)) state.halfMet = true;
     } finally {
       state.running = false;
     }
