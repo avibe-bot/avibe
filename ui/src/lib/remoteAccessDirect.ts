@@ -11,12 +11,13 @@ export type DeviceUsing =
   | { kind: 'lan' | 'punched' | 'direct'; family: 'ipv4' | 'ipv6'; rttMs: number | null };
 
 /**
- * In the App: what this page's live stream is using. Whether it is on the
- * direct ingress comes from the stream itself (`pageVia`); which kind of
+ * In the App: what this page is using. Whether it is on the direct ingress
+ * comes from the instance, for its live stream and its latest request
+ * together (`pageVia`: `direct` only when both are); which kind of
  * direct path from the App (`direct.status()`): the relay, or an IPv4 or IPv6
  * address, on a local network (`lan`) or not (`punched`), or `direct` when
  * the App does not say. A relayed path is never called direct. Null in a
- * browser, before the stream has said, when the stream is direct but the App
+ * browser, before the page has been told, when the page is direct but the App
  * names no path for it, and unless the App keeps its path current
  * (`appReportsPath`, `direct` version 3; an older App's path can be stale).
  */
@@ -67,9 +68,9 @@ export function deviceUsingText(t: TFunction, using: DeviceUsing): string {
 }
 
 /**
- * The tag beside the instance name: `direct` only while this page's stream is
- * on the direct ingress and the App's path is an IPv4 or IPv6 address, `relay`
- * while it is on the direct ingress through the relay, otherwise none (a
+ * The tag beside the instance name: `direct` only while this page (its stream
+ * and its latest request) is on the direct ingress and the App's path is an
+ * IPv4 or IPv6 address, `relay` while it is there through the relay, otherwise none (a
  * browser, the public origin, a path the App does not name, or an App that
  * does not keep its path current: `appReportsPath`, `direct` version 3).
  */

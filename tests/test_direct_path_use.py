@@ -125,6 +125,36 @@ def test_a_signed_in_remote_request_is_counted_by_the_path_it_arrived_on(instanc
     ]
 
 
+def test_an_accepted_remote_request_is_told_how_it_arrived_and_no_other_is(instance, counted, monkeypatch):  # noqa: F811
+    """The page reads this on each answer: its live stream is a connection of
+    its own, so only a request's own answer says how the requests arrive."""
+    config, _rendezvous = instance
+    owner = _signed_in(config, role="owner", subject="sub-owner")
+    header = ui_server.REQUEST_VIA_HEADER
+
+    def session(client):
+        return client.get("/api/session", base_url=ORIGIN, environ_base=REMOTE_PEER)
+
+    # A gated route and the page's own session check, by the path of each
+    # request: the next one says its own, not the last one's.
+    assert _post(owner, _body()).headers.get(header) == "other"
+    assert session(owner).headers.get(header) == "other"
+    with monkeypatch.context() as patch:
+        patch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+        assert _post(owner, _body()).headers.get(header) == "direct"
+        assert session(owner).headers.get(header) == "direct"
+    assert _post(owner, _body()).headers.get(header) == "other"
+    # Nothing is said to a request with no accepted session, whatever its
+    # path: a refused one, a session check that finds none, a public page.
+    anonymous = app.test_client()
+    with monkeypatch.context() as patch:
+        patch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+        refused = anonymous.post(PATH, base_url=ORIGIN, environ_base=REMOTE_PEER, json=_body())
+        assert refused.status_code == 401 and header not in refused.headers
+        assert header not in session(anonymous).headers
+        assert header not in anonymous.get("/health", base_url=ORIGIN, environ_base=REMOTE_PEER).headers
+
+
 def test_a_later_request_of_the_session_logs_the_minutes_that_are_over(instance, counted, caplog):  # noqa: F811
     config, _rendezvous = instance
     clock, _counts = counted

@@ -1548,10 +1548,16 @@ def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
     Called where a request's session is accepted as current: the gate every
     route that needs a session passes, and ``/api/session``, which reads the
     session itself.
+
+    The same observation is told to the page on this request's answer
+    (``add_request_via_header``): a page's live stream is a connection of its
+    own, so the stream's ``via`` no longer says how the page's requests arrive.
     """
+    direct = _is_direct_ingress_request()
+    g.remote_request_via = "direct" if direct else "other"
     direct_path_use.counts.note(
         (str(identity.get("sub")), str(identity.get("browser_session_id"))),
-        direct=_is_direct_ingress_request(),
+        direct=direct,
         owner=owner,
     )
 
@@ -3232,6 +3238,22 @@ def add_public_show_representation_vary(response: Response) -> Response:
             response.headers.get("Vary"),
             "Cookie",
         )
+    return response
+
+
+# How this request arrived, for the page that made it: ``direct`` through the
+# direct ingress, ``other`` for any other way in, which is never named (the
+# words of the event stream's ``via``). Only on the answer to a request whose
+# remote session was accepted as current, and only what the instance counted
+# for it. Not an address, and nothing a client did not already choose.
+REQUEST_VIA_HEADER = "X-Avibe-Via"
+
+
+@app.after_request
+def add_request_via_header(response: Response) -> Response:
+    via = getattr(g, "remote_request_via", None)
+    if via is not None:
+        response.headers[REQUEST_VIA_HEADER] = via
     return response
 
 

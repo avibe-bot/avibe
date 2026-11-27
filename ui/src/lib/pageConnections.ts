@@ -6,6 +6,8 @@
 // none, so it never closes a connection something of this page still uses.
 // Subresources the browser loads by itself (images, scripts, styles) are not
 // seen.
+import { beginRequestVia, noteRequestVia } from './liveStreamVia';
+
 let inFlight = 0;
 const sockets = new Set<WebSocket>();
 let installed = false;
@@ -110,6 +112,7 @@ export function installPageFetchCounting(): void {
     // reuse a connection the hand-over is about to close.
     while (hold) await hold;
     const done = beginPageRequest();
+    const order = beginRequestVia();
     let response: Response;
     try {
       response = await original(input, init);
@@ -117,6 +120,8 @@ export function installPageFetchCounting(): void {
       done();
       throw error;
     }
+    // How this request arrived, as the instance said on its answer.
+    noteRequestVia(order, response.headers.get('X-Avibe-Via'));
     return countedUntilBodyEnds(response, done);
   };
 }
