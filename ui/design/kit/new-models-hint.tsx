@@ -92,17 +92,28 @@ const EffortChip = ({ active, label }: { active: boolean; label: string }) => (
 
 // ---- The proposal: the hint row ----
 
-/** 「添加」 beside one new model: puts it in the menu and picks it, as the menu's 添加模型 does. */
-const AddChip = () => {
+/** 「添加」 at a new model's row end: a label in the cyan of 「+ 添加模型」, not a button of its own; the
+ *  whole row is the target. It puts the model in the menu and picks it, as the menu's 添加模型 does. */
+const AddLabel = () => {
   const d = useDraft();
-  return (
-    <Button type="button" variant="accent" size="2xs" data-hint-add="" className="shrink-0 max-md:h-8 max-md:px-3">
-      {d('添加', 'Add')}
-    </Button>
-  );
+  return <span data-hint-add="" className="shrink-0 text-[11px] font-medium text-cyan-ink">{d('添加', 'Add')}</span>;
 };
 
-/** The close control: one tap and the row never comes back for these models. Hover or focus names it. */
+/** A new model's row, tapped anywhere to add it: shaped like the model rows above, 40px tall on a phone. */
+const NewModelButton = ({ children }: { children: React.ReactNode }) => (
+  <Button
+    type="button"
+    variant="ghost"
+    size="sm"
+    className="h-auto min-w-0 flex-1 justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal text-foreground hover:bg-cyan/[0.08] max-md:min-h-10"
+  >
+    {children}
+  </Button>
+);
+
+/** The close control: one tap and the row never comes back for these models. Hover or focus names it.
+ *  On a phone its target is 40px and it keeps 12px from the row it closes, so a missed 「添加」 does not
+ *  end the hint for good. */
 const CloseControl = () => {
   const d = useDraft();
   const label = d('不再提示', "Don't show again");
@@ -114,7 +125,7 @@ const CloseControl = () => {
         size="2xs"
         aria-label={label}
         data-hint-close=""
-        className="w-6 px-0 text-muted hover:text-foreground max-md:size-8"
+        className="w-6 px-0 text-muted hover:text-foreground max-md:size-10"
       >
         <X />
       </Button>
@@ -128,41 +139,54 @@ const CloseControl = () => {
   );
 };
 
-/** The row itself, first in the model list's pinned foot, above 添加模型. */
-export function NewModelsRow({ hint }: { hint: NewModelsHint }) {
+/** The hint's line in the model list's pinned foot, above 添加模型: one model named with 「添加」, or a
+ *  count that opens. Pinned, so every opened menu shows it, however long the list. */
+export function NewModelsLine({ hint }: { hint: NewModelsHint }) {
   const d = useDraft();
   if (hint.kind === 'none') return null;
   if (hint.kind === 'one') {
     return (
-      <div data-new-models="" className="mt-1 flex items-center gap-1.5 rounded pl-2 pr-0.5">
-        <span className="flex min-w-0 flex-1 items-baseline gap-1.5 py-1.5">
-          <span className="shrink-0 text-[11px] font-medium text-muted">{d('新模型', 'New model')}</span>
-          <span className="truncate text-[12px] font-semibold text-foreground" title={hint.model.id}>{hint.model.label}</span>
-        </span>
-        <AddChip />
+      <div data-new-models="" className="mt-1 flex items-center gap-1 max-md:gap-3">
+        <NewModelButton>
+          <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+            <span className="shrink-0 text-[11px] font-medium text-muted">{d('新模型', 'New model')}</span>
+            <span className="truncate font-semibold" title={hint.model.id}>{hint.model.label}</span>
+          </span>
+          <AddLabel />
+        </NewModelButton>
         <CloseControl />
       </div>
     );
   }
   const count = hint.models.length;
   return (
-    <div data-new-models="" className="mt-1 flex flex-col">
-      <div className="flex items-center gap-1 rounded pl-2 pr-0.5 hover:bg-wash">
-        <button
-          type="button"
-          aria-expanded={hint.open}
-          className="flex min-w-0 flex-1 items-center gap-1 py-1.5 text-left text-[11px] font-medium text-muted hover:text-foreground"
-        >
-          <span className="truncate">{d(`有 ${count} 个新模型可以添加`, `${count} new models you can add`)}</span>
-          <ChevronDown aria-hidden className={clsx('size-3 shrink-0 transition-transform', hint.open && 'rotate-180')} />
-        </button>
-        <CloseControl />
-      </div>
-      {hint.open && hint.models.map((model) => (
-        <div key={model.id} className="flex items-center gap-2 rounded py-1 pl-2 pr-0.5 text-[12px] text-foreground">
+    <div data-new-models="" className="mt-1 flex items-center gap-1 pr-0.5 max-md:gap-3">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-expanded={hint.open}
+        className="h-auto min-w-0 flex-1 justify-start gap-1 rounded px-2 py-1.5 text-left text-[11px] font-medium text-muted hover:bg-wash hover:text-foreground max-md:min-h-10"
+      >
+        <span className="truncate">{d(`有 ${count} 个新模型可以添加`, `${count} new models you can add`)}</span>
+        <ChevronDown aria-hidden className={clsx('size-3 shrink-0 transition-transform', hint.open && 'rotate-180')} />
+      </Button>
+      <CloseControl />
+    </div>
+  );
+}
+
+/** Opened, the names join the end of the list and scroll with it, so they never crowd the models out of
+ *  a phone's 40vh column; opening brings them into view. */
+export function NewModelsOpened({ hint }: { hint: NewModelsHint }) {
+  if (hint.kind !== 'many' || !hint.open) return null;
+  return (
+    <div data-new-models-open="" className="-mx-1.5 mt-1 flex flex-col border-t border-border px-1.5 pt-1">
+      {hint.models.map((model) => (
+        <NewModelButton key={model.id}>
           <ModelLines model={model} />
-          <AddChip />
-        </div>
+          <AddLabel />
+        </NewModelButton>
       ))}
     </div>
   );
@@ -199,8 +223,9 @@ function MenuBody({ models, current, effort, hint }: ModelMenuDraftProps) {
             {model.id === current && <Check className="size-3.5 shrink-0" />}
           </RouteItem>
         ))}
+        <NewModelsOpened hint={hint} />
         <div className="sticky -bottom-1.5 z-10 -mx-1.5 -mb-1.5 border-t border-border bg-panel px-1.5 pb-1.5">
-          <NewModelsRow hint={hint} />
+          <NewModelsLine hint={hint} />
           <PickerExitButton label={t('chat.picker.addModel')} />
         </div>
       </RouteColumn>

@@ -5,8 +5,9 @@
 // one model is named in the row with 「添加」; more are counted, and the row opens to name them. 「添加」
 // puts the model in the menu and picks it, as the menu's 添加模型 already does; the row shrinks to what is
 // left, and goes with the last. × (「不再提示」) ends it for those models; so does showing in three
-// opened menus without an add. Settings › 模型 › add lists the same models first, and keeps offering
-// them after the row is gone. Nothing else marks them: no badge, no dot, no notification, so whoever
+// opened menus without an add. Settings › 模型 › add lists the same models first, under 「新模型」, for
+// as long as the menu row would offer them; once added, closed, or seen three times, a model goes back
+// to its provider's fold there, still addable. Nothing else marks them: no badge, no dot, no notification, so whoever
 // never opens the menu sees nothing.
 //
 // Model names here are fixtures; the row's own copy names none.
@@ -26,11 +27,30 @@ const menu = [astra, sol, opus5];
 const opus55: DraftModel = { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', efforts: claudeEfforts };
 const terra: DraftModel = { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', efforts: gptEfforts };
 
+// A longer menu, for where the opened names go: they join the end of the list and scroll with it,
+// while the count stays pinned.
+const longMenu: DraftModel[] = [
+  ...menu,
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', efforts: gptEfforts },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', efforts: gptEfforts },
+  { id: 'gpt-5.5', label: 'GPT-5.5', efforts: gptEfforts },
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', efforts: claudeEfforts },
+  { id: 'claude-haiku-5', label: 'Claude Haiku 5', efforts: claudeEfforts },
+];
+
 type MenuState = { models: DraftModel[]; current: string; hint: NewModelsHint };
-const states: Record<string, MenuState & { title: string; hover?: string }> = {
+const states: Record<string, MenuState & { title: string; hover?: string; click?: string[] }> = {
   one: { title: '一个新模型：行里直接写名字和「添加」', models: menu, current: astra.id, hint: { kind: 'one', model: opus55 } },
   two: { title: '两个新模型：「有 2 个新模型可以添加」', models: menu, current: astra.id, hint: { kind: 'many', models: [opus55, terra], open: false } },
   'two-open': { title: '两个新模型 · 点开：逐个写名字，各带「添加」', models: menu, current: astra.id, hint: { kind: 'many', models: [opus55, terra], open: true } },
+  'long-open': {
+    title: '八个模型时点开：名字接在列表末尾，随列表滚动，计数行仍固定在底部',
+    models: longMenu,
+    current: astra.id,
+    hint: { kind: 'many', models: [opus55, terra], open: true },
+    // Opening brings the names into view; clicking the last one's row here only scrolls it into view.
+    click: ['[data-new-models-open] >> text=GPT-6.1 Terra'],
+  },
   'two-added': {
     title: '点了 Claude Opus 5.5 的「添加」：它进了菜单并被选中，提示行缩成剩下的一个',
     models: [...menu, opus55],
@@ -51,9 +71,9 @@ const states: Record<string, MenuState & { title: string; hover?: string }> = {
 const menuFrames: FrameSpec[] = Object.entries(states).flatMap(([name, state]) => {
   const render = () => <ModelMenuDraft models={state.models} current={state.current} effort="high" hint={state.hint} />;
   return [
-    { name, title: `Vibey 模型菜单 · ${state.title}`, width: 1000, height: 760, status: 'proposed' as const, hover: state.hover, render },
+    { name, title: `Vibey 模型菜单 · ${state.title}`, width: 1000, height: 760, status: 'proposed' as const, hover: state.hover, click: state.click, render },
     // A phone has no hover: × is a plain control there, so the close state is the row as drawn.
-    ...(state.hover ? [] : [{ name: `${name}-phone`, title: `Vibey 模型菜单 · ${state.title} · 手机`, width: 390, height: 844, status: 'proposed' as const, render }]),
+    ...(state.hover ? [] : [{ name: `${name}-phone`, title: `Vibey 模型菜单 · ${state.title} · 手机`, width: 390, height: 844, status: 'proposed' as const, click: state.click, render }]),
   ];
 });
 
