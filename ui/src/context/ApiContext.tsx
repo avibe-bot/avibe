@@ -4028,7 +4028,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   const scheduleDirectHandoverRetry = (delayMs: number) => {
     const state = directHandoverRef.current;
-    const due = Date.now() + Math.max(0, delayMs);
+    const delay = Math.max(0, delayMs);
+    const due = Date.now() + delay;
     if (state.retryTimer !== null) {
       // One retry at a time, at the earlier of the two moments.
       if (state.retryAt <= due) return;
@@ -4041,20 +4042,30 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // (it is still opening, or the instance does not report it) is left
       // alone: unknown is not "not direct".
       if (liveStreamVia() === 'other') void attemptDirectHandoverRef.current();
-    }, Math.max(0, delayMs));
+    }, delay);
   };
   const attemptDirectHandover = async () => {
     const state = directHandoverRef.current;
-    if (!state.armed || state.running || !nativeDirectHandoverAvailable()) return;
-    // Only while the shell prefers direct. Its events come here with that
-    // preference; a retry set earlier can fire after it went to the public
-    // path, and a shell that does not report its path has no other gate.
-    if (nativeDirectPreference() !== 'direct') return;
-    // With a shell that reports its path: only onto a direct address, never
-    // while its connection runs through the relay. A stream moved there would
-    // race the public path over the relay and lose, and nothing would move it
-    // again when the direct address comes.
-    if (nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind())) return;
+    // Wanted: armed, and only while the shell prefers direct (its events
+    // come here with that preference; a retry set earlier can fire after it
+    // went to the public path, and a shell that does not report its path has
+    // no other gate). With a shell that reports its path, only onto a direct
+    // address, never while its connection runs through the relay: a stream
+    // moved there would race the public path over the relay and lose, and
+    // nothing would move it again when the direct address comes. And not a
+    // stream that already said it came in through the direct ingress.
+    // Asked now, again each time a busy page is looked at, and so once more
+    // before anything is closed: the wait can take long, and the shell's
+    // path may have gone back to the relay or to the public path meanwhile;
+    // a later return to a direct address tries again.
+    const wanted = () => (
+      state.armed
+      && !state.disposed
+      && nativeDirectPreference() === 'direct'
+      && (!nativeDirectPathReported() || isDirectAddressPath(nativeDirectPathKind()))
+      && liveStreamVia() !== 'direct'
+    );
+    if (state.running || !nativeDirectHandoverAvailable() || !wanted()) return;
     const sinceLast = Date.now() - state.lastAt;
     if (sinceLast >= DIRECT_HANDOVER_BOUNDS_RESET_MS) {
       state.count = 0;
@@ -4072,20 +4083,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Before the shell's first answer there is no stream to hand over: the
     // one that opens with it says how it came in, and that is heard here.
     if (nativeDirectBaselineState() !== 'ready' || eventHandlersRef.current.size === 0) return;
-    // Already there: the live stream said it came in through the direct
-    // ingress.
-    if (liveStreamVia() === 'direct') return;
-    // Still wanted: asked again each time the page is looked at, and once
-    // more before anything is closed. The wait can take long, and the
-    // shell's path may have gone back to the relay or to the public path
-    // meanwhile; a later return to a direct address tries again.
-    const wanted = () => (
-      state.armed
-      && !state.disposed
-      && nativeDirectPreference() === 'direct'
-      && !(nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind()))
-      && liveStreamVia() !== 'direct'
-    );
     state.running = true;
     try {
       // Nothing is closed while the page uses the network. The arm is not
@@ -4159,7 +4156,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       // A path a page is handed over to: a direct address, or, with a shell
       // that names no path, direct at all.
-      const onDirectPath = nativeDirectPathReported() ? isDirectAddressPath(path) : true;
+      const onDirectPath = !nativeDirectPathReported() || isDirectAddressPath(path);
       // The shell arrived there, from the public path, from the relay, or
       // from a path it could not name: armed, and that one hand-over waits
       // only for the short spacing, so the page follows within seconds. A
