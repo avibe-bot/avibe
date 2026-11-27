@@ -131,6 +131,24 @@ def test_surfaces_follow_the_accounts_inventory_and_keep_removals(owner, monkeyp
     assert client.get(url).get_json()["removed"] == [{"id": "gpt-7-sol", "label": "gpt-7-sol"}]
 
 
+def test_codex_direct_restore_list_reads_the_unfiltered_catalog(tmp_path, monkeypatch):
+    """With Codex Direct, the catalog snapshot already applies removals for its own callers; the restore list
+    and stored-choice checks must still find the removed row (they read the catalog, not a filtered menu)."""
+    from config.v2_config import V2Config
+    from core.handlers.direct_model_menu import set_removed
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.default()
+    config.model_hub.agents["codex"].mode = "direct"
+    config.save()
+    model = api.codex_models(schedule_refresh=False)["models"][0]
+    set_removed("codex", model, True)
+
+    assert model not in api.codex_models(schedule_refresh=False)["models"]
+    assert api.direct_model_menu("codex", schedule_refresh=False, removed=True)["models"] == [model]
+    assert [entry["value"] for entry in api.removed_menu_entries("codex")] == [model]
+
+
 def test_im_form_reads_the_hub_menu_for_a_hub_backend(monkeypatch):
     """Before, the IM form offered Claude and Codex their Direct catalog even on the gateway."""
     from core.handlers.settings_handler import SettingsHandler

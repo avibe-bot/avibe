@@ -8723,7 +8723,9 @@ def direct_model_menu(
     """
     from core.handlers.direct_model_menu import read_menu
 
-    snapshot = snapshot or backend_model_catalog.backend_model_snapshot(backend, schedule_refresh=schedule_refresh)
+    snapshot = snapshot or backend_model_catalog.backend_model_snapshot(
+        backend, schedule_refresh=schedule_refresh, catalog_only=True
+    )
     if not snapshot.get("ok"):
         return snapshot
     labels = snapshot.get("model_labels") or {}
@@ -8874,7 +8876,7 @@ async def direct_menu_and_removals(backend: str, *, live: bool = False) -> dict:
         return await asyncio.to_thread(split)
 
     def read() -> dict:
-        snapshot = backend_model_catalog.backend_model_snapshot(backend)
+        snapshot = backend_model_catalog.backend_model_snapshot(backend, catalog_only=True)
         if not snapshot.get("ok"):
             return {"ok": False, "error": snapshot.get("error") or "model_catalog_unavailable"}
 
