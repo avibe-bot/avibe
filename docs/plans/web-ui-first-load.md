@@ -43,16 +43,18 @@ behave as before. A CI budget keeps it that way.
   keys, which `src/i18n/keyCoverage.test.ts` checks per locale with
   `fallbackLng: false`. The design canvas, the bundled mobile onboarding and the
   tests keep the synchronous two-language instance (`src/i18n/index.ts`).
-  Each language is split by surface (`ui/scripts/localeSurfaces.ts`): the copy
-  only the Settings pages (with the Model Hub) draw is a second chunk, loaded
-  together with those pages (`src/i18n/settingsCopy.ts`, through their loaders
-  in `src/routePages.ts` and `src/App.tsx`), so no page draws before its copy and
-  the idle prefetch fetches both. `src/i18n/surfaces.json` lists the moved
-  subtrees (`npm run i18n:surfaces` derives it from the built module graph);
-  every build fails if a module the Web UI can run without a Settings page names
-  a listed key. Keys the code assembles at run time, and server-chosen keys,
-  stay with the first screen. The catalogs themselves (`en.json`, `zh.json`)
-  are unchanged.
+  Each language is split by surface (`ui/scripts/localeSurfaces.ts`): copy
+  only one surface's lazy pages draw (Settings with the Model Hub, Agents,
+  Skills, Harness, the setup wizard) is a chunk of its own, loaded together with
+  those pages (`withCopy` in `src/routePages.ts` and `src/App.tsx`,
+  `src/i18n/surfaceCopy.ts`), so no page draws before its copy and the idle
+  prefetch fetches both. `src/i18n/surfaces.json` lists the moved subtrees
+  (`npm run i18n:surfaces` derives it from the built module graph); every
+  build fails if a loader loads a surface page without its copy, or if a
+  module that can run without a surface's copy names one of its keys. Copy
+  more than one surface draws, keys the code assembles at run time, and
+  server-chosen keys stay with the first screen. The catalogs themselves
+  (`en.json`, `zh.json`) are unchanged.
 - **Routed pages** (`src/routePages.ts`, `src/lib/lazyPage.ts`): Chat, Inbox,
   Projects, Agents, Skills, Harness, Vaults, the setup wizard, and all of
   Settings (one chunk). The page the app opens on starts loading with the entry
