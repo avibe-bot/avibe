@@ -183,6 +183,8 @@ def test_bundled_client_presets_name_codex_ultra_without_leaving_its_menu():
     efforts = backend_model_catalog.bundled_catalog_reasoning_efforts_by_model()
 
     assert dict(presets) == {
+        "gpt-6.2-sol": ("ultra",),
+        "gpt-6.2-astra": ("ultra",),
         "gpt-6-astra": ("ultra",),
         "gpt-5.6-sol": ("ultra",),
         "gpt-5.6-terra": ("ultra",),
@@ -871,8 +873,8 @@ def test_codex_explicit_catalog_visibility_overrides_local_hidden(
         schedule_refresh=False,
     )
 
-    assert picker_snapshot["models"][0] == "gpt-6-astra"
-    assert builtin_snapshot["models"][0]["id"] == "gpt-6-astra"
+    assert "gpt-6-astra" in picker_snapshot["models"]
+    assert "gpt-6-astra" in {row["id"] for row in builtin_snapshot["models"]}
 
 
 def test_codex_local_efforts_override_remote_metadata(monkeypatch, tmp_path):
@@ -1025,7 +1027,7 @@ def test_gpt_6_models_keep_existing_priorities_when_adding_terra():
     }
     ordered = sorted(codex.values(), key=lambda entry: entry["priority"])
 
-    assert [entry["id"] for entry in ordered[:5]] == [
+    assert [entry["id"] for entry in ordered[2:7]] == [
         "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra",
     ]
     assert codex["gpt-6.1-terra"]["reasoning_efforts"] == ["none", "low", "medium", "high", "xhigh", "max"]
@@ -1431,27 +1433,40 @@ def test_fetch_remote_catalog_rejects_malformed_model_metadata(monkeypatch, mode
         backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
 
 
-def test_fetch_remote_catalog_rejects_unknown_backend(monkeypatch):
+def test_published_feed_remains_readable_by_3_2_8(monkeypatch):
+    payload = json.loads(backend_model_catalog.get_bundled_catalog_path().read_text())
+    # Released readers strictly reject any extra key in this map and ignore
+    # unknown top-level fields. Exercise the legacy view, not our normalized one.
+    assert set(payload["backends"]) == {"claude", "codex"}
+    legacy_view = {k: payload[k] for k in ("schema_version", "backends")}
+    monkeypatch.setattr(backend_model_catalog.urllib.request, "urlopen", lambda *a, **kw: _FakeResponse(legacy_view))
+    rows = backend_model_catalog.fetch_remote_catalog()["backends"]["codex"]["models"]
+    assert [row["id"] for row in rows[:2]] == ["gpt-6.2-sol", "gpt-6.2-astra"]
+
+
+def test_fetch_remote_catalog_ignores_unknown_backends(monkeypatch):
     monkeypatch.setattr(
         backend_model_catalog.urllib.request,
         "urlopen",
         lambda request, timeout: _FakeResponse(
             {
                 "schema_version": 1,
-                "backends": {"codxe": {"models": [{"id": "gpt-typo"}]}},
+                "backends": {"codex": {"models": [{"id": "known"}]}, "future": "opaque"},
+                "additional_backends": {"other": {"unfamiliar_shape": True}},
             }
         ),
     )
 
-    with pytest.raises(ValueError, match="unsupported backend"):
-        backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
+    assert backend_model_catalog.fetch_remote_catalog()["backends"] == {"codex": {"models": [{"id": "known"}]}}
 
 
 @pytest.mark.parametrize(
     ("position", "model", "label", "expected_efforts"),
     [
-        (0, "gpt-6-astra", "GPT-6-Astra", ["low", "medium", "high", "xhigh", "max", "ultra"]),
-        (1, "gpt-6.1-sol", "GPT-6.1-Sol", ["low", "medium", "high", "xhigh", "max"]),
+        (0, "gpt-6.2-sol", "GPT-6.2-Sol", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        (1, "gpt-6.2-astra", "GPT-6.2-Astra", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        (2, "gpt-6-astra", "GPT-6-Astra", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        (3, "gpt-6.1-sol", "GPT-6.1-Sol", ["low", "medium", "high", "xhigh", "max"]),
     ],
 )
 def test_bundled_codex_leading_models_have_declared_reasoning_efforts(position, model, label, expected_efforts):
