@@ -64,6 +64,7 @@ const mocks = vi.hoisted(() => ({
   // What the composer's handle does when the page gives back an unanswered send.
   restoreUnsent: vi.fn((_unsent: unknown) => true),
   canRestoreUnsent: vi.fn(() => true),
+  withdrawUnsent: vi.fn((_unsent: unknown) => true),
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
 }));
 
@@ -173,7 +174,7 @@ vi.mock('./Composer', async () => {
       useImperativeHandle(props.ref, () => ({
         restoreUnsent: (unsent: unknown) => mocks.restoreUnsent(unsent),
         canRestoreUnsent: () => mocks.canRestoreUnsent(),
-        withdrawUnsent: () => false,
+        withdrawUnsent: (unsent: unknown) => mocks.withdrawUnsent(unsent),
       }));
       const [instance] = useState(() => {
         mocks.composerMounts += 1;
@@ -344,6 +345,7 @@ beforeEach(() => {
   mocks.readerPrincipal = null;
   mocks.restoreUnsent.mockReset().mockReturnValue(true);
   mocks.canRestoreUnsent.mockReset().mockReturnValue(true);
+  mocks.withdrawUnsent.mockReset().mockReturnValue(true);
   mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
     mocks.events = events;
@@ -438,6 +440,26 @@ describe('ChatPage optimistic send', () => {
     taken = true;
     await waitFor(() => expect(unsentKept()).toEqual([]), { timeout: 3000 });
     expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes a restored send back once the busy composer is free, when the conversation shows it', async () => {
+    storeUnsent();
+    mocks.readerPrincipal = 'local';
+    const latest = message('m1', 'earlier answer', { created_at: new Date().toISOString() });
+    mocks.api.listSessionMessages.mockResolvedValue({ messages: [latest], next_after_id: null, next_before_id: null });
+    mount();
+    await act(async () => live.resolve(bootstrap([latest])));
+    await waitFor(() => expect(mocks.restoreUnsent).toHaveBeenCalledTimes(1));
+
+    // Dictating when the instance's copy arrives: the box is not taken from now.
+    mocks.canRestoreUnsent.mockReturnValue(false);
+    act(() => mocks.events!.onMessageNew(message('m2', 'never answered', {
+      type: 'user', author: 'user', source: 'user', metadata: { client_message_id: 'c-1' },
+    })));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(mocks.withdrawUnsent).not.toHaveBeenCalled();
+    mocks.canRestoreUnsent.mockReturnValue(true);
+    await waitFor(() => expect(mocks.withdrawUnsent).toHaveBeenCalledWith(expect.objectContaining({ text: 'never answered' })), { timeout: 3000 });
   });
 
   it('keeps a typed send on the device until it is answered, and leaves a spoken one to its voice take', async () => {

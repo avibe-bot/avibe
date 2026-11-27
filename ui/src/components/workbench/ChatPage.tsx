@@ -1885,6 +1885,17 @@ export const ChatPage: React.FC = () => {
     if (pass?.sessionId === sessionId) {
       for (const [clientId, send] of pass.sends) {
         if (!held.has(clientId)) continue;
+        // Voice owning the draft, say: look again once it is free.
+        if (!composerRef.current.canRestoreUnsent()) {
+          const waiting = pass;
+          if (waiting.timer === null) {
+            waiting.timer = window.setTimeout(() => {
+              waiting.timer = null;
+              setRestoreRetry((n) => n + 1);
+            }, RESTORE_RETRY_MS);
+          }
+          continue;
+        }
         pass.sends.delete(clientId);
         composerRef.current.withdrawUnsent(send);
       }
