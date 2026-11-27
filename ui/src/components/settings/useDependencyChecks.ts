@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { DependenciesResult, DependencyItem, DependencyReadOptions } from '@/context/ApiContext';
 import { isApiFetchDeadlineAbort } from '@/lib/apiFetch';
+import { onPageReactivated } from '@/lib/pageActivity';
 import { dependenciesNeedAutomaticRefresh } from './SettingsDependenciesPage.logic';
 
 // Coupled rows use one inspection, including its failure evidence.
@@ -32,19 +33,22 @@ export function useDependencyChecks(read: ReadDependencies) {
   const requests = useRef(new Map<string, AbortController>());
   const [loginSessionState, setLoginSessionState] = useState<DependenciesResult['login_session_state']>(undefined);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const failed = useRef(new Set<string>());
 
   useEffect(() => {
     const active = requests.current;
     const scheduled = timers.current;
+    const failures = failed.current;
     return () => {
       for (const request of active.values()) request.abort();
       active.clear();
       for (const timer of scheduled.values()) clearTimeout(timer);
       scheduled.clear();
+      failures.clear();
     };
-  }, []);
+  }, [read]);
 
-  const refresh = useCallback(async (dependencyId?: string, allowInitialRetry = true) => {
+  const refresh = useCallback(async (dependencyId?: string, allowInitialRetry = true, allowFailureRetry = true) => {
     const groups = DEPENDENCY_CHECK_GROUPS.filter((ids) => (
       dependencyId === undefined || ids.some((id) => id === dependencyId)
     ));
@@ -53,6 +57,7 @@ export function useDependencyChecks(read: ReadDependencies) {
       requests.current.get(key)?.abort();
       clearTimeout(timers.current.get(key));
       timers.current.delete(key);
+      failed.current.delete(key);
       const controller = new AbortController();
       requests.current.set(key, controller);
       const update = (change: (previous: DependencyCheck, id: string) => DependencyCheck) => {
@@ -64,6 +69,7 @@ export function useDependencyChecks(read: ReadDependencies) {
       update((previous) => ({ ...previous, checking: true }));
       try {
         const result = await read({ ids, signal: controller.signal });
+        if (requests.current.get(key) !== controller || controller.signal.aborted) return;
         if (!result.ok || !Array.isArray(result.deps) || ids.some((id) => !result.deps.some((dep) => dep.id === id))) {
           throw new Error('Incomplete dependency inspection');
         }
@@ -77,17 +83,37 @@ export function useDependencyChecks(read: ReadDependencies) {
         }));
         if (requests.current.get(key) === controller && !controller.signal.aborted
           && dependenciesNeedAutomaticRefresh(result, allowInitialRetry)) {
-          timers.current.set(key, setTimeout(() => void refresh(key, false), 1_500));
+          timers.current.set(key, setTimeout(() => void refresh(key, false, allowFailureRetry), 1_500));
         }
       } catch (error) {
+        if (requests.current.get(key) !== controller || controller.signal.aborted) return;
+        failed.current.add(key);
         update((previous) => ({
           ...previous,
           checking: false,
           error: isApiFetchDeadlineAbort(error) ? 'timeout' : 'failed',
         }));
+        if (allowFailureRetry) {
+          timers.current.set(key, setTimeout(() => void refresh(key, false, false), 1_500));
+        }
       }
     }));
   }, [read]);
 
-  return { checks, refresh, checking: Object.values(checks).some((check) => check.checking), loginSessionState };
+  const retryFailed = useCallback(() => {
+    // refresh removes ownership from this set synchronously, so overlapping
+    // recovery signals cannot cancel or duplicate a retry already in flight.
+    for (const key of [...failed.current]) void refresh(key, false, false);
+  }, [refresh]);
+
+  useEffect(() => {
+    const stop = onPageReactivated(retryFailed);
+    window.addEventListener('online', retryFailed);
+    return () => {
+      stop();
+      window.removeEventListener('online', retryFailed);
+    };
+  }, [retryFailed]);
+
+  return { checks, refresh, retryFailed, checking: Object.values(checks).some((check) => check.checking), loginSessionState };
 }
