@@ -5683,7 +5683,7 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(status?.preferred, .tunnel)
         let handover = await withCheckedContinuation { continuation in
-            app.directHandoverProvider?(instance, true) { continuation.resume(returning: $0) }
+            app.directHandoverProvider?(instance, .sole) { continuation.resume(returning: $0) }
         }
         XCTAssertEqual(handover, .skipped(.notUsable))
 
