@@ -75,6 +75,14 @@ _FIXTURE_WAIT = re.compile(
     r"stage=bootstrap settled, elapsed=(?P<seconds>\d+(?:\.\d+)?) seconds"
 )
 _RUN_ENDED = "Test Suite 'All tests' failed"
+# PRs use test-without-building. Only XCTest's outer suite record followed by
+# xcodebuild's own verdict completes a selected run. Raw tee output has no
+# prefix; downloaded Actions logs prefix each line with an RFC3339 timestamp.
+_ACTIONS_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ")
+_SELECTED_END = re.compile(r"Test Suite 'Selected tests' failed at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+\.")
+_EXECUTE_FAILED = "** TEST EXECUTE FAILED **"
+_DRIVER_ERROR = re.compile(r"^\s*(?:xcodebuild:\s*)?(?:fatal\s+)?error:", re.I)
+_FILE_ERROR = re.compile(r":\d+(?::\d+)?:\s*(?:fatal\s+)?error:", re.I)
 ARTIFACT = "ios-simulator-stall"
 _RESTARTED = "Restarting after unexpected exit, crash, or test timeout"
 
@@ -126,16 +134,31 @@ def stalled_failures(lines: list[str], max_tests: int, *, selected: bool = False
     failed: list[_Case] = []
     erred: set[str] = set()
     ended = False
+    driver_ended = False
     for line in lines:
         error_of = _ERROR_OF.search(line)
+        if selected:
+            record = _ACTIONS_STAMP.sub("", line).strip()
+            if _DRIVER_ERROR.match(record) or (not error_of and _FILE_ERROR.search(record)):
+                return [], f"independent xcodebuild error: {record}"
+            if _SELECTED_END.fullmatch(record):
+                if ended or not failed or current is not None:
+                    return [], "unexpected selected suite completion"
+                ended = True
+            elif record == _EXECUTE_FAILED:
+                if not ended or driver_ended:
+                    return [], "unexpected xcodebuild completion"
+                driver_ended = True
         if error_of:
             erred.add(f"{error_of['cls']}.{error_of['method']}")
         if _RESTARTED in line:
             return [], "a test process crashed or timed out and was restarted"
-        if ("Test Suite 'Selected tests' failed" if selected else _RUN_ENDED) in line:
+        if not selected and _RUN_ENDED in line:
             ended = True
         case = _CASE.search(line)
         if case:
+            if selected and ended:
+                return [], "test activity after the selected suite ended"
             if case["event"] == "started":
                 # The test host's own log can split the previous test's end
                 # line, so a start also ends that test. Should that test have
@@ -159,7 +182,7 @@ def stalled_failures(lines: list[str], max_tests: int, *, selected: bool = False
                 current.evidence.append(line.strip())
                 if stall not in current.stalls:
                     current.stalls.append(stall)
-    if not ended:
+    if not ended or (selected and not driver_ended):
         return [], "the run did not complete"
     if not failed:
         return [], "no test failed: the run failed for another reason"

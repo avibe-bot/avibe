@@ -341,7 +341,8 @@ def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
 
 @pytest.mark.parametrize("mode, calls", [
     ("green", 1), ("stall", 2), ("normal assertion", 1), ("budget exhausted", 1),
-    ("extra failure", 1), ("missing contract", 1), ("rerun skipped", 2),
+    ("driver error", 1), ("unattributed file error", 1), ("suite mention", 1), ("early suite end", 1),
+    ("truncated driver", 1), ("extra failure", 1), ("missing contract", 1), ("rerun skipped", 2),
     ("wrong bundle", 2), ("rerun red", 2), ("extra rerun case", 2),
 ])
 def test_selected_execution_recovers_only_the_stalled_method(tmp_path, monkeypatch, capfd, mode, calls):
@@ -351,7 +352,19 @@ WebContent process (0x114121d80) took 30.805767 seconds to launch
 T.swift:1: error: {case} : Asynchronous wait failed: Exceeded timeout
 Test Case '{case}' failed (61 seconds).
 Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
+** TEST EXECUTE FAILED **
 """
+    end = "Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310."
+    if mode == "driver error":
+        log += "xcodebuild: error: Failed to collect test diagnostics: the test host disconnected.\n"
+    elif mode == "unattributed file error":
+        log += "Fixture.swift:27: error: Could not finalize the test session.\n"
+    elif mode == "suite mention":
+        log = log.replace(end, f"App: waiting for {end} no result yet")
+    elif mode == "early suite end":
+        log = end + "\n" + log.replace(end, "")
+    elif mode == "truncated driver":
+        log = log.replace("** TEST EXECUTE FAILED **", "")
     if mode == "normal assertion":
         log = log.replace("Asynchronous wait failed: Exceeded timeout", "XCTAssertEqual failed")
     seen = []
