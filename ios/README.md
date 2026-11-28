@@ -838,7 +838,20 @@ conforms to. Without a conforming controller the App offers neither:
   (`reverted` stays null: the page shows automatic and no line); a1, a2
   and c record when and from what. Not while the choice waits for the
   next launch. The App then sets the host back with `setDirectOnly(false)`
-  and opens the instance again.
+  and opens the instance again. Since 2026-11-28 also whenever a strict open
+  fails or runs out of time before its first load (B in "Never locked out").
+- **Never locked out** (Product, 2026-11-28). An open that fails or runs out
+  of time before its first load:
+  - under 「仅直连和中继」 goes back to automatic, with the dated line, and
+    opens again (B);
+  - for an automatic host whose every connection the listener gave up, with
+    none carried, takes the host off the store's route for the rest of the
+    process and opens again by WebKit's own path, as Safari does (C). The
+    next launch tries the listener again.
+  - 重试 on the failure screen tries one more way each press: the first goes
+    back to automatic for a strict instance, or through the listener again;
+    the second and later take the host off the route (C) and open by
+    WebKit's own path.
 - **A drop** (the controller counts one when a lost link has not come back
   in 10 s) is news, not a fallback: the App opens the instance again once
   through the route (stop, prepare, open), which is the one pass through

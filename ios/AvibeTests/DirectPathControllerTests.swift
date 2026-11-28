@@ -536,6 +536,89 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-1").closure, 1)
     }
 
+    /// A host the listener gave up every connection of, and carried none
+    /// for (both legs failing, as under a VPN whose addresses the public leg
+    /// refuses), may leave the route: once, for the rest of the process, and
+    /// its loads then go by WebKit's own path (no route, an open gate). A
+    /// host the listener has carried for keeps its route, unless asked with
+    /// `force` (the second 重试).
+    @MainActor
+    func testAHostTheListenerCannotCarryLeavesTheRouteOnce() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: baseline)
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+        XCTAssertFalse(controller.listenerCannotCarry(forInstanceURL: url))
+
+        harness.publicOrigin.streams.setMode(.fail)
+        harness.transport.streams.setMode(.fail)
+        let refused = LoopbackClient(port: port)
+        defer { refused.close() }
+        try await refused.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        let answer = try await refused.receiveUntilClosed()
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 50"))
+        try await eventually { controller.listenerCannotCarry(forInstanceURL: url) }
+
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: url))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .open)
+        XCTAssertFalse(controller.listenerCannotCarry(forInstanceURL: url))
+        // Once: nothing is left to take off, and the host gets no route
+        // again in this process.
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url))
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url, force: true))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+    }
+
+    @MainActor
+    func testAHostTheListenerCarriedForKeepsItsRouteUnlessForced() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: baseline)
+        let carried = LoopbackClient(port: port)
+        defer { carried.close() }
+        _ = try await establishPublic(carried, harness: harness)
+
+        harness.publicOrigin.streams.setMode(.fail)
+        harness.transport.streams.setMode(.fail)
+        let refused = LoopbackClient(port: port)
+        defer { refused.close() }
+        try await refused.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        _ = try await refused.receiveUntilClosed()
+        let clock = ContinuousClock()
+        let settled = clock.now.advanced(by: .milliseconds(500))
+        while clock.now < settled {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(controller.listenerCannotCarry(forInstanceURL: url))
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url))
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: url, force: true))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+    }
+
+    /// 「仅直连和中继」 is never taken off the route: it goes back to
+    /// automatic first (the App's own rule).
+    @MainActor
+    func testAStrictHostIsNotBypassed() async throws {
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url, force: true))
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+    }
+
     @MainActor
     func testCONNECTWaitsThroughHostDrainWithoutAnAnswerOrPublicDial() async throws {
         try await checkHeldCONNECT(strictAtFirstLoad: false)
