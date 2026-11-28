@@ -8,7 +8,15 @@ from storage.mobile_store import MobileStore, mobile_store_path
 from storage.models import device_function_settings as settings, device_health_links as health
 
 
-def snapshot(conn, viewer, instance, owner_email, now, *, paths=None):
+def _owns_health(row, viewer, owner_email, identity):
+    subject = (identity or {}).get("owner_subject")
+    if subject is None:
+        return gates.owns(row, viewer, owner_email)
+    return bool(viewer[2] and row["account"] and row["account"]["subject"] == subject
+                and (viewer[1] is None or viewer[1] == subject))
+
+
+def snapshot(conn, viewer, instance, owner_email, now, *, paths=None, health_identity=None):
     binding, subject, owner, caller = viewer
     gates.live_caller(conn, viewer, now)
     listed = device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=now, paths=paths, conn=conn)
@@ -41,10 +49,13 @@ def snapshot(conn, viewer, instance, owner_email, now, *, paths=None):
         row["functions"] = functions
     active_ids = {}
     unlinked = []
-    if owner and instance and owner_email and mobile_store_path().exists():
+    health_scope = health_identity if health_identity is not None else (
+        {"id": instance, "owner": owner_email} if instance and owner_email else {}
+    )
+    if owner and health_scope and mobile_store_path().exists():
         store = MobileStore()
         with store.transaction() as mobile:
-            for mid, func, legacy in mobile_registry.scoped_rows(mobile, instance, owner_email):
+            for mid, func, legacy in mobile_registry.scoped_rows(mobile, health_scope["id"], health_scope["owner"], health_scope.get("owner_subject")):
                 link = (
                     conn.execute(select(health).where(health.c.mobile_id == mid, health.c.binding == binding))
                     .mappings()
@@ -54,7 +65,7 @@ def snapshot(conn, viewer, instance, owner_email, now, *, paths=None):
                 if not row or row["push_only"] or not row["account"] or row["account"]["subject"] != link["subject"]:
                     unlinked.append(legacy)
                     continue
-                if not gates.owns(row, viewer, owner_email):
+                if not _owns_health(row, viewer, owner_email, health_scope):
                     unlinked.append(legacy)
                     continue
                 ids = active_ids.setdefault(row["id"], [])
@@ -69,8 +80,8 @@ def snapshot(conn, viewer, instance, owner_email, now, *, paths=None):
     return rows, active_ids, unlinked
 
 
-def change(conn, viewer, instance, owner_email, device, kind, on, now):
-    rows, active, unlinked = snapshot(conn, viewer, instance, owner_email, now)
+def change(conn, viewer, instance, owner_email, device, kind, on, now, *, health_identity=None):
+    rows, active, unlinked = snapshot(conn, viewer, instance, owner_email, now, health_identity=health_identity)
     if kind == "unlinkedHealth":
         if not viewer[2] or not any(h["pairing_id"] == device for h in unlinked):
             raise DeviceError("device_not_found", 404)
@@ -79,7 +90,9 @@ def change(conn, viewer, instance, owner_email, device, kind, on, now):
     row = rows.get(device)
     if not row:
         raise DeviceError("device_not_found", 404)
-    if not gates.owns(row, viewer, owner_email):
+    own = (_owns_health(row, viewer, owner_email, health_identity) if kind == "health"
+           else gates.owns(row, viewer, owner_email))
+    if not own:
         raise DeviceError("device_access_forbidden", 403)
     feature = next((f for f in row["functions"] if f["kind"] == kind), None)
     if feature is None or not feature["can_change"]:

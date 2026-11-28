@@ -1558,6 +1558,8 @@ scenarios:
       pending-owner recovery by HealthRequest.lifecycle.test.tsx. An explicit heart-metric
       expansion retains the credential and original data, negotiates capabilities,
       uploads all three synthetic summaries, and completes through the local CLI.
+      Both old email-only Cloud and new subject Cloud run this loop; null Cloud
+      email and a later email change retain the subject-bound connection and data.
   - id: AUTH-SETUP-914
     name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
     status: covered

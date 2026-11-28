@@ -10003,6 +10003,22 @@ def _device_owner_scope(viewer):
     return instance,None
 
 
+def _device_health_identity(viewer):
+    """Verify Health separately from the unchanged general device permissions."""
+    from core.handlers.mobile_health import current_identity, context_is_owner
+    from core.mobile_health_contract import MobileError
+    from storage.mobile_store import MobileStore, mobile_store_path
+    if not viewer or not viewer[2] or not mobile_store_path().exists():
+        return {}
+    try:
+        identity = current_identity(MobileStore(), retire=False)
+    except MobileError:
+        return {}
+    if viewer[3] and not context_is_owner(_request_authorization_context(), identity):
+        return {}
+    return identity
+
+
 def _network_access_external(config):
     if (_is_containerized_runtime() or _env_flag_enabled('VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS')
             or os.environ.get('VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST')):
@@ -10193,11 +10209,12 @@ async def device_list():
         from storage.importer import ensure_sqlite_state
         ensure_sqlite_state()
         scope = _device_owner_scope(viewer)
+        health_identity = _device_health_identity(viewer)
         with get_cached_sqlite_engine().connect() as conn:
             conn.exec_driver_sql('BEGIN')
             from storage.device_account_signout import recent
             now = int(time.time())
-            return (*device_catalog.snapshot(conn, viewer, *scope, now, paths=paths), recent(conn, _device_issuer_scope(viewer) or binding, subject, owner, now))
+            return (*device_catalog.snapshot(conn, viewer, *scope, now, paths=paths, health_identity=health_identity), recent(conn, _device_issuer_scope(viewer) or binding, subject, owner, now))
     try:
         rows, _, unlinked, history = await asyncio.to_thread(load)
     except DeviceError as exc:
@@ -10228,6 +10245,7 @@ def device_function(device_id):
     if not viewer or not viewer[0]:
         return jsonify({'error':'device_access_forbidden'}),403
     scope = _device_owner_scope(viewer)
+    health_identity = _device_health_identity(viewer)
     if request.method=='PUT' and (not isinstance(request.json,dict) or set(request.json)!={'on'} or type(request.json['on']) is not bool):
         return jsonify({'error':'invalid_device_function'}),400
     kind = 'unlinkedHealth' if request.path.startswith('/api/devices/unlinked-health/') else request.path.split('/')[4]
@@ -10236,13 +10254,13 @@ def device_function(device_id):
             now = int(time.time())
             conn.exec_driver_sql('BEGIN' if request.method=='GET' else 'BEGIN IMMEDIATE')
             if request.method=='GET':
-                rows,_,_ = device_catalog.snapshot(conn,viewer,*scope,now)
+                rows,_,_ = device_catalog.snapshot(conn,viewer,*scope,now,health_identity=health_identity)
                 feature = next((x for x in rows.get(device_id,{}).get('functions',[]) if x['kind']=='health'),None)
                 if not feature:
                     raise DeviceError('device_not_found',404)
                 result = {'function':feature}
             else:
-                result = device_catalog.change(conn,viewer,*scope,device_id,kind,request.json['on'] if request.method=='PUT' else False,now)
+                result = device_catalog.change(conn,viewer,*scope,device_id,kind,request.json['on'] if request.method=='PUT' else False,now,health_identity=health_identity)
         return jsonify(result)
     except DeviceError as exc:
         return jsonify({'error':exc.code}),exc.status
@@ -10261,11 +10279,12 @@ def device_activity_list(device_id=None):
         limit = int(request.args.get('limit','25'))
     except ValueError:
         return jsonify({'error':'invalid_activity_limit'}),400
+    health_identity = _device_health_identity(viewer)
     try:
         with get_cached_sqlite_engine().connect() as conn:
             conn.exec_driver_sql('BEGIN')
             result = device_activity_feed.list_page(conn,viewer,_request_authorization_context(),*_device_owner_scope(viewer),
-                limit=limit,raw_cursor=request.args.get('cursor'),device=device_id or request.args.get('device_id'),health_only=device_id is not None)
+                limit=limit,raw_cursor=request.args.get('cursor'),device=device_id or request.args.get('device_id'),health_only=device_id is not None,health_identity=health_identity)
         response = jsonify(result)
         response.headers['Cache-Control']='no-store'
         return response

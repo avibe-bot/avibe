@@ -10,7 +10,7 @@ import secrets
 import sys
 
 from core.handlers.mobile_health import (
-    current_identity, notify_phone, publish_request_card, wait_for_request,
+    current_identity, live_owner, owner_error_details, notify_phone, publish_request_card, wait_for_request,
 )
 from core.mobile_health_contract import METRICS, MobileError, metrics
 from storage.lock import MigrationFileLock, remove_unheld_lock
@@ -136,13 +136,32 @@ def _request(store, operation, identity, args, *, names=METRICS, caller="local")
             remove_unheld_lock(lock.lock_path)
 
 
+def _owner_diagnostic(error):
+    details = owner_error_details(error, language="en")
+    if (error.code == "instance_eligibility_unavailable"
+            and (error.details or {}).get("reason") == "legacy_owner_unproven"):
+        details["next_action"] = "revoke_then_connect"
+    return details
+
+
 def execute(args) -> dict:
     # A remotely initiated Agent still runs this local binary. All instance
     # Agents may read; caller environment is audit identity, not an allowlist.
     caller = os.environ.get("AVIBE_AGENT_NAME") or os.environ.get("AVIBE_CALLER_BACKEND") or "local"
     session_id = os.environ.get("AVIBE_SESSION_ID")
-    store = MobileStore()
     command = args.mobile_command
+    if args.mobile_group == "health" and command == "status":
+        try:
+            live_owner()  # Unresolved diagnostics must not create or open the private store.
+            store = MobileStore()
+            current_identity(store)
+        except MobileError as error:
+            if error.code != "instance_eligibility_unavailable":
+                raise
+            return {"kind": "mobile_health", "read_allowed": False, "sync_state": "unknown",
+                    "diagnostic": _owner_diagnostic(error)}
+        return {"kind": "mobile_health", "read_allowed": True, **store.status()}
+    store = MobileStore()
     if args.mobile_group == "requests":
         if command == "show":
             return {"kind": "mobile_request", "request": store.show_request(args.request_id)}
@@ -163,8 +182,6 @@ def execute(args) -> dict:
     if command == "revoke":
         return {"kind": "mobile_health", **store.revoke(caller=caller, session_id=session_id)}
     identity = current_identity(store)
-    if command == "status":
-        return {"kind": "mobile_health", **store.status()}
     if command == "connect":
         request = _request(store, "health.connect", identity, args, caller=caller)
         if request is None:
@@ -197,7 +214,7 @@ def cmd_mobile(args) -> int:
         payload = {"schema_version": 1, "ok": True, **result}
         code = 0
     except MobileError as error:
-        payload = {"schema_version": 1, "ok": False, "kind": "error", "code": error.code, "error": error.code}
+        payload = {"schema_version": 1, "ok": False, "kind": "error", **_owner_diagnostic(error)}
         if error.details is not None:
             payload["details"] = error.details
         code = 1

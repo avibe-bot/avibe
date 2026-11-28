@@ -319,7 +319,7 @@ def test_worker_finishes_authorized_reset_including_private_health_store(reset_h
                          ' created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?)',
                          (device, device, 'inst_A', 'owner', device, '1', '[]', '2026-11-01', '2026-11-02'))
             conn.execute('INSERT INTO health_days VALUES(?,?,?,?,?)', (device, 'fixture', '2026-11-01', '{}', 'now'))
-        conn.execute('INSERT INTO pairings VALUES(?,?,?,?,?)', ('code', 'request', 'inst_A', 'owner', 'later'))
+        conn.execute('INSERT INTO pairings(code_hash,request_id,instance_id,owner,expires_at) VALUES(?,?,?,?,?)', ('code', 'request', 'inst_A', 'owner', 'later'))
     assert remote._drive_pending_pairing() == (True, 1)
     assert not gate.reset_in_progress() and local._installation_id() is None
     assert not V2Config.load().remote_access.vibe_cloud.instance_id

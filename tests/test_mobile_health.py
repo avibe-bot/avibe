@@ -107,7 +107,7 @@ def test_pairing_is_one_use_request_bound_and_stores_only_hashes(store, clock):
         assert row["credential_hash"] == hashlib.sha256(paired["credential"].encode()).hexdigest()
         assert paired["credential"] not in json.dumps(row)
         assert conn.execute("SELECT count(*) FROM pairings").fetchone()[0] == 0
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     assert store.path.stat().st_mode & 0o777 == 0o600
     assert store.show_request(request["id"])["state"] == "queued"
     store.cancel_request(request["id"])  # Finish the first connection before requesting another.
@@ -146,8 +146,8 @@ def test_targeted_disconnect_preserves_other_phone_data_and_pending_pairing(stor
 
 
 def test_health_read_audit_upgrades_v1_without_breaking_its_named_insert_and_cleanup(store, clock):
-    # The released v1 writer omitted device_id. An upgraded install must remain usable
-    # on rollback; neither legacy nor rollback reads acquire an invented attribution.
+    # Released rows omitted device_id. Preserve unattributed audit history while
+    # the subject migration version fence separately refuses old binaries.
     with store.transaction() as conn:
         conn.execute('ALTER TABLE accesses DROP COLUMN device_id')
         v1_insert = ('INSERT INTO accesses(at,caller,session_id,operation,metrics,from_day,to_day) '
@@ -158,7 +158,7 @@ def test_health_read_audit_upgrades_v1_without_breaking_its_named_insert_and_cle
     paired, _ = pair_device(upgraded)
     upgraded.read(['steps'], '2026-11-18', '2026-11-18', caller='v2')
     with upgraded.transaction() as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
         conn.execute(v1_insert, v1_row)
         conn.execute('DELETE FROM accesses WHERE at<=?', ((clock[0] - timedelta(days=90)).isoformat(),))
         assert [r[0] for r in conn.execute("SELECT device_id FROM accesses WHERE operation='health.read' ORDER BY id")] == [None, paired['device_id'], None]
@@ -1958,12 +1958,13 @@ def test_heart_expansion_migration_preserves_released_rows_and_old_named_writers
     with store.transaction() as conn:
         before = {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
                   for table in ("devices", "health_days", "metric_sync")}
+        conn.execute("DROP INDEX requests_consent_owner")
         conn.execute("ALTER TABLE requests DROP COLUMN consent_device_id")
     upgraded = MobileStore(store.path)
     with upgraded.transaction() as conn:
         for table, rows in before.items():
             assert [dict(row) for row in conn.execute(f"SELECT * FROM {table}")] == rows
-        # The original, named UPDATE ignores the additive column after downgrade.
+        # Named legacy updates retain their data shape; schema v2 refuses old binaries.
         conn.execute("UPDATE requests SET caller=? WHERE id=?", ("released-writer", request["id"]))
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     assert upgraded.show_request(request["id"])["minimum_health_version"] == 1

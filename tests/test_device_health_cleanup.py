@@ -42,6 +42,8 @@ def code_for(store, viewer, *, legacy_initial=False):
 
 @pytest.mark.parametrize("bulk", [False, True])
 def test_expired_cookie_pair_survives_signout_and_stays_individually_removable(install, bulk):
+    install.remote_access.vibe_cloud.instance_secret = "fixture-runtime-credential"
+    install.save()
     store = MobileStore()
     _, viewer, target = phone(install, "old")
     identity, payload = code_for(store, viewer)

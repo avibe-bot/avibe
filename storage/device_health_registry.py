@@ -141,13 +141,13 @@ def maintain(engine, now, cancel=None):
                         conn.execute(links.delete().where(match))
 
 
-def scoped_rows(conn, instance, owner):
+def scoped_rows(conn, instance, owner, owner_subject=None):
     rows = conn.execute(
         """SELECT d.id,d.name,d.metrics,json_extract(d.manifest,'$.os_version') AS os_version,
             d.last_seen,max(s.synced_at) AS latest,group_concat(CASE WHEN s.synced_at IS NOT NULL THEN s.metric END) AS synced
         FROM devices d LEFT JOIN metric_sync s ON s.device_id=d.id
-        WHERE d.instance_id=? AND d.owner=? AND d.revoked_at IS NULL GROUP BY d.id""",
-        (instance, owner),
+        WHERE d.instance_id=? AND d.owner_subject IS ? AND (d.owner_subject IS NOT NULL OR d.owner=?) AND d.revoked_at IS NULL GROUP BY d.id""",
+        (instance, owner_subject, owner),
     )
     for row in rows:
         keys = row["synced"].split(",") if row["synced"] else []

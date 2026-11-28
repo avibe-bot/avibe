@@ -1946,6 +1946,12 @@
   "mcp_oauth_start_rejected": "This MCP OAuth link must be opened from Avibe.",
   "mobile": {
     "health": {
+      "owner": {
+        "cloud_unavailable": "Can't reach Cloud. Health sync is paused and your data is kept. Check the Cloud connection and try again.",
+        "cloud_owner_subject_unsupported": "Avibe Cloud is out of date. Health sync is paused and your data is kept. Update Avibe Cloud and try again.",
+        "legacy_owner_unproven": "This health connection can't confirm its owner. Sync is paused and your data is kept. Disconnect and reconnect Health (this clears old data and restores the last 30 days).",
+        "owner_record_missing": "Cloud is missing this instance's owner. Health sync is paused and your data is kept. Contact Avibe support."
+      },
       "requestCreated": "Health data requested on iPhone.",
       "connectTitle": "{name} requests access to your health data",
       "refreshTitle": "{name} requests a health data update",
