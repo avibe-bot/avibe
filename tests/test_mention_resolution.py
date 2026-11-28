@@ -97,7 +97,11 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "Code span `#<sescode00001>` and `#sescode00002` stay untouched.\n"
         "```\n#<sesfence0001>\n#sesfence0002\n```\n"
         "~~~\n#sestilde0001\n~~~\n"
-        "URL fragment https://example.com/page#sesurl000001 and [link](#seslink00001) and <https://example.com/#sesauto00001> stay untouched."
+        "    #<sesindent001>\n"
+        "\t#sesindent002\n"
+        "URL fragment https://example.com/page#sesurl000001, [see #seslabel0001](https://example.com), "
+        "[link](#seslink00001), and <https://example.com/#sesauto00001> stay untouched.\n"
+        "```ts\n#sesstreaming1\n"
     )
     sids, bots = extract_mention_candidates(text_body, include_bare_sessions=True)
     assert sids == ["sesw34zgzgcvp", "ses6jr7c5h2q6"]
@@ -359,6 +363,7 @@ def test_im_delivery_formats_links_per_platform_and_public_url(tmp_path, monkeyp
     )
 
     expected_link = r"[Fix \[auth\] redirect](https://demo.avibe.bot/chat/sesw34zgzgcvp)"
+    expected_plain = r"Fix \[auth\] redirect"
     for platform in ("slack", "discord", "telegram", "lark"):
         with_url = render_im_mentions(
             source, platform=platform, config=public_cfg, db_path=db_path
@@ -371,7 +376,7 @@ def test_im_delivery_formats_links_per_platform_and_public_url(tmp_path, monkeyp
             source, platform=platform, config=local_cfg, db_path=db_path
         )
         assert without_url == (
-            "Started Fix [auth] redirect (also Fix [auth] redirect) with @产品伙伴; "
+            f"Started {expected_plain} (also {expected_plain}) with @产品伙伴; "
             "unknown #<sesmissing99> and `#<sesw34zgzgcvp>` stay literal."
         )
 
@@ -380,10 +385,33 @@ def test_im_delivery_formats_links_per_platform_and_public_url(tmp_path, monkeyp
         source, platform="wechat", config=public_cfg, db_path=db_path
     )
     assert wechat_out == (
-        "Started Fix [auth] redirect (also Fix [auth] redirect) with @产品伙伴; "
+        f"Started {expected_plain} (also {expected_plain}) with @产品伙伴; "
         "unknown #<sesmissing99> and `#<sesw34zgzgcvp>` stay literal."
     )
     assert "https://demo.avibe.bot" not in wechat_out
+
+    # Plain-title IM output escapes Markdown metacharacters so untrusted titles
+    # cannot inject links or formatting, and outer Markdown links are never nested.
+    with engine.begin() as conn:
+        _seed_project_session(
+            conn,
+            project_name="Main",
+            folder=str(tmp_path / "main"),
+            session_id="sesmarkup001",
+            title="*[phish](https://evil.test)*",
+        )
+    plain_markup_tg = TelegramFormatter().render(
+        render_im_mentions(
+            "See #<sesmarkup001> and [outer #sesw34zgzgcvp](https://example.com).",
+            platform="telegram",
+            config=local_cfg,
+            db_path=db_path,
+        )
+    )
+    assert "evil.test</a>" not in plain_markup_tg
+    assert "<i>" not in plain_markup_tg
+    assert "*[phish](https://evil.test)*" in plain_markup_tg
+    assert '<a href="https://example.com">outer #sesw34zgzgcvp</a>' in plain_markup_tg
 
     # Verify each real platform formatter renders the escaped Markdown link cleanly.
     telegram_html = TelegramFormatter().render(
@@ -496,6 +524,79 @@ def test_web_push_resolves_mentions_before_truncation(tmp_path):
             or "{}"
         )
         assert projected_inbox["data"]["preview_text"] == "Started 登录跳转修复."
+
+        # Non-owner viewer on SSE receives neither restricted-Project nor Bot mentions.
+        with engine.begin() as conn:
+            proj_secret, _ = _seed_project_session(
+                conn,
+                project_name="SecretProj",
+                folder=str(tmp_path / "secret"),
+                session_id="sessecret001",
+                title="Top Secret",
+            )
+            from storage import project_access_service
+
+            res = project_access_service.apply_project_access_intent(
+                conn,
+                {
+                    "project_id": proj_secret["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "bindings": [],
+                },
+            )
+            assert res.outcome == "applied"
+
+        BotService(VibeAgentStore(_db_path)).create_bot(
+            display_name="产品伙伴",
+            handle="product",
+            authorization_context=_owner_context(),
+        )
+
+        secret_msg = json.dumps(
+            {
+                "type": "message.new",
+                "data": {
+                    "id": "msg_2",
+                    "session_id": "sesmain00001",
+                    "author": "agent",
+                    "text": "Check #<sesw34zgzgcvp>, #<sessecret001>, #<ses_product>, and @<bot:product>.",
+                    "content": {},
+                    "metadata": {},
+                },
+            }
+        )
+        viewer_msg = json.loads(
+            ui_server._workbench_event_payload_for_context(
+                _viewer_context("viewer-1"), "message.new", secret_msg
+            )
+            or "{}"
+        )
+        assert viewer_msg["data"]["content"]["references"] == [
+            {
+                "kind": "session",
+                "session_id": "sesw34zgzgcvp",
+                "title": "登录跳转修复",
+                "openable": True,
+            }
+        ]
+
+        secret_inbox = json.dumps(
+            {
+                "type": "inbox.session.updated",
+                "data": {
+                    "session_id": "sesmain00001",
+                    "preview_text": "See #sessecret001 and @<bot:product>.",
+                },
+            }
+        )
+        viewer_inbox = json.loads(
+            ui_server._workbench_event_payload_for_context(
+                _viewer_context("viewer-1"), "inbox.session.updated", secret_inbox
+            )
+            or "{}"
+        )
+        assert viewer_inbox["data"]["preview_text"] == "See #sessecret001 and @<bot:product>."
 
 
 @pytest.mark.asyncio

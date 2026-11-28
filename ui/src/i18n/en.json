@@ -4130,6 +4130,7 @@
     "sessionsEmpty": "No sessions in this project.",
     "sessionsLoadMore": "Load more",
     "untitledSession": "Untitled session",
+    "sessionMentionName": "#{{title}}",
     "sessionStatus": {
       "idle": "Idle",
       "running": "Running",

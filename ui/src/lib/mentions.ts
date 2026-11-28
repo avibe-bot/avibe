@@ -99,25 +99,27 @@ export function dedupeReferences(refs: MentionReference[]): MentionReference[] {
 }
 
 function escapeMarkdownLabel(value: string): string {
-  return value.replace(/[\\[\]]/g, (m) => `\\${m}`).replace(/\s*\n\s*/g, ' ');
+  return value.replace(/[\\[\]<>`]/g, (m) => `\\${m}`).replace(/\s*\n\s*/g, ' ');
 }
 
 export type LinkifyMentionsOptions = {
   /** Agent-reply mode: only resolved Sessions (in `references` with
-   *  `openable !== false`) and resolved Bots (in `references` or
-   *  `resolvedBotHandles`) become chips; bare `#ses...` is matched when resolved;
-   *  unresolved `<…>` markers stay exact plain text (backslash-escaped before
-   *  `<` so CommonMark does not drop `<ses...>` as raw inline HTML). */
+   *  `openable !== false`) and resolved Bots (in `references`) become chips;
+   *  bare `#ses...` is matched when resolved; unresolved `<…>` markers stay
+   *  exact plain text (backslash-escaped before `<` so CommonMark does not
+   *  drop `<ses...>` as raw inline HTML). */
   agentReply?: boolean;
-  /** Known live Bot handles from client context (optional supplement to `references`). */
-  resolvedBotHandles?: ReadonlySet<string>;
 };
 
+const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
+
 // Segments skipped verbatim during mention rewriting: fenced code blocks
-// (backticks or tildes), inline code spans, autolinks (`<https://...>`), and
-// Markdown link/image destinations (`](...)`).
+// (closed or still-open while streaming), inline code spans, autolinks
+// (`<https://...>`), full Markdown links (`[label](dest)` — so mentions inside
+// an existing link label never create nested links), and bare link destinations
+// (`](dest)` — fallback when a link label itself contains nested brackets).
 const SKIP_SEGMENT_RE =
-  /```[\s\S]*?```|~~~[\s\S]*?~~~|(`+)[^`\n]+?\1|<https?:\/\/[^>\s]+>|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
+  /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|(`+)[^`\n]+?\1|<https?:\/\/[^>\s]+>|\[[^\]\n]*\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
 
 /**
  * Rewrite `@<…>` / `#<…>` (and, in Agent replies, resolved bare `#ses...`)
@@ -138,7 +140,6 @@ export function linkifyMentions(
   options?: LinkifyMentionsOptions,
 ): EditedText {
   const agentReply = Boolean(options?.agentReply);
-  const resolvedBotHandles = options?.resolvedBotHandles;
   const sessionRefs = new Map<string, SessionReference>();
   const botNames = new Map<string, string>();
   const botRefHandles = new Set<string>();
@@ -208,7 +209,7 @@ export function linkifyMentions(
         const marker = parseAtMarker(inner);
         if (marker.target === 'bot') {
           const handle = marker.name.trim();
-          if (botRefHandles.has(handle) || resolvedBotHandles?.has(handle)) {
+          if (botRefHandles.has(handle)) {
             const label = escapeMarkdownLabel(`@${botNames.get(handle) || handle}`);
             const link = `[${label}](${MENTION_LINK_SCHEME}:bot:${encodeURIComponent(handle)})`;
             edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
@@ -226,7 +227,20 @@ export function linkifyMentions(
       },
     );
 
-  const rewrite = agentReply ? rewriteAgent : rewriteLegacy;
+  const rewriteLine = agentReply ? rewriteAgent : rewriteLegacy;
+  const rewrite = (segment: string, base: number): string => {
+    let at = base;
+    return segment
+      .split('\n')
+      .map((line, index) => {
+        const lineAt = at;
+        at += line.length + 1;
+        const atLineStart = index > 0 || base === 0 || text[base - 1] === '\n';
+        if (atLineStart && INDENTED_CODE_LINE_RE.test(line)) return line;
+        return rewriteLine(line, lineAt);
+      })
+      .join('\n');
+  };
 
   // Partition on code blocks/spans, autolinks, and link destinations; rewrite
   // only the surrounding prose so markers in code and URLs stay literal.

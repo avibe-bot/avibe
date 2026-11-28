@@ -7,7 +7,10 @@ import type { MentionReference } from '@/lib/mentions';
 import { selectedMarkdown, wholeMarkdownRange } from './markdownSource';
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, opts?: Record<string, string>) =>
+      key === 'workbench.sessionMentionName' && opts?.title ? `#${opts.title}` : key,
+  }),
 }));
 
 afterEach(cleanup);

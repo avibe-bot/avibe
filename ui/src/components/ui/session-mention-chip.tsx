@@ -35,14 +35,23 @@ export const SessionMentionChip: React.FC<SessionMentionChipProps> = ({
   const inRouter = useInRouterContext();
   const liveTitle = useLiveSessionTitle(sessionId);
 
+  const trimmedLive = liveTitle?.trim() || '';
+  const trimmedProp = title?.trim() || '';
   let labelText: string | null = null;
-  if (liveTitle !== undefined) {
-    labelText = liveTitle?.trim() || t('workbench.untitledSession');
+  if (trimmedLive) {
+    labelText = trimmedLive;
+  } else if (liveTitle !== undefined) {
+    // Bot Sessions (`ses_<handle>`) store `title: null` in SQLite; the server
+    // supplies the Bot's display name in `title`, so a null SSE title must not
+    // replace it with "Untitled session".
+    labelText = sessionId.startsWith('ses_') && trimmedProp
+      ? trimmedProp
+      : t('workbench.untitledSession');
   } else if (title !== undefined) {
-    labelText = title?.trim() || t('workbench.untitledSession');
+    labelText = trimmedProp || t('workbench.untitledSession');
   }
 
-  const displayNode = labelText !== null ? `#${labelText}` : fallback;
+  const displayNode = labelText !== null ? t('workbench.sessionMentionName', { title: labelText }) : fallback;
   const tooltip = labelText ?? undefined;
 
   const chipClassName = cn(

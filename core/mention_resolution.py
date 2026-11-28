@@ -43,14 +43,17 @@ logger = logging.getLogger(__name__)
 # below SQLite's bind-parameter limit.
 _SQL_IN_CHUNK_SIZE = 400
 
-# Matches fenced code blocks (backticks or tildes), inline code spans
-# (matching backtick run lengths, no newline inside), autolinks (`<https://...>`),
-# and Markdown link/image destinations (`](...)`). Everything matched here is
-# passed through verbatim so code examples and URL fragments are never rewritten.
+# Matches fenced code blocks (closed or still-open while streaming), inline code
+# spans (matching backtick run lengths, no newline inside), autolinks
+# (`<https://...>`), full Markdown inline links (`[label](dest)` — so mentions
+# inside an existing link label never create nested links), and bare link
+# destinations (`](dest)` fallback when a label contains nested brackets).
+# Everything matched here is passed through verbatim.
 _SKIP_SEGMENT_RE = re.compile(
-    r"(?P<fence>```[\s\S]*?```|~~~[\s\S]*?~~~)"
+    r"(?P<fence>```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$))"
     r"|(?P<code_span>(?P<bt>`+)[^`\n]+?(?P=bt))"
     r"|(?P<autolink><https?://[^>\s]+>)"
+    r"|(?P<md_link>\[[^\]\n]*\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))"
     r"|(?P<link_dest>\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))",
 )
 
@@ -117,8 +120,18 @@ def _clean_title(value: Any) -> str:
     return _WHITESPACE_RE.sub(" ", cleaned).strip()
 
 
-def _escape_markdown_label(label: str) -> str:
-    return label.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+_MARKDOWN_ESCAPE_RE = re.compile(r"([\\[\]*_~`<>])")
+
+
+def _escape_markdown_text(value: str) -> str:
+    """Escape Markdown syntax characters in untrusted titles for IM delivery.
+
+    Every IM adapter in ``modules/im/`` honours CommonMark backslash escapes
+    (natively on Discord, and via ``hold_markdown_escapes`` on Slack, Telegram,
+    Feishu/Lark, and WeChat), so escaped titles render literally without turning
+    user-editable Session titles into live links or formatting.
+    """
+    return _MARKDOWN_ESCAPE_RE.sub(r"\\\1", value)
 
 
 def _configured_language(config: V2Config | None = None) -> str:
@@ -144,15 +157,31 @@ def _has_runtime_management_access(context: AuthorizationContext) -> bool:
 
 
 def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
-    """Yield ``(start, end, is_prose)`` partitioning *text* around code/URLs."""
+    """Yield ``(start, end, is_prose)`` partitioning *text* around code/URLs.
+
+    Skips fenced code blocks, inline code spans, autolinks, Markdown link
+    destinations, and CommonMark indented code lines (4+ leading spaces or a
+    leading tab at an actual line start).
+    """
+
+    def _split_indented_lines(seg_start: int, seg_end: int) -> Iterable[tuple[int, int, bool]]:
+        cursor = seg_start
+        while cursor < seg_end:
+            nl = text.find("\n", cursor, seg_end)
+            line_end = seg_end if nl < 0 else nl + 1
+            at_line_start = cursor == 0 or text[cursor - 1] == "\n"
+            is_indented = at_line_start and text.startswith(("    ", "\t"), cursor, line_end)
+            yield cursor, line_end, not is_indented
+            cursor = line_end
+
     pos = 0
     for match in _SKIP_SEGMENT_RE.finditer(text):
         if match.start() > pos:
-            yield pos, match.start(), True
+            yield from _split_indented_lines(pos, match.start())
         yield match.start(), match.end(), False
         pos = match.end()
     if pos < len(text):
-        yield pos, len(text), True
+        yield from _split_indented_lines(pos, len(text))
 
 
 def _might_contain_mentions(text: str, *, include_bare_sessions: bool) -> bool:
@@ -320,11 +349,13 @@ def render_mentions_as_text(
     *,
     include_bare_sessions: bool = True,
     link_session_url: Callable[[str], str | None] | None = None,
+    escape_markdown: bool = False,
 ) -> str:
     """Replace resolved mention markers in *text* with readable titles or links.
 
-    Unresolved markers, code spans, fenced code blocks, autolinks, and Markdown
-    link destinations stay verbatim.
+    Unresolved markers, code spans, fenced/indented code blocks, autolinks, and
+    Markdown links stay verbatim. When *escape_markdown* is True (IM delivery),
+    untrusted titles and display names have Markdown metacharacters escaped.
     """
     if not text or resolved.is_empty():
         return text
@@ -338,20 +369,25 @@ def render_mentions_as_text(
             session = resolved.sessions.get(bare)
             if session is None:
                 return match.group(0)
-            return _format_session_mention(session, link_session_url)
+            return _format_session_mention(
+                session, link_session_url, escape_markdown=escape_markdown
+            )
         trigger = match.group("trigger")
         inner = (match.group("inner") or "").strip()
         if trigger == "#":
             session = resolved.sessions.get(inner)
             if session is None:
                 return match.group(0)
-            return _format_session_mention(session, link_session_url)
+            return _format_session_mention(
+                session, link_session_url, escape_markdown=escape_markdown
+            )
         if trigger == "@" and inner.startswith("bot:"):
             handle = inner[4:].strip()
             bot = resolved.bots.get(handle)
             if bot is None:
                 return match.group(0)
-            return f"@{bot.display_name}"
+            name = _escape_markdown_text(bot.display_name) if escape_markdown else bot.display_name
+            return f"@{name}"
         return match.group(0)
 
     parts: list[str] = []
@@ -364,10 +400,14 @@ def render_mentions_as_text(
 def _format_session_mention(
     session: ResolvedSession,
     link_session_url: Callable[[str], str | None] | None,
+    *,
+    escape_markdown: bool = False,
 ) -> str:
     url = link_session_url(session.session_id) if link_session_url is not None else None
     if url:
-        return f"[{_escape_markdown_label(session.display_title)}]({url})"
+        return f"[{_escape_markdown_text(session.display_title)}]({url})"
+    if escape_markdown:
+        return _escape_markdown_text(session.display_title)
     return session.display_title
 
 
@@ -439,6 +479,7 @@ def render_im_mentions(
         resolved,
         include_bare_sessions=True,
         link_session_url=link_fn,
+        escape_markdown=True,
     )
 
 

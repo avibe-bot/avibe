@@ -75,8 +75,7 @@ const imFixtures = workbenchFixtures({
   '/api/config': { ...settingsConfig, language: undefined },
 });
 
-function SlackMentionPreview() {
-  return (
+const renderSlackMentionPreview = () => (
     <div className="flex min-h-full flex-col gap-4 bg-canvas p-5 text-foreground">
       <div className="rounded-xl border border-edge bg-surface p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between border-b border-edge pb-2">
@@ -162,7 +161,6 @@ function SlackMentionPreview() {
       </div>
     </div>
   );
-}
 
 const designFrames = frames([
   {
@@ -195,7 +193,7 @@ const designFrames = frames([
     status: 'shipped',
     themes: ['light'],
     fixtures: imFixtures,
-    render: () => <SlackMentionPreview />,
+    render: renderSlackMentionPreview,
   },
 ]);
 

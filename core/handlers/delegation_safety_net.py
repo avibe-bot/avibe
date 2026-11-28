@@ -39,7 +39,7 @@ def notice_message(session_id: str, reply: str) -> str:
         "[The dispatched Turn ended without writing back; its last reply is below. "
         f"Follow up with {address} only if you were waiting on it.]"
     )
-    pointer = f"\n\n[Reply truncated; use `vibe data query` to read #<{session_id}>'s transcript in full.]"
+    pointer = f"\n\n[Reply truncated; use `vibe data query` to read #{session_id}'s transcript in full.]"
     if len(body) > DEFAULT_RESULT_MAX_CHARS:
         body = body[:DEFAULT_RESULT_MAX_CHARS] + pointer
     return f"{header}\n{body}"

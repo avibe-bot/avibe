@@ -111,6 +111,59 @@ describe('Agent reply Session & Bot mentions in Markdown', () => {
     expect(link?.textContent).toBe('#Live Renamed Session');
   });
 
+  it('does not let a Session title containing $<SECRET_NAME> or <https://...> inject cards or nested links', () => {
+    const references: MentionReference[] = [
+      { kind: 'session', session_id: 'sessecret001', title: 'Rotate $<API_KEY> <https://evil.test>', openable: true },
+    ];
+    const { container } = render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Markdown content="See #<sessecret001>." references={references} agentMentions secretRequests readOnly />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    const link = container.querySelector('a[data-session-mention="sessecret001"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('#Rotate $<API_KEY> <https://evil.test>');
+    expect(container.querySelector('a[href="https://evil.test"]')).toBeNull();
+    // Must not render any SecretRequestCard button/input for API_KEY.
+    expect(container.querySelector('[data-secret-name]')).toBeNull();
+    expect(container.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('keeps Bot Session display name on null SSE title updates and restores server title on clearLiveSessionTitles', () => {
+    const references: MentionReference[] = [
+      { kind: 'session', session_id: 'ses_product', title: '产品伙伴', openable: true },
+      { kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Server Title', openable: true },
+    ];
+    const { container } = render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Markdown content="Talk to #<ses_product> about #<sesw34zgzgcvp>." references={references} agentMentions />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    const botSessionLink = container.querySelector('a[data-session-mention="ses_product"]');
+    const regularLink = container.querySelector('a[data-session-mention="sesw34zgzgcvp"]');
+    expect(botSessionLink?.textContent).toBe('#产品伙伴');
+    expect(regularLink?.textContent).toBe('#Server Title');
+
+    act(() => {
+      setLiveSessionTitle('ses_product', null);
+      setLiveSessionTitle('sesw34zgzgcvp', 'Stale SSE Title');
+    });
+    expect(botSessionLink?.textContent).toBe('#产品伙伴');
+    expect(regularLink?.textContent).toBe('#Stale SSE Title');
+
+    // Clearing the live overlay (e.g. on SSE stream gap) falls back to the fresh prop title.
+    act(() => {
+      clearLiveSessionTitles();
+    });
+    expect(regularLink?.textContent).toBe('#Server Title');
+  });
+
   it('renders a non-interactive span when interactive={false}', () => {
     const references: MentionReference[] = [
       { kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true },

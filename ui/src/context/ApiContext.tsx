@@ -3366,6 +3366,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    *  would otherwise go unnoticed), and every surface catches up. */
   const announceStreamGap = () => {
     noteLocalStoreStreamGap();
+    clearLiveSessionTitles();
     if (remoteReaderRef.current) void readAuthSession({ quiet: true }).catch(() => undefined);
     // A voice answer changed while the stream was away (``voice.consent.updated``) is read again.
     void refreshVoiceConsent();

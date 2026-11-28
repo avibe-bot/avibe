@@ -143,8 +143,12 @@ describe('linkifyMentions', () => {
     expect(text).toContain('`#sesw34zgzgcvp`');
   });
 
-  it('in agentReply mode, skips URL fragments and markdown link destinations', () => {
-    const input = 'See https://example.com/#sesw34zgzgcvp and [doc](#sesw34zgzgcvp) and #sesw34zgzgcvp.';
+  it('in agentReply mode, skips URL fragments, markdown links, indented code lines, and unclosed fences', () => {
+    const input =
+      'See https://example.com/#sesw34zgzgcvp, [see #sesw34zgzgcvp](https://example.com), '
+      + '[doc](#sesw34zgzgcvp), and #sesw34zgzgcvp.\n\n'
+      + '    #<sesw34zgzgcvp>\n    #<sesmissing99>\n\t#sesw34zgzgcvp\n\n'
+      + '```ts\n#sesw34zgzgcvp\n#<sesmissing99>';
     const { text, edits } = linkifyMentions(
       input,
       [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
@@ -156,7 +160,24 @@ describe('linkifyMentions', () => {
       ['#sesw34zgzgcvp', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
     ]);
     expect(text).toContain('https://example.com/#sesw34zgzgcvp');
+    expect(text).toContain('[see #sesw34zgzgcvp](https://example.com)');
     expect(text).toContain('[doc](#sesw34zgzgcvp)');
+    expect(text).toContain('    #<sesw34zgzgcvp>\n    #<sesmissing99>\n\t#sesw34zgzgcvp');
+    expect(text).toContain('```ts\n#sesw34zgzgcvp\n#<sesmissing99>');
+  });
+
+  it('escapes angle brackets and backticks in resolved titles so autolinks cannot nest', () => {
+    const input = 'See #<sesw34zgzgcvp>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Check <https://evil.test> `code`', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Check \\<https://evil.test\\> \\`code\\`](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
   });
 });
 

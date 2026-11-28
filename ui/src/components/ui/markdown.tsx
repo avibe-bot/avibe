@@ -36,7 +36,6 @@ import {
   type MentionReference,
   type SessionReference,
 } from '@/lib/mentions';
-import { useBots } from '@/context/BotsContext';
 import { BotMentionChip } from './bot-mention-chip';
 import { SessionMentionChip } from './session-mention-chip';
 import { cn, copyTextToClipboard } from '@/lib/utils';
@@ -506,11 +505,6 @@ export const Markdown: React.FC<{
   onOpenLocalFile,
   readOnly = false,
 }) => {
-  const { bots } = useBots();
-  const resolvedBotHandles = React.useMemo(
-    () => (agentMentions && bots.length > 0 ? new Set(bots.map((bot) => bot.handle)) : undefined),
-    [agentMentions, bots],
-  );
   const sessionRefMap = React.useMemo(() => {
     const map = new Map<string, SessionReference>();
     for (const ref of references ?? []) {
@@ -536,24 +530,27 @@ export const Markdown: React.FC<{
     let text = content;
     let binding = citations ?? null;
     const passes: TextEdit[][] = [];
-    if (agentMentions || (references && references.length)) {
-      const pass = linkifyMentions(
-        text,
-        references,
-        agentMentions ? { agentReply: true, resolvedBotHandles } : undefined,
-      );
-      text = pass.text;
-      binding = remapCitations(binding, pass.edits);
-      passes.push(pass.edits);
-    }
+    // Run secret-request detection BEFORE mention rewriting so user-editable
+    // Session or Bot titles (e.g. a Session titled `$<API_KEY>`) inserted by
+    // `linkifyMentions` can never manufacture a SecretRequestCard.
     if (secretRequests) {
       const pass = linkifySecretRequests(text);
       text = pass.text;
       binding = remapCitations(binding, pass.edits);
       passes.push(pass.edits);
     }
+    if (agentMentions || (references && references.length)) {
+      const pass = linkifyMentions(
+        text,
+        references,
+        agentMentions ? { agentReply: true } : undefined,
+      );
+      text = pass.text;
+      binding = remapCitations(binding, pass.edits);
+      passes.push(pass.edits);
+    }
     return { text, binding, passes };
-  }, [content, references, agentMentions, resolvedBotHandles, secretRequests, citations]);
+  }, [content, references, agentMentions, secretRequests, citations]);
   const sourceRef = React.useCallback(
     (root: HTMLDivElement | null) => {
       if (root) bindMarkdownSource(root, { content, text: prepared.text, passes: prepared.passes });
