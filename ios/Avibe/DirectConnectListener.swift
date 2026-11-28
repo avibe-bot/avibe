@@ -843,6 +843,29 @@ actor DirectConnectListener {
         }
     }
 
+    /// Returns once every committed `backend` relay for `host` has carried
+    /// no bytes either way for `quietSeconds`, or after `waitSeconds`,
+    /// whichever comes first. Nothing is closed: a change of the host's
+    /// policy waits here so that it does not cut what the page is loading,
+    /// and then drains (`drainHost`).
+    func waitUntilQuiet(
+        host: String,
+        backend: DirectRelayBackend,
+        quietSeconds: TimeInterval,
+        waitSeconds: TimeInterval,
+        clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) async {
+        let deadline = clock() + waitSeconds
+        while true {
+            let now = clock()
+            let busy = handoverCandidates(host: host, backend: backend, quietSeconds: quietSeconds, now: now).busy
+            if busy == 0 || now >= deadline || Task.isCancelled {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     /// The committed `backend` relays for `host`: those quiet for
     /// `quietSeconds` at `now`, and how many are not.
     private func handoverCandidates(

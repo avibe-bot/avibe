@@ -1157,7 +1157,7 @@ final class DirectPathController {
     func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
         guard let authority = DirectAuthority(instanceURL: url) else { return .open }
         let host = authority.host
-        if rewriting.contains(host) { return .held }
+        if rewriting.contains(host) || cuttingOver.contains(host) { return .held }
         let strict = needsListener(host)
         guard routeOwner.routes(host, store: websiteDataStore.identifier), let listener else {
             return strict ? .held : .open
@@ -1406,13 +1406,14 @@ final class DirectPathController {
         onAvailabilityChanged()
     }
 
-    /// One change of policy at a time per host. It first lets the host's
-    /// tunnel connections go quiet, for a bounded time, and closes those:
-    /// the page has just opened and may still be loading, and a load cut
-    /// there is not made again. Plans go on as they were meanwhile. Then
-    /// the drain: new plans wait; in-flight plans also fail their commit
-    /// check. Sample the latest choice after the drain so a late completion
-    /// cannot reverse a newer choice or touch another store.
+    /// One change of policy at a time per host. It first waits, for a
+    /// bounded time, until the host's tunnel connections carry nothing: the
+    /// page has just opened and may still be loading, and a load cut there
+    /// is not made again. Plans go on as they were meanwhile; a load the
+    /// shell would start waits (`loadGate`). Then the drain: new plans
+    /// wait; in-flight plans also fail their commit check. Sample the
+    /// latest choice after the drain so a late completion cannot reverse a
+    /// newer choice or touch another store.
     ///
     /// The page is told of what was closed as of any other closure, so it
     /// opens its stream again and catches up. Nothing is reloaded.
@@ -1423,7 +1424,7 @@ final class DirectPathController {
         policyGeneration[host, default: 0] &+= 1
         let quietWait = timing.cutoverQuietSeconds
         Task { [weak self] in
-            let quiet = await listener.closeQuietRelays(
+            await listener.waitUntilQuiet(
                 host: host, backend: .publicOrigin,
                 quietSeconds: Self.handoverQuietSeconds, waitSeconds: quietWait
             )
@@ -1445,7 +1446,7 @@ final class DirectPathController {
             }
             // After the policy is in force: the connections the page opens
             // in answer are planned under it.
-            if quiet.closed + drained > 0 {
+            if drained > 0 {
                 self.recordClosure(hosts: [host])
             }
             self.onAvailabilityChanged()
