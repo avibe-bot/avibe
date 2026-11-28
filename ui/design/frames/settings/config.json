@@ -356,9 +356,6 @@
       "auto_update": true,
       "default_agent": null,
       "default_reasoning_effort": null,
-      "error_retry_limit": 1,
-      "active_turn_timeout_seconds": 0,
-      "legacy_turn_timeout_neutralized": true,
       "default_provider": null
     },
     "claude": {

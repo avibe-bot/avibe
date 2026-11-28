@@ -48,12 +48,6 @@ const baseConfig = {
   remote_access: { vibe_cloud: { paired: true } },
   ui: { chat_message_font_size: 14, show_agent_activity: false, show_tool_calls: true },
   slack: { disable_link_unfurl: false },
-  agents: {
-    opencode: {
-      error_retry_limit: 2,
-      active_turn_timeout_seconds: 5400,
-    },
-  },
 };
 
 const localOwner: InstanceAuthorizationValue = {
@@ -158,15 +152,17 @@ describe('SettingsMessagingPage locality gating', () => {
     expect(screen.queryByText('dashboard.showPagesPrompt')).toBeNull();
   });
 
-  it('shows the protected messaging controls to a local owner', async () => {
+  it('does not render the removed OpenCode retry or turn-limit controls even for a local owner', async () => {
     renderPage(localOwner);
 
-    expect(await screen.findByText('dashboard.errorRetryLimit')).toBeTruthy();
-    expect(screen.getByText('dashboard.opencodeActiveTurnTimeout')).toBeTruthy();
+    expect(await screen.findByText('dashboard.ackMode')).toBeTruthy();
+    expect(screen.getByText('dashboard.showDuration')).toBeTruthy();
+    expect(screen.queryByText('dashboard.errorRetryLimit')).toBeNull();
+    expect(screen.queryByText('dashboard.opencodeActiveTurnTimeout')).toBeNull();
     expect(screen.queryByText('dashboard.showPagesPrompt')).toBeNull();
   });
 
-  it('keeps owner-only runtime messaging controls hidden from an Editor', async () => {
+  it('keeps removed controls absent for an Editor', async () => {
     renderPage(remoteEditor);
 
     await screen.findByText('dashboard.ackMode');

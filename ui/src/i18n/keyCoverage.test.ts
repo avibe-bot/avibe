@@ -1017,8 +1017,6 @@ const NON_KEY_LITERALS = [
   'vibe.webPush.endpoints',
 
   // Config field paths, addressed against the V2 config rather than a bundle.
-  'agents.opencode.active_turn_timeout_seconds',
-  'agents.opencode.error_retry_limit',
   'platforms.enabled',
 
   // The Vault entry allowlist compares this hostname; it is not displayed copy.
@@ -1783,7 +1781,7 @@ describe('app i18n key coverage', () => {
         'card.total',
         'editor.background',
         'projects.changed',
-        'agents.opencode.error_retry_limit',
+        'agents.opencode.default_provider',
         'avibe.editor.fontSize.v1',
       ],
       [

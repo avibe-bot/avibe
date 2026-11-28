@@ -237,7 +237,6 @@ class _OpenCodeSteerState:
     reconcile_initial_status: bool = False
     status_reconciliation_failures: int = 0
     terminal_status_failure_messages: list[Dict[str, Any]] | None = None
-    terminal_status_failure_generation: int = 0
     # The generation whose process runs this native turn.
     generation: Any = None
 
@@ -714,23 +713,8 @@ class _SteeringAwareOpenCodeServer:
 
     async def prompt_async(self, *args, **kwargs) -> None:
         async with self._state.lock:
-            terminal_messages = self._state.terminal_status_failure_messages
-            if terminal_messages is not None:
-                # The normal poll loop retries a first native error with
-                # "continue". Do not dispatch new work after reconciliation
-                # already proved terminal; advance only the synthetic evidence
-                # ID so its existing retry budget reaches terminal delivery.
-                self._state.terminal_status_failure_generation += 1
-                failure = terminal_messages[-1]
-                info = dict(failure.get("info", {}))
-                info["id"] = (
-                    f"avibe-status-reconciliation:{self._state.native_session_id}:"
-                    f"{self._state.terminal_status_failure_generation}"
-                )
-                self._state.terminal_status_failure_messages = [
-                    *terminal_messages[:-1],
-                    {**failure, "info": info},
-                ]
+            if self._state.terminal_status_failure_messages is not None:
+                # Do not dispatch new work after reconciliation already proved terminal.
                 return
             kwargs_map = dict(kwargs)
             prompt_text = str(kwargs_map.get("text") or "")

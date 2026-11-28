@@ -247,7 +247,6 @@ ASR 超时或失败时不回显。
 - 输入处理：未来的语音转文字
 - Agent 上下文：当前时间、用户信息
 - 工作反馈：ACK 模式、耗时展示
-- 可靠性：OpenCode 错误重试次数
 - 输出格式：快捷回复按钮、Slack 链接预览
 - 范围 / 路由入口：允许的群组
 
@@ -270,8 +269,7 @@ ASR 超时或失败时不回显。
 3. **Work Feedback / 工作反馈**
    - ACK 模式。
    - 显示耗时。
-   - 错误重试次数。
-   - 这些设置影响 Vibe Remote 如何反馈运行中状态、如何处理一次 turn。错误重试保持在这里，因为产品方向是所有 backend 共享的重试设置，不是 OpenCode 独有设置。
+   - 这些设置影响 Vibe Remote 如何反馈运行中状态、如何处理一次 turn。（原 OpenCode 错误重试次数配置项与自动 `'continue'` 重试后续已移除。）
 
 4. **Reply Experience / 回复体验**
    - 快捷回复按钮。
@@ -337,4 +335,3 @@ UI 测试只有在现有 setup 能低成本覆盖 settings page 时才加。否�
 - 可用性：只给已配对 Vibe Cloud 的用户使用；后端同时检查最近 runtime status，并要求 `tunnel_running=true`。
 - 微信 Silk：第一版不支持；有微信官方语音转写文本时继续复用。
 - 回显：默认开启，ASR 成功后立刻发。
-- 错误重试：继续放在 Messaging / Work Feedback 下，作为所有 backend 共享设置。

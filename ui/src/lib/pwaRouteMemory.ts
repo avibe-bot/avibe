@@ -36,7 +36,7 @@ const RESTORABLE_EXACT_PATHS = new Set([
   ...AGENT_BACKENDS.map((backend) => backend.settingsRoute),
   '/settings/models',
   '/settings/dependencies',
-  '/settings/replies',
+  '/settings/messages',
   '/settings/diagnostics',
   '/settings/diagnostics/logs',
   '/settings/access',

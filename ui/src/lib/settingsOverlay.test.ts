@@ -55,7 +55,7 @@ describe('Settings overlay history', () => {
 describe('Settings overlay navigation ownership', () => {
   it('attaches one origin at desktop ingress and carries it through Settings', () => {
     const firstState = settingsOverlayNavigationState({
-      destinationPathname: '/settings/replies',
+      destinationPathname: '/settings/messages',
       desktop: true,
       historyState: { idx: 2 },
       source: origin().location,
@@ -67,7 +67,7 @@ describe('Settings overlay navigation ownership', () => {
     const nextState = settingsOverlayNavigationState({
       destinationPathname: '/settings/diagnostics',
       desktop: true,
-      source: location('/settings/replies', firstState),
+      source: location('/settings/messages', firstState),
       targetState: { draft: 'next' },
     });
     expect(settingsOverlayOriginFromState(nextState)).toEqual(origin());
@@ -89,7 +89,7 @@ describe('Settings overlay navigation ownership', () => {
 
   it('leaves mobile Settings ingress from an ordinary route as a primary route', () => {
     const state = settingsOverlayNavigationState({
-      destinationPathname: '/settings/replies',
+      destinationPathname: '/settings/messages',
       desktop: false,
       source: origin().location,
       targetState: undefined,
@@ -177,32 +177,32 @@ describe('Settings overlay navigation ownership', () => {
   it('exempts exactly the transitions that keep the route behind Settings mounted', () => {
     const current = origin().location;
     const overlayState = settingsOverlayNavigationState({
-      destinationPathname: '/settings/replies',
+      destinationPathname: '/settings/messages',
       desktop: true,
       historyState: { idx: 2 },
       source: current,
       targetState: undefined,
     });
-    const replies = location('/settings/replies', overlayState);
+    const messages = location('/settings/messages', overlayState);
     const nextSection = location('/settings/diagnostics', settingsOverlayNavigationState({
       destinationPathname: '/settings/diagnostics',
       desktop: true,
-      source: replies,
+      source: messages,
       targetState: undefined,
     }));
 
     // Opening over the current entry, and only that entry.
-    expect(settingsOverlayKeepsRetainedRoute(current, replies)).toBe(true);
-    expect(settingsOverlayKeepsRetainedRoute(location('/chat/another'), replies)).toBe(false);
-    expect(settingsOverlayKeepsRetainedRoute(current, location('/settings/replies'))).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(current, messages)).toBe(true);
+    expect(settingsOverlayKeepsRetainedRoute(location('/chat/another'), messages)).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(current, location('/settings/messages'))).toBe(false);
     // Moving between sections over the same origin.
-    expect(settingsOverlayKeepsRetainedRoute(replies, nextSection)).toBe(true);
+    expect(settingsOverlayKeepsRetainedRoute(messages, nextSection)).toBe(true);
     // Closing onto the origin, by history pop (same key) or by replace (new key).
-    expect(settingsOverlayKeepsRetainedRoute(replies, current)).toBe(true);
-    expect(settingsOverlayKeepsRetainedRoute(replies, { ...current, key: 'replaced' })).toBe(true);
+    expect(settingsOverlayKeepsRetainedRoute(messages, current)).toBe(true);
+    expect(settingsOverlayKeepsRetainedRoute(messages, { ...current, key: 'replaced' })).toBe(true);
     // Any other navigation made while Settings is open leaves the retained route.
-    expect(settingsOverlayKeepsRetainedRoute(replies, location('/chat/another'))).toBe(false);
-    expect(settingsOverlayKeepsRetainedRoute(replies, { ...current, hash: '' })).toBe(false);
-    expect(settingsOverlayKeepsRetainedRoute(replies, location('/settings/general'))).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(messages, location('/chat/another'))).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(messages, { ...current, hash: '' })).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(messages, location('/settings/general'))).toBe(false);
   });
 });

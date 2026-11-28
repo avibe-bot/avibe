@@ -13,9 +13,8 @@ export const SETTINGS_LANDING_PATH = '/settings/general';
 
 /**
  * Destinations that require Instance Owner management capability.
- * Messaging settings are deliberately absent: the page has its own field-level
- * control-plane handling, and the remaining protected controls are gated by
- * `isLocalOnlyMessagingField` below.
+ * Messages settings are deliberately absent: the page has its own field-level
+ * control-plane handling.
  */
 export const OWNER_ONLY_ROUTES = [
   '/settings/service',
@@ -44,13 +43,5 @@ export const OWNER_ONLY_ROUTES = [
   '/admin/settings/logs',
 ] as const;
 
-const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
-  'agents.opencode.error_retry_limit',
-  'agents.opencode.active_turn_timeout_seconds',
-]);
-
 export const isOwnerOnlyPath = (pathname: string): boolean =>
   OWNER_ONLY_ROUTES.some((route) => matchesRoute(pathname, route));
-
-export const isLocalOnlyMessagingField = (field: string): boolean =>
-  LOCAL_ONLY_MESSAGING_FIELDS.has(field);

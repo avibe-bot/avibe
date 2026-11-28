@@ -68,6 +68,7 @@
     "/settings/backends/antigravity",
     "/settings/models",
     "/settings/dependencies",
+    "/settings/messages",
     "/settings/replies",
     "/settings/messaging",
     "/settings/diagnostics",

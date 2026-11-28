@@ -31,12 +31,12 @@
   {
     "name": "runtime_lifecycle_settings",
     "agents": {
-      "opencode": {"enabled": true, "auto_update": false, "active_turn_timeout_seconds": 7200, "legacy_turn_timeout_neutralized": true},
+      "opencode": {"enabled": true, "auto_update": false, "error_retry_limit": 2, "active_turn_timeout_seconds": 7200, "legacy_turn_timeout_neutralized": true},
       "claude": {"enabled": true, "auto_update": false, "idle_timeout_seconds": 900},
       "codex": {"enabled": true, "auto_update": true, "idle_timeout_seconds": 1200}
     },
     "preserved": {
-      "opencode": {"enabled": true, "auto_update": false, "active_turn_timeout_seconds": 7200},
+      "opencode": {"enabled": true, "auto_update": false},
       "claude": {"enabled": true, "auto_update": false, "idle_timeout_seconds": 900},
       "codex": {"enabled": true, "auto_update": true, "idle_timeout_seconds": 1200}
     }

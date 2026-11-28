@@ -2245,14 +2245,10 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     admitted = SimpleNamespace(
         default_provider="openai",
         default_reasoning_effort="high",
-        error_retry_limit=0,
-        active_turn_timeout_seconds=0,
     )
     saved = SimpleNamespace(
         default_provider="anthropic",
         default_reasoning_effort="low",
-        error_retry_limit=5,
-        active_turn_timeout_seconds=600,
     )
     prompts: list[dict] = []
     polled: list[object] = []
