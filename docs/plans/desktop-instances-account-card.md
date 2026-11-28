@@ -26,7 +26,9 @@ Desktop language bundle.
   Instances. Removing that page would widen this change into native presentation
   and login completion, so only the Instances-to-Account link is removed.
 
-Instance rows, selection, add, refresh, the sidebar menu and iOS are unchanged.
+Instance rows, selection, add, refresh and iOS are unchanged. The sidebar menu was not changed here
+and has since been removed: one click on the footer row opens this page
+(`docs/plans/desktop-footer-opens-instances.md`).
 Pending instance actions still disable the card's action as they disabled the old
 navigation row.
 

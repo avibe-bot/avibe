@@ -43,6 +43,11 @@ menu semantics, signed-out entry). Browser: `e2e/desktop-client/client.spec.ts` 
 hermetic shell projection: the real guard and URL producer emit `avibe://desktop/instances` after
 one click, local and remote) and `instances-account.spec.ts` (the page's account card and its
 sign-out request). Frames: `chrome/bottom-row/*` (the row, at rest and under the pointer) and
-`desktop/instances/*` (the page). The sidebar row is part of the Workbench an instance serves, so
-it ships with an instance release; no Desktop package is produced or needed. Installed native
-window transitions are not exercised here.
+`desktop/instances/*` (the page). Installed native window transitions are not exercised here.
+
+## Where it ships
+
+The sidebar row is part of the Workbench that the shown instance serves, and no shell code changes.
+An instance on a CLI install gets it with an instance release, including when Desktop on another
+computer shows it or adopts it on its own computer. An instance whose Runtime a Desktop app embedded
+gets it with that computer's Desktop package (`desktop/README.md`).
