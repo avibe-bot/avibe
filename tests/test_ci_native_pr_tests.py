@@ -343,33 +343,40 @@ def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
     verify_membership(TARGET, sources, tmp_path)
 
 
-@pytest.mark.parametrize('mode', ['backpressure', 'closed console', 'save failure'])
-def test_native_log_survives_console_pressure_but_not_a_failed_save(tmp_path, monkeypatch, capfd, mode):
+@pytest.mark.skipif(os.name != 'posix', reason='Exercise the POSIX nonblocking runner pipe')
+@pytest.mark.parametrize('code', [0, 65])
+def test_full_undrained_console_does_not_delay_log_or_exit(tmp_path, code):
     path = tmp_path / 'execution.log'
-    payload = b'** TEST EXECUTE SUCCEEDED **\nTesting started\n'
-    real_write = os.write
-    calls = []
+    producer = ("import sys; sys.stdout.buffer.write(b'A' * 131072); sys.stdout.flush(); "
+                f"sys.stderr.buffer.write(b'Testing started\\n'); sys.exit({code})")
+    driver = ("from scripts.ci_native_pr_tests import run_logged; from pathlib import Path; import os, sys; "
+              "sys.exit(run_logged([sys.executable, '-c', sys.argv[2]], os.environ, Path(sys.argv[1])).returncode)")
+    reader, writer = os.pipe()
+    try:
+        os.set_blocking(writer, False)
+        # Keep the read end open but never drain it, even after the child exits.
+        with pytest.raises(BlockingIOError):
+            while True:
+                os.write(writer, b'x' * 4096)
+        with pytest.raises(BlockingIOError):
+            while True:
+                os.write(writer, b'x')
+        run = subprocess.run([sys.executable, '-c', driver, str(path), producer],
+                             cwd=Path(__file__).resolve().parents[1], stdout=writer,
+                             stderr=subprocess.PIPE, timeout=10)
+        assert run.returncode == code, run.stderr
+        assert path.read_bytes() == b'A' * 131072 + b'Testing started\n'
+    finally:
+        os.close(writer)
+        os.close(reader)
 
-    def mirror(fd, data):
-        calls.append(fd)
-        if mode == 'closed console':
-            raise BrokenPipeError()
-        if len(calls) == 1:
-            raise BlockingIOError(errno.EAGAIN, 'Resource temporarily unavailable')
-        return real_write(fd, data[:7])
 
-    monkeypatch.setattr(native.os, 'write', mirror)
-    command = [sys.executable, '-c', f'import os; os.write(2, {payload!r})']
-    if mode == 'save failure':
-        def no_space(fd):
-            raise OSError(errno.ENOSPC, 'disk full')
-        monkeypatch.setattr(native.os, 'fsync', no_space)
-        with pytest.raises(OSError, match='disk full'):
-            native.run_logged(command, {}, path)
-    else:
-        assert native.run_logged(command, {}, path).returncode == 0
-        assert path.read_bytes() == payload
-        assert calls and capfd.readouterr().out == (payload.decode() if mode == 'backpressure' else '')
+def test_native_log_save_failure_is_not_a_test_pass(tmp_path, monkeypatch):
+    def no_space(fd):
+        raise OSError(errno.ENOSPC, 'disk full')
+    monkeypatch.setattr(native.os, 'fsync', no_space)
+    with pytest.raises(OSError, match='disk full'):
+        native.run_logged([sys.executable, '-c', 'print("passed")'], os.environ, tmp_path / 'execution.log')
 
 
 @pytest.mark.parametrize("mode, calls", [

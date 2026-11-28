@@ -9,9 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
-import select
+import shutil
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -331,25 +330,24 @@ def verified_merge_paths(root, expected):
 
 
 def run_logged(command, env, log):
-    """Drain both streams through EOF. The file is evidence; stdout is a live copy."""
-    console = sys.stdout.fileno()
+    """Persist the entire stream, independently of the runner console."""
     with log.open('wb') as saved, subprocess.Popen(
         command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     ) as child:
         with child.stdout as output:
-            while chunk := output.read1(64 * 1024):
-                saved.write(chunk)
-                pending = memoryview(chunk)
-                while pending and console is not None:
-                    try:
-                        pending = pending[os.write(console, pending):]
-                    except BlockingIOError:
-                        select.select([], [console], [])
-                    except BrokenPipeError:
-                        console = None  # Continue collecting even if the console closed.
+            shutil.copyfileobj(output, saved)
         code = child.wait()
         saved.flush()
         os.fsync(saved.fileno())
+    # Only replay after the producer and evidence file are finished. The native
+    # runner is POSIX. A slow or closed Actions console must not delay the
+    # verdict indefinitely, nor be mistaken for a failed write to the log.
+    if os.name == 'posix':
+        with log.open('rb') as source:
+            try:
+                subprocess.run(['cat'], stdin=source, timeout=2, check=False)
+            except subprocess.TimeoutExpired:
+                pass
     return subprocess.CompletedProcess(command, code)
 
 
