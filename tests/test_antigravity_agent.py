@@ -33,6 +33,7 @@ from modules.agents.antigravity.agent import resolve_antigravity_cli_path
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
 from modules.agents.native_sessions.providers import DEFAULT_PROVIDER_SPECS
 from modules.sessions_facade import SessionsFacade
+from storage import agent_session_rows
 from storage.importer import ensure_sqlite_state
 from tests.helpers.antigravity_harness import FakeController, FakeOwnershipProvider, FakeSessions, antigravity_config, app_config, create_fake_agy_shim, make_agent_harness, make_request, read_jsonl, read_session_row
 from tests.helpers.fake_acp_server import make_acp_capabilities, make_model_config_options
@@ -362,9 +363,9 @@ async def test_effort_reset_preserved_across_eviction_and_sqlite_restart(tmp_pat
     shim = create_fake_agy_shim(tmp_path, state_file=state_file, launch_log=tmp_path / "restart-launches.jsonl", rpc_log=rpc_log, name="fake-agy-restart")
 
     loop_tid, db_tids = threading.get_ident(), []
-    for attr in ("_load_persisted_selection_state", "_save_persisted_selection_state"):
-        orig = getattr(agy_agent_module, attr)
-        monkeypatch.setattr(agy_agent_module, attr, lambda *a, _o=orig, **kw: (db_tids.append(threading.get_ident()), _o(*a, **kw))[1])
+    for attr in ("load_agent_session_metadata_entry", "save_agent_session_metadata_entry"):
+        orig = getattr(agent_session_rows, attr)
+        monkeypatch.setattr(agent_session_rows, attr, lambda *a, _o=orig, **kw: (db_tids.append(threading.get_ident()), _o(*a, **kw))[1])
 
     async with make_agent_harness(tmp_path, workdir=workdir, cli_path=shim, sessions=SessionsFacade(SessionsStore()), name="r1") as h1:
         req1 = make_request(message="t1", workdir=workdir, model="model-alpha", effort="high")

@@ -7,7 +7,6 @@ import base64
 import binascii
 import difflib
 import hashlib
-import json
 import logging
 import os
 import tempfile
@@ -70,6 +69,7 @@ from core.services.session_fork import (
     pending_summary_fork_handoff_for_session,
     record_fork_handoff_mode,
 )
+from core.session_titles import persist_and_publish_session_title
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
@@ -113,6 +113,7 @@ from modules.agents.base import (
     BaseAgent,
     message_with_files,
 )
+from storage import agent_session_rows
 from vibe.desktop_backends import desktop_backend_subprocess_environment
 from vibe.i18n import t as i18n_t
 
@@ -311,14 +312,6 @@ class _PersistedSelectionState:
     native_session_id: str | None = None
 
 
-def _load_json_dict(raw: Any) -> dict[str, Any]:
-    try:
-        loaded = json.loads(raw or "{}")
-    except (TypeError, ValueError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
 def _serialize_selection_state(
     *,
     default_efforts: Mapping[str, str],
@@ -386,50 +379,21 @@ def _load_persisted_selection_state(
     expected_native_session_id: str | None = None,
     db_path: Path | None = None,
 ) -> _PersistedSelectionState | None:
-    cleaned_id = (agent_session_id or "").strip()
-    if not cleaned_id:
+    raw = agent_session_rows.load_agent_session_metadata_entry(
+        agent_session_id,
+        _SELECTION_METADATA_KEY,
+        db_path=db_path,
+    )
+    parsed = _parse_selection_state(raw)
+    if parsed is None:
         return None
-    path = db_path or paths.get_sqlite_state_path()
-    if not path.is_file():
+    if (
+        expected_native_session_id
+        and parsed.native_session_id
+        and parsed.native_session_id != expected_native_session_id
+    ):
         return None
-
-    from sqlalchemy import select
-    from sqlalchemy.exc import OperationalError
-
-    from storage.db import create_sqlite_engine
-    from storage.models import agent_sessions
-
-    engine = create_sqlite_engine(path, read_only=True)
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                select(agent_sessions.c.metadata_json)
-                .where(agent_sessions.c.id == cleaned_id)
-                .limit(1)
-            ).mappings().first()
-        if row is None:
-            return None
-        metadata = _load_json_dict(row["metadata_json"])
-        parsed = _parse_selection_state(metadata.get(_SELECTION_METADATA_KEY))
-        if parsed is None:
-            return None
-        if (
-            expected_native_session_id
-            and parsed.native_session_id
-            and parsed.native_session_id != expected_native_session_id
-        ):
-            return None
-        return parsed
-    except OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            return None
-        logger.debug("Antigravity selection state load skipped for %s: %s", cleaned_id, exc)
-        return None
-    except Exception:
-        logger.debug("Antigravity selection state load failed for %s", cleaned_id, exc_info=True)
-        return None
-    finally:
-        engine.dispose()
+    return parsed
 
 
 def _save_persisted_selection_state(
@@ -440,56 +404,17 @@ def _save_persisted_selection_state(
     native_session_id: str | None,
     db_path: Path | None = None,
 ) -> bool:
-    cleaned_id = (agent_session_id or "").strip()
-    if not cleaned_id:
-        return False
-    path = db_path or paths.get_sqlite_state_path()
-    if not path.is_file():
-        return False
-
-    from sqlalchemy import select, update
-    from sqlalchemy.exc import OperationalError
-
-    from storage.agent_session_rows import reserve_write_lock
-    from storage.db import create_sqlite_engine
-    from storage.models import agent_sessions
-
     serialized = _serialize_selection_state(
         default_efforts=default_efforts,
         current_effort=current_effort,
         native_session_id=native_session_id,
     )
-    engine = create_sqlite_engine(path)
-    try:
-        with engine.begin() as conn:
-            reserve_write_lock(conn)
-            row = conn.execute(
-                select(agent_sessions.c.metadata_json)
-                .where(agent_sessions.c.id == cleaned_id)
-                .limit(1)
-            ).mappings().first()
-            if row is None:
-                return False
-            metadata = _load_json_dict(row["metadata_json"])
-            if metadata.get(_SELECTION_METADATA_KEY) == serialized:
-                return True
-            metadata[_SELECTION_METADATA_KEY] = serialized
-            conn.execute(
-                update(agent_sessions)
-                .where(agent_sessions.c.id == cleaned_id)
-                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
-            )
-            return True
-    except OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            return False
-        logger.debug("Antigravity selection state save skipped for %s: %s", cleaned_id, exc)
-        return False
-    except Exception:
-        logger.debug("Antigravity selection state save failed for %s", cleaned_id, exc_info=True)
-        return False
-    finally:
-        engine.dispose()
+    return agent_session_rows.save_agent_session_metadata_entry(
+        agent_session_id,
+        _SELECTION_METADATA_KEY,
+        serialized,
+        db_path=db_path,
+    )
 
 
 @dataclass
@@ -1421,47 +1346,17 @@ class AntigravityAgent(BaseAgent):
         task.add_done_callback(self._background_tasks.discard)
 
     def _persist_live_title(self, agent_session_id: str, native_session_id: str, title: str) -> None:
-        db_path = paths.get_sqlite_state_path()
-        if not db_path.is_file():
-            return
-        from core.inbox_events import bus
-        from core.services import sessions as workbench_sessions_service
-        from storage import messages_service
-        from storage.db import create_sqlite_engine
-
-        inbox_row: dict[str, Any] | None = None
-        engine = create_sqlite_engine(db_path)
         try:
-            with engine.begin() as conn:
-                updated = workbench_sessions_service.backfill_session_title(
-                    conn,
-                    agent_session_id,
-                    title=title,
-                    backend=self.name,
-                    source="backend",
-                    confidence="high",
-                    native_session_id=native_session_id,
-                )
-                if updated is not None:
-                    inbox_row = messages_service.get_inbox_session(conn, agent_session_id, platform="avibe")
+            persist_and_publish_session_title(
+                agent_session_id=agent_session_id,
+                backend=self.name,
+                native_session_id=native_session_id,
+                title=title,
+                source="backend",
+                confidence="high",
+            )
         except Exception:
             logger.debug("Antigravity live title backfill skipped", exc_info=True)
-            return
-        finally:
-            engine.dispose()
-
-        if updated is not None:
-            bus.publish(
-                "session.activity",
-                {
-                    "session_id": updated["id"],
-                    "scope_id": updated.get("scope_id"),
-                    "event": "updated",
-                    "title": updated.get("title"),
-                },
-            )
-            if inbox_row is not None:
-                bus.publish("inbox.session.updated", inbox_row)
 
     async def _settle_turn_stopped(self, turn: _ActiveTurn) -> None:
         if turn.settled:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
+from config import paths
 from core.inbox_events import bus
 from core.services import sessions as workbench_sessions_service
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
@@ -14,6 +16,74 @@ from storage import messages_service
 from storage.db import create_sqlite_engine
 
 logger = logging.getLogger(__name__)
+
+
+def _publish_backfilled_session_title(
+    updated: dict[str, Any],
+    inbox_row: dict[str, Any] | None,
+) -> None:
+    bus.publish(
+        "session.activity",
+        {
+            "session_id": updated["id"],
+            "scope_id": updated.get("scope_id"),
+            "event": "updated",
+            "title": updated.get("title"),
+        },
+    )
+    if inbox_row is not None:
+        bus.publish("inbox.session.updated", inbox_row)
+
+
+def persist_and_publish_session_title(
+    *,
+    agent_session_id: str,
+    backend: str,
+    native_session_id: str,
+    title: str,
+    source: str = "backend",
+    confidence: str | None = "high",
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Persist a known backend session title and publish realtime updates.
+
+    Best-effort and write-once: returns the updated session payload when a title
+    was written, otherwise ``None``. Returns ``None`` without creating a SQLite
+    file when the state database does not exist yet.
+    """
+
+    if not (agent_session_id and backend and native_session_id and str(title or "").strip()):
+        return None
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return None
+
+    inbox_row: dict[str, Any] | None = None
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            updated = workbench_sessions_service.backfill_session_title(
+                conn,
+                agent_session_id,
+                title=title,
+                backend=backend,
+                source=source,
+                confidence=confidence,
+                native_session_id=native_session_id,
+            )
+            if updated is not None:
+                try:
+                    inbox_row = messages_service.get_inbox_session(conn, agent_session_id, platform="avibe")
+                except Exception:
+                    logger.debug("session-title: failed to build inbox row", exc_info=True)
+    finally:
+        engine.dispose()
+
+    if updated is None:
+        return None
+    _publish_backfilled_session_title(updated, inbox_row)
+    return updated
 
 
 def backfill_agent_session_title(
@@ -74,15 +144,5 @@ def backfill_agent_session_title(
 
     if updated is None:
         return None
-    bus.publish(
-        "session.activity",
-        {
-            "session_id": updated["id"],
-            "scope_id": updated.get("scope_id"),
-            "event": "updated",
-            "title": updated.get("title"),
-        },
-    )
-    if inbox_row is not None:
-        bus.publish("inbox.session.updated", inbox_row)
+    _publish_backfilled_session_title(updated, inbox_row)
     return updated
