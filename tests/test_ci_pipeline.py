@@ -640,13 +640,14 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         index for index, step in enumerate(steps)
         if "-project ios/Avibe.xcodeproj" in step.get("run", "")
     ]
-    py_step, prepare_selector, fast_step = [step for step in steps if step.get('if') == 'inputs.fast-native']
+    py_step, prepare_selector, early_boot, fast_step = [step for step in steps if step.get('if') == 'inputs.fast-native']
     assert py_step['uses'].startswith('actions/setup-python@')
     assert py_step['with']['python-version'] == '3.13' and str(py_step['with']['update-environment']).lower() == 'false'
     assert prepare_selector['env']['SELECTOR_PYTHON'] == '${{ steps.' + py_step['id'] + '.outputs.python-path }}'
     assert '"$SELECTOR_PYTHON" -m venv "$RUNNER_TEMP/native-pr-python"' in prepare_selector['run']
     assert '--only-binary=:all: tree-sitter==0.25.2 tree-sitter-swift==0.7.4' in prepare_selector['run']
-    assert steps.index(prepare_selector) < prepare_index
+    assert steps.index(prepare_selector) < steps.index(early_boot) < prepare_index
+    assert 'xcrun simctl boot "$SIMULATOR_ID"' in early_boot['run']
     fast_script = fast_step['run']
     assert 'source "$RUNNER_TEMP/native-pr-python/bin/activate"' in fast_script
     assert fast_step['env']['NATIVE_PATH_RECEIPT'] == '${{ inputs.native-path-receipt }}'
@@ -754,9 +755,12 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Select the pinned iPhone 18 Pro / iOS 27.2 simulator"
     )
-    boot = steps[selection_index + 1]
+    assert steps[selection_index + 1]['name'] == 'Request early simulator boot for native PR contracts'
+    boot_index = next(i for i, step in enumerate(steps) if step.get('name') == 'Boot the pinned simulator')
+    boot = steps[boot_index]
+    assert 'if' not in boot and not boot.get('continue-on-error')
     assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
-    after_boot = steps[selection_index + 2:]
+    after_boot = steps[boot_index + 1:]
     assert after_boot[0]['name'] == 'Compile the app and run the native PR contracts'
     assert after_boot[0]['if'] == 'inputs.fast-native'
     assert [(step['name'], step['if']) for step in after_boot[1:3]] == [
