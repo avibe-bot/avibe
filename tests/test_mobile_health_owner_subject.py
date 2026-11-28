@@ -461,3 +461,63 @@ def test_verified_status_never_queries_health_value_rows(store, mobile_http, mon
     monkeypatch.setattr(MobileStore, '_trim_days', lambda *_: pytest.fail('status read health value rows'))
     result = cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'status']))
     assert result['read_allowed'] and result['metrics']['steps']['synced_at']
+
+
+@pytest.mark.parametrize('live_email', [None, 'changed@example.test'])
+def test_local_host_health_attribution_and_revoke_use_subject(install, live_email):
+    import time
+    from storage import device_catalog, device_health_tickets as tickets
+    from tests.test_device_health_cleanup import phone
+    from tests.test_instance_device_registry import client, report
+    store = MobileStore()
+    identity = subject_identity(live_email or '', 'owner')
+    paired, _ = new_pair(store, subject_identity('old@example.test', 'owner'))
+    cookie, viewer, target = phone(install, 'host-health-phone')
+    token = tickets.issue(store, {'id': paired['device_id']}, viewer[0])['health_binding_ticket']
+    assert report(client(cookie), 'host-health-phone', health_binding_ticket=token).status_code == 200
+    local = (viewer[0], None, True, None)
+    with get_cached_sqlite_engine().begin() as conn:
+        rows, active, unlinked = device_catalog.snapshot(conn, local, identity['id'], live_email,
+                                                        int(time.time()), health_identity=identity)
+        assert active[target] == [paired['device_id']] and unlinked == []
+        funcs = {f['kind']: f for f in rows[target]['functions']}
+        assert funcs['health']['can_change']
+        assert not funcs['schedule']['can_change']  # General permissions retain their existing rule.
+        result = device_catalog.change(conn, local, identity['id'], live_email, target, 'health', False,
+                                       int(time.time()), health_identity=identity)
+        assert result['function']['on'] is False
+    assert store.active_device() is None
+
+
+def test_deferred_signout_retries_subject_absence_until_live_proof_returns(store, mobile_http, monkeypatch):
+    import time
+    from sqlalchemy import select
+    from storage import device_health_owner_checks as worker
+    from storage.models import device_health_owner_checks as checks
+    from vibe.account_session_revoke import pairing_epoch
+    _, projection = mobile_http
+    paired, _ = new_pair(store, subject_identity())
+    link_device(paired['device_id'])
+    config = V2Config.load()
+    now = int(time.time())
+    with get_cached_sqlite_engine().begin() as conn:
+        worker.queue(conn, binding=device_binding(config), epoch=pairing_epoch(config), subject=SUBJECT,
+                     device='synthetic-phone', email=IDENTITY['owner'], now=now)
+    assert worker.run_once(lambda: config) is False
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.scalar(select(checks.c.mobile_id)) == paired['device_id']
+    projection['access']['owner'] = {'user_id': SUBJECT, 'email': None}
+    monkeypatch.setattr(worker.time, 'time', lambda: now + 31)
+    assert worker.run_once(lambda: config)
+    assert store.active_device() is None
+
+
+def test_unswept_expired_legacy_request_does_not_block_subject_status(store, mobile_http, clock):
+    from datetime import timedelta
+    _, projection = mobile_http
+    req, _ = store.create_request('health.connect', IDENTITY)
+    clock[0] += timedelta(days=2)
+    projection['access']['owner']['user_id'] = SUBJECT
+    result = cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'status']))
+    assert result['read_allowed'] and not result['connected']
+    assert store.show_request(req['id'])['state'] == 'expired'

@@ -72,12 +72,21 @@ def run_once(load_config):
             return False
         with engine.begin() as conn:
             conn.exec_driver_sql('BEGIN IMMEDIATE')
-            if not conn.execute(checks.delete().where(exact)).rowcount:
+            if not conn.scalar(select(checks.c.mobile_id).where(exact)):
                 return True  # Superseded by another explicit action.
             now = int(time.time())
-            matches = owner_subject == row['subject'] if owner_subject is not None else bool(owner and owner == row['owner_email'])
-            if (not matches or row['expires_at'] <= now
+            if (row['expires_at'] <= now
                     or pairing_epoch(current) != row['epoch'] or device_binding(current) != row['binding']):
+                conn.execute(checks.delete().where(exact))
+                return True
+            if owner is None:
+                return False
+            store = MobileStore(existing_only=True)
+            if owner_subject is None and store.has_subject():
+                return False  # Keep the scheduled retry; missing proof is not a different owner.
+            matches = owner_subject == row['subject'] if owner_subject is not None else bool(owner and owner == row['owner_email'])
+            if not matches:
+                conn.execute(checks.delete().where(exact))
                 return True
             link = conn.scalar(select(links.c.mobile_id).where(links.c.mobile_id == row['mobile_id'],
                 links.c.binding == row['binding'], links.c.subject == row['subject'], links.c.device_id == row['device_id'],
@@ -86,7 +95,7 @@ def run_once(load_config):
                 sessions.c.subject == row['subject'], sessions.c.device_id == row['device_id'],
                 sessions.c.expires_at > now, sessions.c.cookie_exp > now).limit(1))
             if link and not restored:
-                store = MobileStore(existing_only=True)
                 store.revoke_confirmed_pairing(link, instance=cloud.instance_id, owner=owner, owner_subject=owner_subject,
                                                legacy_subject_proven=owner_subject == row["subject"])
+            conn.execute(checks.delete().where(exact))
     return True

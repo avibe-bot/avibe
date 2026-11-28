@@ -56,6 +56,16 @@ authentication, consent manifests, notification targets, browser request cards,
 binding tickets, Devices projection/revocation, read-audit projection and deferred
 sign-out. General Devices notification/scheduling access rules stay unchanged.
 Devices presentation verifies/migrates continuity without automatic retirement.
+Local-host Health attribution and revoke use the proven subject too; notification
+and schedule permissions retain their existing email rule. A deferred sign-out
+keeps its scheduled retry when a subject-bound store receives an older Cloud
+answer without a subject. Expired requests are settled before migration so an
+unswept legacy request cannot require continuity proof after its lifetime.
+
+Legacy enrollments made without a registry link cannot be promoted automatically,
+including enrollments approved from an unattributed local browser. They remain
+paused and preserved; explicit CLI revoke is still available to discard them.
+No production enrollment inventory or backfill is part of this change.
 
 `health status` performs a store-free live-owner preflight. If unavailable it
 returns `read_allowed: false`, `sync_state: unknown`, and a localized diagnostic,

@@ -775,6 +775,7 @@ class MobileStore:
                 raise owner_unavailable("cloud_unavailable")
             if owner_subject is None and self.has_subject(conn):
                 raise owner_unavailable("cloud_owner_subject_unsupported")
+            self._expire(conn, now)
             if owner_subject is not None:
                 self._migrate_owner(conn, {"id": instance, "owner_subject": owner_subject}, proofs)
                 other = '(owner_subject IS NOT NULL AND (instance_id != ? OR owner_subject != ?))'
