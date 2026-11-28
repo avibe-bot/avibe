@@ -1006,6 +1006,7 @@ const NON_KEY_LITERALS = [
   'avibe.vault.addTier',
   'avibe.vault.crypto',
   'avibe.vault.hdAddressCheckFailed',
+  'avibe.voice.desktopMicOpened',
   'avibe.voiceInput.deviceId',
   'avibe.workbench.windows.v1',
   'vibe.nativePush.pendingRegistration',
