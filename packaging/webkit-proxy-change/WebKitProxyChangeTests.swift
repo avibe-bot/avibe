@@ -60,7 +60,7 @@ private final class Browser: NSObject, WKNavigationDelegate {
     private(set) var contentTerminations = 0
     var warmedConnection: String?
 
-    init(fixture: ProbeCase, anchor: SecCertificate, initialRoute: String? = nil) {
+    init(fixture: ProbeCase, anchor: SecCertificate, initialRoute: String? = nil, userScript: String? = nil) {
         self.fixture = fixture
         self.anchor = anchor
         store = WKWebsiteDataStore(forIdentifier: UUID())
@@ -69,6 +69,13 @@ private final class Browser: NSObject, WKNavigationDelegate {
         }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = store
+        if let userScript {
+            // The stand-in for the App's bridge, defined at document start
+            // in the main frame, as the App defines its own.
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: userScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        }
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 700), configuration: configuration)
         super.init()
         webView.navigationDelegate = self
@@ -89,6 +96,36 @@ private final class Browser: NSObject, WKNavigationDelegate {
             }
             webView.load(URLRequest(url: URL(string: "https://\(fixture.host)/page?id=\(id)")!))
         }
+    }
+
+    /// Loads a path of the host: the built page's own routes.
+    func open(_ path: String, timeout: Double = 30) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            navigation = continuation
+            navigationDeadline = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(timeout)) } catch { return }
+                self?.completeNavigation(.failure(ProbeError("navigation timeout: \(path)")))
+            }
+            webView.load(URLRequest(url: URL(string: "https://\(fixture.host)\(path)")!))
+        }
+    }
+
+    /// Hides or shows the WebView's window, as the App leaving and coming
+    /// back does to its page. If WebKit does not report that to the page
+    /// (`document.visibilityState`), the page is told by a made-up event
+    /// instead, and the result says so (`mode`: `window` or `pretended`).
+    func setVisible(_ visible: Bool) async -> [String: Any] {
+        let wanted = visible ? "visible" : "hidden"
+        window?.isHidden = !visible
+        var seen = ""
+        for _ in 0..<10 {
+            try? await Task.sleep(for: .milliseconds(50))
+            seen = ((try? await js("window.__gate.snapshot()"))?["visibility"] as? String) ?? ""
+            if seen == wanted { return ["ok":true, "mode":"window", "visibility":seen] }
+        }
+        let pretended = (try? await js("window.__gate.pretend('\(wanted)')")) ?? ["ok":false, "error":"no bridge"]
+        return ["ok":pretended["ok"] as? Bool ?? false, "mode":"pretended",
+                "visibility":pretended["visibility"] as? String ?? seen]
     }
 
     func js(_ expression: String) async throws -> [String: Any] {
@@ -329,8 +366,10 @@ final class WebKitProxyChangeTests: XCTestCase {
         emit(["step":"late_start", "os":UIDevice.current.systemVersion,
               "system":ProcessInfo.processInfo.operatingSystemVersionString, "cases":cases.count])
         var fixtureFailures = 0
+        let bridge = try String(contentsOf: XCTUnwrap(bundle.url(forResource: "gate-bridge", withExtension: "js")), encoding: .utf8)
         for fixture in cases {
-            let browser = Browser(fixture: fixture, anchor: anchor)
+            let browser = Browser(fixture: fixture, anchor: anchor,
+                                  userScript: fixture.action.hasPrefix("gate") ? bridge : nil)
             do {
                 try await run(fixture, browser)
                 await browser.record("case_complete", ["executionComplete":true, "qualification":"not asserted", "replaySafety":"unmeasured: GET only"])
@@ -594,7 +633,83 @@ final class WebKitProxyChangeTests: XCTestCase {
             // And left alone for a while: does anything end by itself?
             try await Task.sleep(for: .seconds(20))
             _ = try await browser.fetch("after-idle-20s")
+        case "gateReturn", "gateControl", "gateCap", "gateExpired", "gateRedirect":
+            // The built page, through the route to the port, signed in.
+            await browser.route("direct", allowFailover: fixture.allowFailover ?? true)
+            try await browser.open("/")
+            try await gateSettle(browser, "loaded")
+            let loaded = try await control("/gate-summary?host=\(fixture.host)&since=0")
+            await browser.record("before-background", loaded)
+            guard (loaded["requests"] as? Int ?? 0) > 0, loaded["origin"] as? Int == 0
+            else { throw ProbeError("the page did not load through the port: \(loaded)") }
+            // The background. The App's bridge will hold its answer on the
+            // return until the port is open (not in the control cell, where
+            // it answers at once, as to a page without the hold).
+            _ = try await browser.observe("bridge",
+                expression: "window.__gate.hold(\(fixture.action == "gateControl" ? "false" : "true"))")
+            let hidden = await browser.setVisible(false)
+            await browser.record("hidden", hidden)
+            let closed = try await control("/proxy-listener?state=closed&host=\(fixture.host)")
+            await browser.record("listener-closed", closed)
+            var failure: Error?
+            do {
+                guard closed["ok"] as? Bool == true else { throw ProbeError("the port was not closed: \(closed)") }
+                try await Task.sleep(for: .seconds(2))
+                if fixture.action == "gateExpired" {
+                    await browser.record("session", try await control("/gate-session?host=\(fixture.host)&state=missing"))
+                } else if fixture.action == "gateRedirect" {
+                    await browser.record("session", try await control("/gate-session?host=\(fixture.host)&state=redirect"))
+                }
+                let mark = (try await control("/gate-mark"))["count"] as? Int ?? 0
+                // The return.
+                let shown = await browser.setVisible(true)
+                await browser.record("shown", shown)
+                try await Task.sleep(for: .milliseconds(400))
+                await browser.record("after-400ms", try await control("/gate-summary?host=\(fixture.host)&since=\(mark)"))
+                if fixture.action == "gateCap" {
+                    // No answer from the bridge: the page's own cap ends the
+                    // hold, with the port still closed.
+                    try await Task.sleep(for: .milliseconds(1_100))
+                    await browser.record("after-cap", try await control("/gate-summary?host=\(fixture.host)&since=\(mark)"))
+                }
+                let opened = try await control("/proxy-listener?state=open&host=\(fixture.host)")
+                await browser.record("listener-open", opened)
+                guard opened["ok"] as? Bool == true else { throw ProbeError("the port was not opened again: \(opened)") }
+                // The port is open: now the bridge answers.
+                _ = try await browser.observe("bridge-answers", expression: "window.__gate.hold(false)")
+                try await Task.sleep(for: .seconds(8))
+                await browser.record("after-return", try await control("/gate-summary?host=\(fixture.host)&since=\(mark)"))
+                _ = try? await browser.observe("page-after", expression: "window.__gate ? window.__gate.snapshot() : ({ok:true, href:location.pathname + location.search, title:document.title, text:(document.body?.innerText ?? '').slice(0, 200), signIn:Boolean(document.getElementById('gate-sign-in'))})")
+            } catch { failure = error }
+            // Opened again whatever happened above: the next cell needs it.
+            let reopened = try await control("/proxy-listener?state=open&host=\(fixture.host)")
+            if failure != nil { await browser.record("listener-open", reopened) }
+            if let failure { throw failure }
+        case "gateMissing":
+            // No session from the first read on.
+            await browser.record("session", try await control("/gate-session?host=\(fixture.host)&state=missing"))
+            await browser.route("direct", allowFailover: fixture.allowFailover ?? true)
+            try await browser.open("/")
+            try await Task.sleep(for: .seconds(8))
+            await browser.record("after-load", try await control("/gate-summary?host=\(fixture.host)&since=0"))
+            _ = try? await browser.observe("page-after", expression: "window.__gate ? window.__gate.snapshot() : ({ok:true, href:location.pathname + location.search, title:document.title, text:(document.body?.innerText ?? '').slice(0, 200), signIn:Boolean(document.getElementById('gate-sign-in'))})")
         default: throw ProbeError("unknown action")
         }
+    }
+
+    /// Waits until the built page has asked the bridge for its status, then
+    /// five seconds more for its first requests to end.
+    @MainActor
+    private func gateSettle(_ browser: Browser, _ label: String) async throws {
+        for _ in 0..<60 {
+            if let snapshot = try? await browser.js("window.__gate.snapshot()"),
+               (snapshot["status"] as? Int ?? 0) > 0 {
+                try await Task.sleep(for: .seconds(5))
+                _ = try await browser.observe(label, expression: "window.__gate.snapshot()")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw ProbeError("the page never asked the bridge for its status")
     }
 }

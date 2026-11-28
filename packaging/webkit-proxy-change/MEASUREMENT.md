@@ -139,6 +139,37 @@ cannot qualify real-device Local Network permission, suspension, radio changes,
 real Cloudflare behavior, or future OS transports. No iOS version is qualified by
 API availability, compilation, or this harness's synthetic tests.
 
+## rc gate cells (branch `experiment/webkit-rc6-gate`, 2026-11-28)
+
+Not a WebKit measurement: a check of a release candidate's own page in real
+WebKit, for the two things the page changed after the return cells below.
+`late-cases.json` on this branch holds these six cells and nothing else.
+
+What is real: the built Web UI of `RC_REF` (the workflow builds it), a
+WKWebView on the simulator, the store's route to the proxy's port with
+fail-over allowed, and the port closing and opening. What is a stand-in: the
+instance (`gate.mjs`: a few API answers, the event stream, and the word for
+how a request arrived: `direct` through the port, `other` on WebKit's own
+connection), and the App's bridge (`gate-bridge.js`: `direct` version 3, and
+a `direct.status` answer the test holds and releases, as the App holds its
+own on a return until its port is open). The WebView's window is hidden and
+shown for the background and the return; a result says `pretended` when
+WebKit did not report that to the page and a made-up event was used.
+
+| Cell | The return | Looks at |
+| --- | --- | --- |
+| `gate-return-h2` | the bridge answers once the port is open | every request after the return through the port; the first session read's word with `;hold=<ms>` |
+| `gate-control-h2` | the bridge answers at once, the port still closed | the page on WebKit's own connection, as before the hold |
+| `gate-cap-h2` | the bridge does not answer | requests leave after one second |
+| `gate-missing-h2` | (no return) no session from the first read | the page goes to its sign-in |
+| `gate-expired-h2` | the session is gone on the return | the same, from a session read that carries the word and is same-origin |
+| `gate-redirect-h2` | the session read is redirected to another origin on the return | what the page then does (the instance never answers so) |
+
+`gate-summary` rows in `late-observations.json`: `proxy` and `origin` count
+the page's requests through the port and on WebKit's own connection;
+`session` lists each `/api/session` read with its word (`page`) and
+`Sec-Fetch-Mode` (`fetchMode`); `signIn` counts requests for `/auth/login`.
+
 ## Return cells (branch `experiment/webkit-return-closed`, 2026-11-28)
 
 Question, from the owner's phone on 2026-11-28: after a return from the

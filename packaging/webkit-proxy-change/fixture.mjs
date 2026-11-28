@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {instanceCases, instanceHosts, instanceFixture} from './instance-fixture.mjs';
 import {instanceScript} from './instance-script.mjs';
+import {makeGate} from './gate.mjs';
 
 // This fixture is intentionally independent of the product listener/controller.
 // All listeners are runner-loopback-only. No production hostname or credential.
@@ -47,6 +48,8 @@ function log(event, fields = {}) {
 }
 
 const extension = instanceFixture(log, upstreamConnections);
+// The rc gate cells load the built Web UI from a stand-in instance (gate.mjs).
+const gate = makeGate(process.env.GATE_DIST, log);
 
 const script = String.raw`
 window.probe = {
@@ -172,8 +175,9 @@ function makeOrigin(route, protocol, host, port) {
     res.on('finish', () => log('response_finished', details));
     res.on('close', () => log('response_closed', {...details, finished:res.writableFinished}));
     if (!details.case) { res.writeHead(403); res.end(); return; }
-    res.setHeader('cache-control', 'no-store');
     const fixture = byHost.get(details.host);
+    if (fixture?.action?.startsWith('gate')) { gate.request(req, res, details); return; }
+    res.setHeader('cache-control', 'no-store');
     if (fixture?.role && req.headers.origin) {
       const source = byHost.get(new URL(req.headers.origin).hostname);
       if (source?.id === fixture.id) {
@@ -227,6 +231,10 @@ function makeOrigin(route, protocol, host, port) {
   server.on('upgrade', (req, socket) => {
     const details = describe(req);
     log('websocket', details);
+    if (byHost.get(details.host)?.action?.startsWith('gate')) {
+      if (!gate.upgrade(req, socket, details)) socket.destroy();
+      return;
+    }
     if (!details.case || !req.headers['sec-websocket-key']) { socket.destroy(); return; }
     const accept = crypto.createHash('sha1')
       .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
@@ -388,6 +396,29 @@ const control = http.createServer(async (req,res) => {
       }
       result = log('proxy_listener', {ok:status === (state === 'closed' ? 'refused' : 'listening'), host, mode:state, status,
         closed:connections.length, connections});
+    } else if (url.pathname === '/gate-session') {
+      const host = url.searchParams.get('host');
+      if (!byHost.has(host)) throw new Error('invalid gate host');
+      result = gate.set(host, url.searchParams.get('state'));
+    } else if (url.pathname === '/gate-mark') {
+      result = {ok:true, count:sequence};
+    } else if (url.pathname === '/gate-summary') {
+      // What the stand-in instance saw from the host since a mark: how many
+      // requests came through the port and how many on WebKit's own
+      // connection, the session reads with the page's word, the first paths,
+      // the streams, and whether the sign-in page was asked for.
+      const host = url.searchParams.get('host'); const since = Number(url.searchParams.get('since') ?? 0);
+      const seen = events.filter(e => e.sequence > since && e.host === host);
+      const requests = seen.filter(e => e.event === 'gate_request');
+      result = log('gate_summary', {ok:true, host, held:since,
+        requests:requests.length,
+        proxy:requests.filter(e => e.proxyConnection).length,
+        origin:requests.filter(e => !e.proxyConnection).length,
+        session:requests.filter(e => e.path === '/api/session')
+          .map(e => ({route:e.route, via:e.via, page:e.page, fetchMode:e.fetchMode, connection:e.connection})),
+        first:requests.slice(0, 6).map(e => `${e.route} ${e.method} ${e.path}`),
+        streams:seen.filter(e => e.event === 'gate_stream').map(e => e.via),
+        signIn:requests.filter(e => e.path === '/auth/login').length});
     } else if (url.pathname === '/proxy-mode') {
       const host = url.searchParams.get('host'); const mode = url.searchParams.get('mode');
       if (!byHost.has(host) || !['origin','transport'].includes(mode)) throw new Error('invalid mode');
@@ -408,7 +439,7 @@ const control = http.createServer(async (req,res) => {
       const ports = [443,18443,18444,18080,18082,18083,18090];
       result = {ok:servers.every(server => server.listening) && ports.every(port => listening.has(port)),
         cases:cases.length, lifecycleCases:lifecycleCases.length, instanceCases:instanceCases.length,
-        lateCases:lateCases.length,
+        lateCases:lateCases.length, gate:gate.ready(),
         listening:[...listening].sort(), originAddresses:['127.0.0.1:443','127.0.0.2:443']};
     } else { throw new Error('unknown control operation'); }
     res.setHeader('content-type','application/json'); res.end(JSON.stringify(result));

@@ -117,7 +117,7 @@ cleanup_fixture() {
     bounded 5 sudo -n kill -KILL "$fixture_pid" 2>/dev/null || true
   fi
 }
-sudo -n env PATH="$PATH" node "$probe_dir/fixture.mjs" "$out/cert" >"$out/fixture.stdout" 2>&1 &
+sudo -n env PATH="$PATH" GATE_DIST="${GATE_DIST:-}" node "$probe_dir/fixture.mjs" "$out/cert" >"$out/fixture.stdout" 2>&1 &
 fixture_pid=$!
 echo "$fixture_pid" > "$out/fixture.pid"
 for _ in {1..100}; do
@@ -126,7 +126,7 @@ for _ in {1..100}; do
   sleep 0.1
 done
 curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and d["instanceCases"] == 10 and d["lateCases"] == 4 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and d["instanceCases"] == 10 and d["lateCases"] == 6 and d["gate"] is True and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
 bounded 20 python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" "$probe_dir/late-cases.json" <<'PY'
 import json, socket, sys
 for row in json.load(open(sys.argv[1])) + json.load(open(sys.argv[3])):

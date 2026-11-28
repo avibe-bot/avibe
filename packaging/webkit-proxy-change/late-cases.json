@@ -1,6 +1,8 @@
 [
-  {"id":"return-closed-h2","origin":"h2","proxy":"h2","action":"returnClosed","allowFailover":true},
-  {"id":"return-closed-h1","origin":"h1","proxy":"h1","action":"returnClosed","allowFailover":true},
-  {"id":"return-held-h2","origin":"h2","proxy":"h2","action":"returnHeld","allowFailover":true},
-  {"id":"return-strict-h2","origin":"h2","proxy":"h2","action":"returnClosed","allowFailover":false}
+  {"id":"gate-return-h2","origin":"h2","proxy":"h2","action":"gateReturn","allowFailover":true},
+  {"id":"gate-control-h2","origin":"h2","proxy":"h2","action":"gateControl","allowFailover":true},
+  {"id":"gate-cap-h2","origin":"h2","proxy":"h2","action":"gateCap","allowFailover":true},
+  {"id":"gate-missing-h2","origin":"h2","proxy":"h2","action":"gateMissing","allowFailover":true},
+  {"id":"gate-expired-h2","origin":"h2","proxy":"h2","action":"gateExpired","allowFailover":true},
+  {"id":"gate-redirect-h2","origin":"h2","proxy":"h2","action":"gateRedirect","allowFailover":true}
 ]

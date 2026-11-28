@@ -241,7 +241,10 @@ def validate_late(out: Path, cases_path: Path) -> None:
         except json.JSONDecodeError:
             break  # A writer may have been stopped in its final record.
     kept = ("ok", "route", "protocol", "connection", "tcpConnection", "proxyConnection", "status", "error",
-            "closed", "connections", "mode", "count", "errors", "identities", "originalCount", "unmeasured")
+            "closed", "connections", "mode", "count", "errors", "identities", "originalCount", "unmeasured",
+            # The rc gate cells (gate.mjs, gate-bridge.js).
+            "requests", "origin", "proxy", "session", "first", "streams", "signIn", "held",
+            "visibility", "href", "title", "text", "handovers")
     report = {}
     for case in cases:
         rows = [e for e in events if e.get("event") == "client" and e.get("case") == case["id"]]
