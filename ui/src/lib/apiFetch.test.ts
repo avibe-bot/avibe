@@ -8,12 +8,68 @@ const remoteAuth = vi.hoisted(() => ({
 
 vi.mock('./remoteAuth', () => remoteAuth);
 
+import { setPageWhyReader } from './pageReport';
 import {
   apiFetch,
   isApiFetchDeadlineAbort,
   recoverRemoteAuthFromSessionProbe,
   withApiDeadline,
 } from './apiFetch';
+
+describe('apiFetch and the page report', () => {
+  let stopReport: () => void = () => {};
+  const sent = () => {
+    const [, init] = vi.mocked(fetch).mock.calls.at(-1) as [unknown, RequestInit];
+    return { word: new Headers(init.headers).get('X-Avibe-Page'), mode: init.mode };
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal('window', {
+      location: { href: 'https://instance.example/chat', origin: 'https://instance.example', pathname: '/chat', search: '' },
+    });
+    vi.stubGlobal('document', { cookie: 'vibe_csrf_token=token' });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true })));
+  });
+
+  afterEach(() => {
+    stopReport();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('sends the word on the page\'s own session read, which it makes same-origin', async () => {
+    stopReport = setPageWhyReader(() => 'quiet_request');
+    await apiFetch('/api/session');
+    expect(sent()).toEqual({ word: 'quiet_request', mode: 'same-origin' });
+    // Not due again: the read goes as it always did.
+    await apiFetch(new URL('https://instance.example/api/session'), { cache: 'no-store' });
+    expect(sent()).toEqual({ word: null, mode: undefined });
+  });
+
+  it('sends it on no other request', async () => {
+    stopReport = setPageWhyReader(() => 'idle');
+    // Another read, a write beside the CSRF header, another origin's session
+    // read, a Request object, and a session read whose mode the caller chose.
+    await apiFetch('/api/inbox');
+    expect(sent()).toEqual({ word: null, mode: undefined });
+    await apiFetch('/api/sessions/s1/mark-read', { method: 'POST' });
+    expect(sent()).toEqual({ word: null, mode: undefined });
+    await apiFetch('/api/session', { method: 'POST' });
+    expect(sent()).toEqual({ word: null, mode: undefined });
+    await apiFetch('https://elsewhere.example/api/session');
+    expect(sent()).toEqual({ word: null, mode: undefined });
+    await apiFetch('/api/session', { mode: 'cors' });
+    expect(sent()).toEqual({ word: null, mode: 'cors' });
+    // The word was not spent on any of them.
+    await apiFetch('/api/session?fresh=1');
+    expect(sent()).toEqual({ word: 'idle', mode: 'same-origin' });
+  });
+
+  it('changes nothing on a page that has no word', async () => {
+    await apiFetch('/api/session');
+    expect(sent()).toEqual({ word: null, mode: undefined });
+  });
+});
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {

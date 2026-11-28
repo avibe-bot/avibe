@@ -161,9 +161,20 @@ function sameOriginFrameMounted(): boolean {
   return false;
 }
 
-export function pageConnectionsQuiet(): boolean {
+/**
+ * What of this page uses the network now, the longest-lived first: a
+ * same-origin frame, an open WebSocket, a request waiting for its answer.
+ * Null when nothing does.
+ */
+export function pageConnectionsHeldBy(): 'frame' | 'socket' | 'request' | null {
   for (const socket of Array.from(sockets)) {
     if (socket.readyState === SOCKET_CLOSED) sockets.delete(socket);
   }
-  return inFlight === 0 && sockets.size === 0 && !sameOriginFrameMounted();
+  if (sameOriginFrameMounted()) return 'frame';
+  if (sockets.size > 0) return 'socket';
+  return inFlight > 0 ? 'request' : null;
+}
+
+export function pageConnectionsQuiet(): boolean {
+  return pageConnectionsHeldBy() === null;
 }

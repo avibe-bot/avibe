@@ -258,6 +258,23 @@ A loss of the direct path or a selection change never closes it. So a healthy up
 
 Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one connection carries many requests, so every request on a lost direct connection fails with it. That is the cost of a lost path, not of the closing. Nothing replays them.
 
+**Why a page has not moved** (2026-11-28, after a return on which the page's requests stayed on the public path for minutes and the App's report said no hand-over was asked, with nothing to say why). The page tells the instance its present reason in one word, and the instance adds it to its own line a minute for the session (docs/plans/remote-direct-rendezvous.md section 2). The word is the first of these that applies. Most are gates of the hand-over itself; `not_ours` is what its last attempt found, and comes before the bounds and the spacing so that it names the cause while they hold:
+
+| Word | The page |
+| --- | --- |
+| `not_ready` | has no first answer from the shell yet |
+| `no_path` | is in a shell that does not prefer the direct path, or is not on a direct address |
+| `on_path` | arrives directly, by its stream and by its latest request |
+| `asked` | has asked the shell and waits for its answer |
+| `quiet_frame`, `quiet_socket`, `quiet_request` | waits for a quiet page; what keeps it busy, the longest-lived first (a same-origin frame, a terminal, a request) |
+| `verdict` | waits for the last hand-over's stream to say how it came in |
+| `not_ours` | still arrives another way after a hand-over that closed nothing and kept nothing: its connections are not ones the shell can close |
+| `cap` | is held by the bounds on how many hand-overs |
+| `spacing` | is too soon after the last hand-over |
+| `idle` | wants a hand-over, is held by none of the above, and has no attempt under way. It should never last; it is named so that it shows if it does |
+
+It rides one request and no other: the page's own read of `/api/session` (`X-Avibe-Page`, `ui/src/lib/apiFetch.ts`), which begins every connect of the event stream and follows every gap in it. With the word that read is made same-origin (`mode: 'same-origin'`), so the header cannot be carried to another origin: a redirect of that read to another origin, which never gave the page an answer it could use, is now an error. The instance therefore hears the word at every return, reconnect and hand-over, as the state the page stands in then, not every minute. It is sent when the word changes and otherwise at most once in ten seconds. A fixed word and nothing else; only a page that can hand over sends it.
+
 **Detection is not a measured bound.** How fast "lost" arrives is the transport's (section 12). The 8 to 17 s measured with a desktop iroh client, against the instance's 6 s idle timeout and 1.5 s keep-alives, is not a device bound and not an end-to-end failover time (cell Q7).
 
 ## 8. Failover by WebKit (candidate safety net)
