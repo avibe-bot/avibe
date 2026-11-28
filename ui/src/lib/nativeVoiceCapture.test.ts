@@ -204,6 +204,34 @@ describe('NativePcmCapture', () => {
     });
   });
 
+  it('keeps how the App\'s engine was started again after its configuration changed', async () => {
+    const on = handlers();
+    const trace = new VoiceCaptureTrace('hold', 'dictation-5');
+    adoptAnswer = async () => ({ sampleRate: 16_000, timings: { variant: 'early' } });
+    const capture = adoptedCaptureFactory('n0123456789abcdef')(emptyVoiceStream(), 16_000, 0, on, 5_000, trace) as NativePcmCapture;
+    await capture.start();
+    capture.stop();
+    for (const listener of [...holdListeners]) {
+      listener({
+        phase: 'timings',
+        take: 'n0123456789abcdef',
+        timings: {
+          variant: 'early', restarts: 1,
+          cfgFrom: 'MicrophoneBuiltIn', cfgFromHz: 48_000, cfgFromCh: 1,
+          cfgTo: 'AirPodsMicrophone', cfgToHz: 24_000, cfgToCh: 1,
+        },
+      });
+    }
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+    const attempt = trace.toEvent('sent').attempts[0];
+    expect(attempt).toMatchObject({
+      holdRestarts: 1,
+      holdCfgFrom: 'MicrophoneBuiltIn', holdCfgFromHz: 48_000, holdCfgFromCh: 1,
+      // A port the trace does not name is `other`.
+      holdCfgTo: 'other', holdCfgToHz: 24_000, holdCfgToCh: 1,
+    });
+  });
+
   it('keeps none of the counts of taps of unknown length when the App\'s line is not what it writes', async () => {
     for (const tapsLost of ['lost=3', 'lost=3 c50=0 c80=1 c100=2 c120=3 secret=1', 'c50=0 c80=1 c100=2 c120=3', 3]) {
       const on = handlers();

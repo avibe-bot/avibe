@@ -141,6 +141,10 @@ final class NativeHoldCapture {
         /// How it ended: `tap`, `moved`, `rejected`, `unadopted`, `stopped`,
         /// a failed step, or the system's reason.
         var end: String?
+        /// How often the engine was started again after its configuration
+        /// changed under the take, and the last such change.
+        var restarts = 0
+        var change: NativeHoldInputChange?
 
         /// The cue to the first captured audio (negative: audio first).
         var cueToLive: Int? {
@@ -186,6 +190,8 @@ final class NativeHoldCapture {
             if bare { fields["bare"] = true }
             if let why { fields["why"] = why }
             if let end { fields["end"] = end }
+            if restarts > 0 { fields["restarts"] = restarts }
+            if let change { fields.merge(change.fields) { _, new in new } }
             return fields
         }
 
@@ -200,7 +206,10 @@ final class NativeHoldCapture {
                 + part("e", liveEarly) + part("q", liveQuiet)
                 + part("buf", firstBufferAt) + part("bytes", firstBufferBytes)
                 + part("adopt", adoptedAt) + part("up", releasedAt)
+                // The end before the change: a line past its length is cut
+                // from its tail (`NativeHoldTimings`).
                 + (end.map { " end=" + $0 } ?? "")
+                + (restarts > 0 ? " rs=\(restarts)" : "") + (change.map { " cfg=" + $0.text } ?? "")
         }
     }
 
@@ -565,7 +574,9 @@ final class NativeHoldCapture {
         running = take
         do {
             let other = audio.otherAudioPlaying
-            let timings = try audio.start(onPCM: receiver(for: take), onEnd: ender(for: take))
+            let timings = try audio.start(
+                onPCM: receiver(for: take), onEnd: ender(for: take), onChange: changer(for: take)
+            )
             // The page of an older Avibe drops these: kept on the phone too.
             noteTimings(
                 "hold page \(audio.route) cat=\(timings.categoryMs) act=\(timings.activateMs)"
@@ -609,6 +620,21 @@ final class NativeHoldCapture {
         { [weak self, weak take] reason in
             guard let self, let take, self.running === take else { return }
             self.end(reason: reason)
+        }
+    }
+
+    /// The engine's configuration changed under `take`: a hold's timings
+    /// keep it (the page's trace and the phone's line); a take the page
+    /// started has only the phone's line.
+    private func changer(for take: Take) -> @MainActor (NativeHoldInputChange) -> Void {
+        { [weak self, weak take] change in
+            guard let self, let take, self.running === take else { return }
+            if let hold = take.hold {
+                hold.timings.change = change
+                if change.restarted { hold.timings.restarts += 1 }
+            } else {
+                self.noteTimings("hold page cfg=\(change.text)")
+            }
         }
     }
 
@@ -886,7 +912,9 @@ final class NativeHoldCapture {
         take.hold = hold
         take.adopted = false
         running = take
-        audio.begin(onPCM: receiver(for: take), onEnd: ender(for: take)) { [weak self, weak take, weak hold] result in
+        audio.begin(
+            onPCM: receiver(for: take), onEnd: ender(for: take), onChange: changer(for: take)
+        ) { [weak self, weak take, weak hold] result in
             guard let self, let take, let hold else { return }
             switch result {
             case .success(let begun):
@@ -1380,9 +1408,13 @@ protocol NativeHoldCaptureAudio: AnyObject {
     /// without starting it: no audio is captured. `completion` on the main actor.
     func arm(completion: @escaping @MainActor (Result<NativeHoldCapture.ArmTimings, NativeHoldCapture.StartError>) -> Void)
     /// Starts the prepared input (preparing it first when nothing is).
+    /// `onChange` hears each change of the engine's configuration under the
+    /// take, with whether the input started again; one it did not is
+    /// followed by `onEnd("route")`.
     func begin(
         onPCM: @escaping @MainActor (Data) -> Void,
         onEnd: @escaping @MainActor (String) -> Void,
+        onChange: @escaping @MainActor (NativeHoldInputChange) -> Void,
         completion: @escaping @MainActor (Result<NativeHoldCapture.BeginTimings, NativeHoldCapture.StartError>) -> Void
     )
     /// Takes down what `arm` prepared; nothing was captured.
@@ -1399,10 +1431,11 @@ protocol NativeHoldCaptureAudio: AnyObject {
     func prepare()
     /// Activates the session and starts the input. `onPCM` gets 16 kHz mono
     /// little-endian Int16 audio and `onEnd` the system's reason for ending
-    /// the input, both on the main actor.
+    /// the input, both on the main actor; `onChange` as for `begin`.
     func start(
         onPCM: @escaping @MainActor (Data) -> Void,
-        onEnd: @escaping @MainActor (String) -> Void
+        onEnd: @escaping @MainActor (String) -> Void,
+        onChange: @escaping @MainActor (NativeHoldInputChange) -> Void
     ) throws -> NativeHoldCapture.Timings
     /// Stops the input. `stopped` runs on the main actor once it has
     /// stopped and can send no more audio: at once for an input stopped
@@ -1464,6 +1497,45 @@ final class NativeHoldPCMConverter {
             return nil
         }
         return Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size)
+    }
+}
+
+/// A take's `AVAudioEngine` as `NativeHoldEngineRecovery` restarts it.
+final class NativeHoldEngineInput: NativeHoldRestartableInput, @unchecked Sendable {
+    private let engine: AVAudioEngine
+    /// The tap for a converter fitted to the input's format.
+    private let tap: (NativeHoldPCMConverter) -> AVAudioNodeTapBlock
+
+    init(engine: AVAudioEngine, tap: @escaping (NativeHoldPCMConverter) -> AVAudioNodeTapBlock) {
+        self.engine = engine
+        self.tap = tap
+    }
+
+    static func state(of engine: AVAudioEngine) -> NativeHoldInputState? {
+        let session = AVAudioSession.sharedInstance()
+        guard session.isInputAvailable else { return nil }
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        return .init(
+            port: session.currentRoute.inputs.first?.portType.rawValue ?? "none",
+            rate: Int(format.sampleRate),
+            channels: Int(format.channelCount)
+        )
+    }
+
+    func current() -> NativeHoldInputState? {
+        Self.state(of: engine)
+    }
+
+    func restart() throws {
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
+        let format = input.outputFormat(forBus: 0)
+        guard let converter = NativeHoldPCMConverter(input: format) else {
+            throw NSError(domain: "NativeHoldEngineInput.format", code: Int(format.sampleRate))
+        }
+        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: tap(converter))
+        engine.prepare()
+        try engine.start()
     }
 }
 
@@ -1543,6 +1615,9 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
 
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
+    /// What starts the present engine again after a change of its
+    /// configuration; stopped with it at the bound of an untaken take.
+    private var recovery: NativeHoldEngineRecovery?
     private var armed: NativeHoldCapture.ArmTimings?
     private let lock = NSLock()
     private var sink: NativeHoldSink?
@@ -1620,7 +1695,8 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     func begin(
         _ ticket: Int,
         onPCM: @escaping (Data) -> Void,
-        onEnd: @escaping (String) -> Void
+        onEnd: @escaping (String) -> Void,
+        onChange: @escaping (NativeHoldInputChange) -> Void
     ) -> Result<NativeHoldCapture.BeginTimings, NativeHoldCapture.StartError> {
         guard isCurrent(ticket) else { return .failure(.failed("cancelled")) }
         var armedNow: NativeHoldCapture.ArmTimings?
@@ -1649,6 +1725,14 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
             return .failure(.failed("engine:\((error as NSError).code)"))
         }
         let startMs = SystemNativeHoldCaptureAudio.ms(since: start)
+        let recovery = NativeHoldEngineRecovery(input: NativeHoldEngineInput.state(of: engine))
+        self.recovery = recovery
+        let restartable = NativeHoldEngineInput(engine: engine) { converter in
+            { buffer, _ in
+                guard let data = converter.convert(buffer) else { return }
+                sink.send(data)
+            }
+        }
         let center = NotificationCenter.default
         observers = [
             center.addObserver(
@@ -1661,8 +1745,19 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
                 guard type == .began else { return }
                 onEnd("interrupted")
             },
-            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
-                onEnd("route")
+            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) {
+                [weak self, queue, engineID = ObjectIdentifier(engine)] _ in
+                // On this input's queue, as everything else it does.
+                queue.async {
+                    // An input already taken down, or stopped at the bound,
+                    // ended its take another way.
+                    guard let self, self.engine.map(ObjectIdentifier.init) == engineID,
+                          !recovery.stopped
+                    else { return }
+                    let change = recovery.changed(restartable)
+                    onChange(change)
+                    if !change.restarted { onEnd("route") }
+                }
             },
         ]
         return .success(.init(armed: armedNow, startMs: startMs))
@@ -1679,6 +1774,11 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     /// input.
     private func stopAtTheBound(_ stopping: AVAudioEngine) -> Bool {
         guard engine === stopping else { return false }
+        // Nothing starts it again: a change of its configuration now finds
+        // no one listening, and one already queued finds it stopped here.
+        recovery?.stop()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
         stopping.inputNode.removeTap(onBus: 0)
         stopping.stop()
         return true
@@ -1689,6 +1789,8 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     func takeDown(deactivate: Bool, stopped: (() -> Void)? = nil) {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
+        recovery?.stop()
+        recovery = nil
         armed = nil
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
@@ -1750,6 +1852,7 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
     func begin(
         onPCM: @escaping @MainActor (Data) -> Void,
         onEnd: @escaping @MainActor (String) -> Void,
+        onChange: @escaping @MainActor (NativeHoldInputChange) -> Void,
         completion: @escaping @MainActor (Result<NativeHoldCapture.BeginTimings, NativeHoldCapture.StartError>) -> Void
     ) {
         heldInUse = true
@@ -1758,7 +1861,8 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
             let result = held.begin(
                 ticket,
                 onPCM: { data in DispatchQueue.main.async { MainActor.assumeIsolated { onPCM(data) } } },
-                onEnd: { reason in DispatchQueue.main.async { MainActor.assumeIsolated { onEnd(reason) } } }
+                onEnd: { reason in DispatchQueue.main.async { MainActor.assumeIsolated { onEnd(reason) } } },
+                onChange: { change in DispatchQueue.main.async { MainActor.assumeIsolated { onChange(change) } } }
             )
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
         }
@@ -1816,7 +1920,8 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
 
     func start(
         onPCM: @escaping @MainActor (Data) -> Void,
-        onEnd: @escaping @MainActor (String) -> Void
+        onEnd: @escaping @MainActor (String) -> Void,
+        onChange: @escaping @MainActor (NativeHoldInputChange) -> Void
     ) throws -> NativeHoldCapture.Timings {
         let session = AVAudioSession.sharedInstance()
         let categoryStart = DispatchTime.now()
@@ -1859,6 +1964,10 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
             throw NativeHoldCapture.StartError.failed("engine:\((error as NSError).code)")
         }
         self.engine = engine
+        let recovery = NativeHoldEngineRecovery(input: NativeHoldEngineInput.state(of: engine))
+        let restartable = NativeHoldEngineInput(engine: engine) { converter in
+            Self.tap(converter: converter, onPCM: onPCM)
+        }
         let center = NotificationCenter.default
         observers = [
             center.addObserver(
@@ -1875,10 +1984,16 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
                 forName: .AVAudioEngineConfigurationChange,
                 object: engine,
                 queue: .main
-            ) { _ in
-                // The input changed under the take (a headset came or went):
-                // it stopped; what was recorded goes on to be sent.
-                MainActor.assumeIsolated { onEnd("route") }
+            ) { [weak self, engineID = ObjectIdentifier(engine)] _ in
+                // The input changed under the take: it stopped. While an
+                // input remains it starts again; with none, what was
+                // recorded goes on to be sent.
+                MainActor.assumeIsolated {
+                    guard let self, self.engine.map(ObjectIdentifier.init) == engineID else { return }
+                    let change = recovery.changed(restartable)
+                    onChange(change)
+                    if !change.restarted { onEnd("route") }
+                }
             },
         ]
         return .init(activateMs: activateMs, engineMs: Self.ms(since: engineStart), categoryMs: categoryMs)

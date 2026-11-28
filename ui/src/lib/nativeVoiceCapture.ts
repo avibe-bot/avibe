@@ -15,7 +15,7 @@ import {
   type NativeVoiceHoldTimings,
 } from './native';
 import { VOICE_LEVEL_INTERVAL_MS } from './voiceActivity';
-import type { VoiceCaptureAttempt, VoiceCaptureTrace, VoiceNativeEnd } from './voiceCaptureTrace';
+import type { VoiceCaptureAttempt, VoiceCaptureTrace, VoiceInputPort, VoiceNativeEnd } from './voiceCaptureTrace';
 import {
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
   type VoicePcmCapture,
@@ -138,6 +138,14 @@ const lostTapCounts = (lost: unknown): Partial<VoiceCaptureAttempt> => {
   };
 };
 
+/** The input ports the trace names (`AVAudioSession.Port`); any other is `other`. */
+const INPUT_PORTS = new Set<VoiceInputPort>([
+  'MicrophoneBuiltIn', 'MicrophoneWired', 'BluetoothHFP', 'USBAudio', 'CarAudio', 'LineIn', 'none',
+]);
+const inputPort = (value: unknown): VoiceInputPort | undefined => (
+  typeof value === 'string' ? (INPUT_PORTS.has(value as VoiceInputPort) ? value as VoiceInputPort : 'other') : undefined
+);
+
 /** The App's own timings of a hold, as the capture trace keeps them (ms from touch-down, except
  *  the two durations). Unknown values are left out. */
 const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<VoiceCaptureAttempt> => {
@@ -160,6 +168,15 @@ const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<Voice
     holdPrepMs: count(timings.prepareMs),
     ...tapCounts(timings.taps),
     ...lostTapCounts(timings.tapsLost),
+    // The engine's configuration changed under the take: how often it started again, and the
+    // last change's input before and after.
+    holdRestarts: count(timings.restarts),
+    holdCfgFrom: inputPort(timings.cfgFrom),
+    holdCfgFromHz: count(timings.cfgFromHz),
+    holdCfgFromCh: count(timings.cfgFromCh),
+    holdCfgTo: inputPort(timings.cfgTo),
+    holdCfgToHz: count(timings.cfgToHz),
+    holdCfgToCh: count(timings.cfgToCh),
   };
   for (const key of Object.keys(fields) as (keyof VoiceCaptureAttempt)[]) {
     if (fields[key] === undefined) delete fields[key];
