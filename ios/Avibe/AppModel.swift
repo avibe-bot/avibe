@@ -2741,16 +2741,25 @@ final class AppModel: ObservableObject {
         return directPathController.bypassListener(forInstanceURL: runtime.instance.url)
     }
 
-    /// Whether `runtime`'s document is being loaded by the open under way:
-    /// its navigation has started (`.connecting`), committed
-    /// (`.loadingPage`), or its cached page waits covered for the instance
-    /// (`.showingCached`), and it has not finished. A script, stylesheet or
-    /// first read cut there is not made again by WebKit or the page.
+    /// Whether `runtime`'s document is being loaded: the view's own
+    /// main-frame navigation of the instance's page has started and not
+    /// finished (the first load, or any later one: a restart, a reload
+    /// after the web content process ended), or the open under way has its
+    /// cached page still covered, waiting for the instance
+    /// (`.showingCached`: that navigation has finished, the page has not
+    /// yet read what it needs). A script, stylesheet or first read cut
+    /// there is not made again by WebKit or the page.
     private func isLoadingDocument(of runtime: MobileRuntimeContext) -> Bool {
+        guard showsOrOpens(runtime) else {
+            return false
+        }
+        if runtimeController?.isLoadingInstanceDocument == true {
+            return true
+        }
         guard let attempt = runtimeOpenAttempt, attempt.runtime == runtime else {
             return false
         }
-        return [.connecting, .loadingPage, .showingCached].contains(attempt.phase)
+        return attempt.phase == .showingCached
     }
 
     /// A change of connection choice closed connections of `runtime`'s page
@@ -2758,13 +2767,17 @@ final class AppModel: ObservableObject {
     /// the link of 「仅直连和中继」 arriving on a slow network): the page is
     /// loaded again, where it is, on the policy now in force.
     private func reloadPageCutWhileLoading(_ runtime: MobileRuntimeContext) {
-        guard
-            runtimeOpenAttempt?.runtime == runtime,
-            sessionCoordinator.isSelectedRuntime(runtime)
-        else {
+        guard showsOrOpens(runtime) else {
             return
         }
         runtimeController?.reloadInstancePage()
+    }
+
+    /// `runtime` is the one shown or being opened, and still selected: the
+    /// view (`runtimeController`) is its view.
+    private func showsOrOpens(_ runtime: MobileRuntimeContext) -> Bool {
+        (route.runtime == runtime || runtimeOpenAttempt?.runtime == runtime)
+            && sessionCoordinator.isSelectedRuntime(runtime)
     }
 
     /// 「仅直连和中继」 back to automatic for an open that is about to be

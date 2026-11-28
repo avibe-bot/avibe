@@ -808,10 +808,11 @@ conforms to. Without a conforming controller the App offers neither:
   up, on the link. Until 2026-11-28 the view was reloaded instead, at every
   open and every return to the foreground. One reload remains: when the
   cut-over closes a connection while the page's document is still loading
-  (its navigation started and not finished, or its cached page still
-  covered: a slow network), the cut script, stylesheet or first read would
-  not be made again, so the view loads the page again, on the link, and no
-  closure is reported. Whether it was loading is asked before the close.
+  (a navigation of the view started and not finished, the first or a
+  later one, or its cached page still covered), the cut script, stylesheet
+  or first read would not be made again, so the view loads the page again,
+  on the link, and no closure is reported. Whether it was loading is asked
+  before the close.
 - **The control plane's host.** WebKit sends a route's proxy the parent
   domain of a routed host too (`avibe.bot` for an instance under it;
   measured 2026-11-28, and `excludedDomains` cannot keep it off without

@@ -1155,6 +1155,13 @@ final class WebViewController: UIViewController {
         return url
     }
 
+    /// Whether the view is loading the instance's document now: a
+    /// main-frame navigation of the primary view has started and not
+    /// finished or failed, and the view is on the instance's origin.
+    var isLoadingInstanceDocument: Bool {
+        !isInvalidatedForAccountTransition && primaryNavigationInProgress && instancePageURL != nil
+    }
+
     /// Loads the instance's page again where it is, through the load gate
     /// as every load the shell starts: a change of connection choice closed
     /// its connections while its document was still loading
