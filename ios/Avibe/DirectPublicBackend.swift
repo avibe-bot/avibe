@@ -210,6 +210,10 @@ final class DirectPublicFaults: @unchecked Sendable {
     struct Row: Equatable, Sendable {
         let cause: Cause
         let count: Int
+        /// The cause's running total this row was taken at: answering it
+        /// marks everything up to there carried, however many requests
+        /// carried the same counts.
+        let through: Int
 
         var json: String {
             "{\"cause\":\"\(cause.rawValue)\",\"count\":\(count)}"
@@ -217,36 +221,42 @@ final class DirectPublicFaults: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var counts: [Cause: Int] = [:]
+    /// Every failure counted in this process, by cause, and how many of
+    /// them an answered request has carried. Totals only grow, so two
+    /// requests that carried the same counts mark them once.
+    private var totals: [Cause: Int] = [:]
+    private var carried: [Cause: Int] = [:]
 
     func record(_ cause: Cause) {
         lock.withLock {
-            counts[cause] = min((counts[cause] ?? 0) + 1, Int(Int32.max))
+            totals[cause] = (totals[cause] ?? 0) &+ 1
         }
     }
 
     /// The counts not yet carried, the largest first, at most `limit` rows.
     var pending: [Row] {
         lock.withLock {
-            counts
-                .map { Row(cause: $0.key, count: $0.value) }
-                .sorted {
-                    $0.count != $1.count
-                        ? $0.count > $1.count
-                        : Cause.allCases.firstIndex(of: $0.cause)! < Cause.allCases.firstIndex(of: $1.cause)!
+            Cause.allCases
+                .compactMap { cause -> Row? in
+                    let total = totals[cause] ?? 0
+                    let left = total - (carried[cause] ?? 0)
+                    guard left > 0 else { return nil }
+                    return Row(cause: cause, count: min(left, Int(Int32.max)), through: total)
                 }
+                .enumerated()
+                .sorted { $0.element.count != $1.element.count ? $0.element.count > $1.element.count : $0.offset < $1.offset }
                 .prefix(Self.limit)
-                .map { $0 }
+                .map(\.element)
         }
     }
 
     /// A request that carried `sent` was answered: those counts are done;
-    /// any counted since stay.
+    /// any counted since stay, and a second answer for the same counts
+    /// changes nothing.
     func answered(_ sent: [Row]) {
         lock.withLock {
             for row in sent {
-                let left = (counts[row.cause] ?? 0) - row.count
-                counts[row.cause] = left > 0 ? left : nil
+                carried[row.cause] = max(carried[row.cause] ?? 0, row.through)
             }
         }
     }
@@ -307,6 +317,8 @@ final class DirectRouteFallbacks: @unchecked Sendable {
     struct Row: Equatable, Sendable {
         let reason: Reason
         let count: Int
+        /// The running total this row was taken at (as `DirectPublicFaults`).
+        let through: Int
 
         var json: String {
             "{\"reason\":\"\(reason.rawValue)\",\"count\":\(count)}"
@@ -314,18 +326,22 @@ final class DirectRouteFallbacks: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var counts: [Reason: Int] = [:]
+    private var totals: [Reason: Int] = [:]
+    private var carried: [Reason: Int] = [:]
 
     func record(_ reason: Reason) {
         lock.withLock {
-            counts[reason] = min((counts[reason] ?? 0) + 1, Int(Int32.max))
+            totals[reason] = (totals[reason] ?? 0) &+ 1
         }
     }
 
     var pending: [Row] {
         lock.withLock {
             Reason.allCases.compactMap { reason in
-                counts[reason].map { Row(reason: reason, count: $0) }
+                let total = totals[reason] ?? 0
+                let left = total - (carried[reason] ?? 0)
+                guard left > 0 else { return nil }
+                return Row(reason: reason, count: min(left, Int(Int32.max)), through: total)
             }
         }
     }
@@ -333,8 +349,7 @@ final class DirectRouteFallbacks: @unchecked Sendable {
     func answered(_ sent: [Row]) {
         lock.withLock {
             for row in sent {
-                let left = (counts[row.reason] ?? 0) - row.count
-                counts[row.reason] = left > 0 ? left : nil
+                carried[row.reason] = max(carried[row.reason] ?? 0, row.through)
             }
         }
     }

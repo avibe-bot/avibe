@@ -157,12 +157,14 @@ final class DirectPublicBackendTests: XCTestCase {
         XCTAssertEqual(rows.first?.json, #"{"cause":"address_benchmark","count":1}"#)
         // Carried: those are done; the one left out comes next.
         faults.answered(rows)
-        XCTAssertEqual(faults.pending, [DirectPublicFaults.Row(cause: .connectOther, count: 1)])
-        // A failure counted meanwhile stays after its row is answered.
+        XCTAssertEqual(faults.pending.map(\.json), [#"{"cause":"connect_other","count":1}"#])
+        // A failure counted meanwhile stays after its row is answered, and
+        // two requests that carried the same counts mark them once.
         let sent = faults.pending
         await open(StandInResolver(.answer([edge])), DialSpy(failing: [edge]))
         faults.answered(sent)
-        XCTAssertEqual(faults.pending, [DirectPublicFaults.Row(cause: .connectOther, count: 1)])
+        faults.answered(sent)
+        XCTAssertEqual(faults.pending.map(\.json), [#"{"cause":"connect_other","count":1}"#])
     }
 
     /// The App's going around its listener is counted by reason, once per
@@ -175,8 +177,12 @@ final class DirectPublicBackendTests: XCTestCase {
         fallbacks.record(.openFailed)
         let rows = fallbacks.pending
         XCTAssertEqual(rows.map(\.json), [#"{"reason":"open_failed","count":2}"#, #"{"reason":"retry","count":1}"#])
+        // Overlapping requests carried the same rows; one more counted
+        // between their answers stays.
+        fallbacks.record(.retry)
         fallbacks.answered(rows)
-        XCTAssertEqual(fallbacks.pending, [])
+        fallbacks.answered(rows)
+        XCTAssertEqual(fallbacks.pending.map(\.json), [#"{"reason":"retry","count":1}"#])
     }
 
     func testAFailedDialMovesOnToTheNextAllowedAddress() async throws {
