@@ -666,8 +666,10 @@ final class TurnActivityTests: XCTestCase {
     }
 
 
+    /// Switched off again (11-28): the shell announces neither capability, so
+    /// no page shows the setting; the methods stay recognized.
     func testLockScreenProgressCapabilityReplacesLegacyCapability() {
-        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
+        XCTAssertNil(NativeShellMetadata.capabilities["lockScreenProgress"])
         XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         for method in ["setting", "setSetting", "observe", "openSettings", "status", "start", "stop"] {
             guard case .success(let request) = NativeBridgeRequest.parse(["method": "liveActivity." + method, "params": [:]]) else {
@@ -732,12 +734,27 @@ final class TurnActivityTests: XCTestCase {
     }
 
 
-    /// The shipped coordinator is the feature: a setting stored on stays on,
-    /// and leaving the App while an observed Turn runs starts its card.
-    func testTheShippedCoordinatorStartsACard() async {
-        XCTAssertTrue(TurnActivityCoordinator.shipsLockScreenProgress)
+    /// The shipped coordinator is switched off (11-28): a setting an earlier
+    /// build stored on reads off and is stored off, and nothing starts.
+    func testTheShippedCoordinatorRefusesEveryStart() async {
+        XCTAssertFalse(TurnActivityCoordinator.shipsLockScreenProgress)
         defaults.set(true, forKey: "avibe.liveActivities.enabled")
         let owner = shippedCoordinator()
+        XCTAssertFalse(owner.deviceEnabled)
+        XCTAssertFalse(defaults.bool(forKey: "avibe.liveActivities.enabled"))
+        await owner.setSetting(true)
+        await observe(owner)
+        XCTAssertNil(owner.willDeactivate(registrationID: "registration-1"))
+        XCTAssertTrue(cards.isEmpty)
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    /// Switched on (`available: true`), the feature the switch restores: a
+    /// setting stored on stays on, and leaving the App while an observed Turn
+    /// runs starts its card.
+    func testSwitchedOnTheCoordinatorStartsACard() async {
+        defaults.set(true, forKey: "avibe.liveActivities.enabled")
+        let owner = shippedCoordinator(available: true)
         XCTAssertTrue(owner.deviceEnabled)
         XCTAssertTrue(defaults.bool(forKey: "avibe.liveActivities.enabled"))
         XCTAssertEqual(owner.setting()["enabled"] as? Bool, true)

@@ -104,12 +104,13 @@ final class TurnActivityCoordinator {
     private let beginBackgroundTask: BackgroundTask
     private let isActive: @MainActor () -> Bool
     private static let settingKey = "avibe.liveActivities.enabled"
-    /// Lock Screen and Dynamic Island progress ships (back on 11-27, after the
-    /// black-card fix). Off, the setting reads and stays off, nothing starts a
-    /// card, and a card an earlier build left ends at launch and whenever the
-    /// App comes to the front. Switching off also means removing the
-    /// `lockScreenProgress` line from NativeShellMetadata.capabilities by hand.
-    static let shipsLockScreenProgress = true
+    /// Lock Screen and Dynamic Island progress is switched off again (11-28)
+    /// for the public build, until the owner approves the card on his phone
+    /// (it was off 11-26, on 11-27). Off, the setting reads and stays off,
+    /// nothing starts a card, and a card an earlier build left ends at launch
+    /// and whenever the App comes to the front. Switching on again also means
+    /// adding `lockScreenProgress: 1` to NativeShellMetadata.capabilities.
+    static let shipsLockScreenProgress = false
     private let available: Bool
     var deviceEnabled: Bool { available && defaults.bool(forKey: Self.settingKey) }
 
