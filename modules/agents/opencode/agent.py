@@ -2041,11 +2041,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request,
                 poll_server,
                 session_id,
-                agent_to_use=agent_to_use,
                 model_dict=model_dict,
                 reasoning_effort=reasoning_effort,
                 baseline_message_ids=baseline_message_ids,
-                settings=opencode_settings,
             )
 
             if not should_emit:

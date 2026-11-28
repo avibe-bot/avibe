@@ -490,11 +490,9 @@ class OpenCodePollLoop:
         server: OpenCodeGeneration,
         session_id: str,
         *,
-        agent_to_use: Optional[str],
         model_dict: Optional[Dict[str, str]],
         reasoning_effort: Optional[str],
         baseline_message_ids: set[str],
-        settings: Any = None,
     ) -> tuple[Optional[str], bool]:
         """Poll messages for a prompt.
 

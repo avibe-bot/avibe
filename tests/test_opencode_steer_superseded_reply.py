@@ -98,7 +98,6 @@ async def _live_poll(messages, agent):
             request,
             _server(messages),
             "native-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
