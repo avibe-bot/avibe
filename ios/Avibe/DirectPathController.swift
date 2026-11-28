@@ -234,10 +234,11 @@ final class DirectRouteOwner {
     /// one of them: `DirectPathController.lateRoute`.)
     private var excluded: Set<StoreHost> = []
 
-    /// Every host some store's route lists now. Unlike `allowedHosts`, a
-    /// host taken off its last route (`remove`) is not among them.
-    var routedHosts: Set<String> {
-        Set(hostsByStore.values.joined().map(\.name))
+    /// The hosts `store`'s route lists now. Unlike `allowedHosts`, a host
+    /// taken off the route (`remove`) is not among them, nor is a host only
+    /// another store routes.
+    func routedHosts(store: UUID) -> [String] {
+        (hostsByStore[store] ?? []).map(\.name)
     }
 
     func routes(_ host: String, store: UUID) -> Bool {
@@ -1783,16 +1784,19 @@ final class DirectPathController {
 
     /// Whether a CONNECT for `host` is carried though no route lists it:
     /// only the control plane's own host, only while it is exactly the
-    /// parent domain of a host some route lists now, and not once it is
-    /// routed itself (its own policy then decides). "Now" is read from the
-    /// routes as they stand, not from every host ever routed: when the last
-    /// host under it leaves its route (`bypassListener`), WebKit stops
-    /// sending the parent here, and anything else on this device that asks
-    /// the loopback port for it is refused again.
+    /// parent domain of a host the current account store's route lists now,
+    /// and not once it is routed itself (its own policy then decides). That
+    /// is read from the route as it stands, not from every host ever
+    /// routed: when the last host under it leaves the route
+    /// (`bypassListener`), or the account's store is replaced, WebKit no
+    /// longer sends the parent here, and anything else on this device that
+    /// asks the loopback port for it is refused again.
     private func carriesControlPlane(_ host: String) -> Bool {
         host == controlPlaneHost
             && !routeOwner.allowedHosts.contains(host)
-            && DirectAuthority.isParentDomain(host, ofAny: routeOwner.routedHosts)
+            && DirectAuthority.isParentDomain(
+                host, ofAny: routeOwner.routedHosts(store: websiteDataStore.identifier)
+            )
     }
 
     // MARK: Plans

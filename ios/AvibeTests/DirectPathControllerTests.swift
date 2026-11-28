@@ -534,6 +534,24 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(controller.plan(for: service))
     }
 
+    /// The route that counts is the current account store's. After the
+    /// account's store is replaced, the old store's route still lists the
+    /// host, but no page of this account can send its parent here: a new
+    /// CONNECT for it is refused, not only a plan made before.
+    @MainActor
+    func testTheControlPlaneHostIsNotCarriedForAnotherStoresRoute() async throws {
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        try await harness.signIn()
+        try await harness.select("instance-under-service")
+        let plan = try XCTUnwrap(controller.plan(for: service))
+
+        await harness.websiteDataStore.rotate()
+        XCTAssertFalse(plan.isCurrent())
+        XCTAssertNil(controller.plan(for: service))
+    }
+
     /// A tunnel that never goes quiet does not hold the choice up for good.
     @MainActor
     func testTheStrictCutoverClosesATunnelStillBusyAtItsBound() async throws {
