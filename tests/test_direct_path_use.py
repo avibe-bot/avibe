@@ -68,6 +68,64 @@ def test_requests_are_counted_per_session_and_minute_and_logged_once_the_minute_
     assert not any(word in line for line in caplog.messages for word in ("sub-", "browser-"))
 
 
+def test_hourly_changes_compare_majorities_across_real_gaps_and_charge_the_later_hour(caplog):
+    clock = _Clock()
+    counts = IngressCounts(clock)
+    caplog.set_level("INFO", logger="vibe.direct_path_use")
+
+    def note(at, direct, session="private-session"):
+        clock.now = at
+        counts.note(session, direct=direct, owner=False)
+
+    # Single-request minutes qualify. An unchanged strict majority is not a change.
+    note(3500, True)
+    note(3550, False)
+    note(3551, True)
+    note(3552, True)
+    # 90s between actual arrivals, despite the absent minute; charge to hour 1.
+    note(3642, False)
+    note(3660, True)
+    # A >90s silence before a tied minute is still a gap at the next vote.
+    note(3760, False)
+    note(3761, True)
+    note(3780, False)
+    # Another session's traffic cannot bridge this gap.
+    note(3840, False, "another-private-session")
+    note(3870.01, True)
+    clock.now = 10800
+    counts.flush()
+    counts.flush()
+    assert [line for line in _lines(caplog) if " hourly " in line] == [
+        "direct path_use hourly session=1 hours_ago=1 to_direct=0 to_other=0 gap_to_direct=0 gap_to_other=0",
+        "direct path_use hourly session=1 hours_ago=2 to_direct=1 to_other=1 gap_to_direct=1 gap_to_other=1",
+        "direct path_use hourly session=2 hours_ago=2 to_direct=0 to_other=0 gap_to_direct=0 gap_to_other=0",
+    ]
+
+
+def test_hourly_counts_do_not_compare_pooled_or_forgotten_sessions(monkeypatch, caplog):
+    clock = _Clock()
+    counts = IngressCounts(clock)
+    caplog.set_level("INFO", logger="vibe.direct_path_use")
+    monkeypatch.setattr(direct_path_use, "_MAX_SESSIONS_PER_MINUTE", 1)
+    monkeypatch.setattr(direct_path_use, "_MAX_SESSIONS", 2)
+    counts.note("a", direct=True, owner=True)
+    clock.now += 60
+    counts.note("b", direct=False, owner=True)
+    counts.note("a", direct=False, owner=True)  # pooled: break comparison for a only
+    clock.now += 60
+    counts.note("a", direct=False, owner=True)
+    clock.now += 60
+    counts.note("c", direct=True, owner=True)  # b forgotten
+    clock.now += 60
+    counts.note("b", direct=True, owner=True)  # new number, no comparison
+    clock.now = 3600
+    counts.flush()
+    assert [line for line in _lines(caplog) if " hourly " in line] == [
+        f"direct path_use hourly session={n} hours_ago=1 to_direct=0 to_other=0 gap_to_direct=0 gap_to_other=0"
+        for n in (1, 2, 3, 4)
+    ]
+
+
 def test_many_sessions_in_one_minute_share_one_line_past_the_bound(caplog):
     clock = _Clock()
     counts = IngressCounts(clock)
