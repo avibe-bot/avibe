@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import contextlib
+import copy
 import hashlib
 import json
 import logging
@@ -7047,13 +7048,93 @@ def detect_cli(binary: str, backend: str | None = None) -> dict:
     return probe_cli_sync(backend, path, env=_command_env_for(path)).payload()
 
 
+class _InflightDictEntry:
+    __slots__ = ("task", "waiter_count")
+
+    def __init__(self, task: asyncio.Task[dict]) -> None:
+        self.task = task
+        self.waiter_count = 0
+
+
+_DETECT_CLI_INFLIGHT: dict[tuple[Any, ...], _InflightDictEntry] = {}
+_ANTIGRAVITY_AUTH_INFLIGHT: dict[tuple[Any, ...], _InflightDictEntry] = {}
+_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH = 0
+_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH_LOCK = threading.Lock()
+
+
+def bump_antigravity_auth_epoch() -> None:
+    """Invalidate in-flight Antigravity passive auth probes after auth cutovers."""
+    global _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
+    with _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH_LOCK:
+        _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH += 1
+
+
+async def _coalesce_inflight_dict(
+    registry: dict[tuple[Any, ...], _InflightDictEntry],
+    key: tuple[Any, ...],
+    coro_factory: Callable[[], Any],
+) -> dict:
+    """Coalesce concurrent in-flight dict probes on the same loop without TTL caching."""
+    loop = asyncio.get_running_loop()
+    loop_key = (id(loop), *key)
+    entry = registry.get(loop_key)
+    if entry is None or entry.task.done() or entry.task.get_loop() is not loop:
+        task = asyncio.create_task(coro_factory())
+        entry = _InflightDictEntry(task)
+        registry[loop_key] = entry
+
+        def _cleanup(
+            done_task: asyncio.Task[Any],
+            *,
+            _key: tuple[Any, ...] = loop_key,
+            _entry: _InflightDictEntry = entry,
+        ) -> None:
+            if registry.get(_key) is _entry:
+                registry.pop(_key, None)
+            if not done_task.cancelled():
+                done_task.exception()
+
+        task.add_done_callback(_cleanup)
+
+    entry.waiter_count += 1
+    cancelled = False
+    try:
+        result = await asyncio.shield(entry.task)
+    except asyncio.CancelledError:
+        cancelled = True
+        entry.waiter_count -= 1
+        if entry.waiter_count == 0:
+            if registry.get(loop_key) is entry:
+                registry.pop(loop_key, None)
+            if not entry.task.done():
+                entry.task.cancel()
+                try:
+                    await entry.task
+                except BaseException:
+                    pass
+        raise
+    finally:
+        if not cancelled:
+            entry.waiter_count -= 1
+        if entry.task.done() and registry.get(loop_key) is entry:
+            registry.pop(loop_key, None)
+    return copy.deepcopy(result)
+
+
 async def detect_cli_async(binary: str, backend: str | None = None) -> dict:
-    backend, path = await asyncio.to_thread(_cli_detection_target, binary, backend)
-    if path is None:
-        return CliHealth(False, None, "missing", reason="not_found").payload()
-    if backend is None:
-        return CliHealth(True, path, "unknown").payload()
-    return (await probe_cli(backend, path, env=_command_env_for(path))).payload()
+    async def _probe() -> dict:
+        resolved_backend, path = await asyncio.to_thread(_cli_detection_target, binary, backend)
+        if path is None:
+            return CliHealth(False, None, "missing", reason="not_found").payload()
+        if resolved_backend is None:
+            return CliHealth(True, path, "unknown").payload()
+        return (await probe_cli(resolved_backend, path, env=_command_env_for(path))).payload()
+
+    return await _coalesce_inflight_dict(
+        _DETECT_CLI_INFLIGHT,
+        (str(binary or ""), str(backend or "")),
+        _probe,
+    )
 
 
 def check_cli_exec(path: str) -> dict:
@@ -13649,6 +13730,8 @@ def remove_backend_api_key(backend: str) -> dict:
                 target.auth_mode_set = True
 
         update_config_fields(_clear_auth_fields)
+        if backend == "antigravity":
+            bump_antigravity_auth_epoch()
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
         # The disk key is already gone (the user-visible truth — report
@@ -14454,52 +14537,68 @@ async def get_antigravity_auth_async() -> dict:
     default_cli = default_cli_for_backend("antigravity") or "agy"
 
     adc = await asyncio.to_thread(detect_antigravity_adc)
-    cli_health = await detect_cli_async(configured_cli or default_cli, "antigravity")
-    if cli_health["status"] == "ok":
-        binary = cli_health["path"] or await asyncio.to_thread(
-            resolve_antigravity_cli_path, configured_cli or default_cli
-        )
-        probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
-    else:
-        probe = _passive_status(
-            ok=False,
-            uncertain=True,
-            error="cli_not_found" if cli_health["status"] == "missing" else "cli_broken",
-        )
+    epoch = _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
+    key = (
+        configured_cli or default_cli,
+        auth_mode,
+        hashlib.sha256(api_key.encode("utf-8")).hexdigest() if api_key else "",
+        base_url,
+        gcp_project,
+        gcp_location,
+        bool(adc["present"]),
+        str(adc["path"] or ""),
+        epoch,
+    )
 
-    authenticated = bool(probe.get("authenticated"))
-    if auth_mode == "gemini-api-key":
-        credentials_present = bool(api_key)
-    elif auth_mode == "agent-platform":
-        credentials_present = bool(adc["present"]) or authenticated
-    else:
-        credentials_present = authenticated
+    async def _probe() -> dict:
+        cli_health = await detect_cli_async(configured_cli or default_cli, "antigravity")
+        if cli_health["status"] == "ok":
+            binary = cli_health["path"] or await asyncio.to_thread(
+                resolve_antigravity_cli_path, configured_cli or default_cli
+            )
+            probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
+        else:
+            probe = _passive_status(
+                ok=False,
+                uncertain=True,
+                error="cli_not_found" if cli_health["status"] == "missing" else "cli_broken",
+            )
 
-    return {
-        "ok": True,
-        "auth_mode": auth_mode,
-        "active_auth_mode": auth_mode if authenticated else "none",
-        "auth_mode_uncertain": bool(probe.get("uncertain")),
-        "authenticated": authenticated,
-        "credentials_present": credentials_present,
-        "catalog_available": False,
-        "inference_verified": False,
-        "cli_installed": bool(cli_health["found"]),
-        "cli_version": cli_health.get("version"),
-        "has_api_key": bool(api_key),
-        "api_key_length": len(api_key),
-        "api_key_masked": _mask_api_key(api_key),
-        "base_url": base_url or None,
-        "gcp_project": gcp_project or None,
-        "gcp_location": gcp_location or None,
-        "adc_present": bool(adc["present"]),
-        "adc_source": adc["source"],
-        "adc_command": adc["login_command"],
-        "auth_methods": probe.get("auth_methods") or list(ANTIGRAVITY_AUTH_MODES),
-        "supports_logout": bool(probe.get("supports_logout", False)),
-        "has_oauth_credentials": authenticated and auth_mode in {"oauth-personal", "oauth-business"},
-        "error": probe.get("error"),
-    }
+        authenticated = bool(probe.get("authenticated"))
+        if auth_mode == "gemini-api-key":
+            credentials_present = bool(api_key)
+        elif auth_mode == "agent-platform":
+            credentials_present = bool(adc["present"]) or authenticated
+        else:
+            credentials_present = authenticated
+
+        return {
+            "ok": True,
+            "auth_mode": auth_mode,
+            "active_auth_mode": auth_mode if authenticated else "none",
+            "auth_mode_uncertain": bool(probe.get("uncertain")),
+            "authenticated": authenticated,
+            "credentials_present": credentials_present,
+            "catalog_available": False,
+            "inference_verified": False,
+            "cli_installed": bool(cli_health["found"]),
+            "cli_version": cli_health.get("version"),
+            "has_api_key": bool(api_key),
+            "api_key_length": len(api_key),
+            "api_key_masked": _mask_api_key(api_key),
+            "base_url": base_url or None,
+            "gcp_project": gcp_project or None,
+            "gcp_location": gcp_location or None,
+            "adc_present": bool(adc["present"]),
+            "adc_source": adc["source"],
+            "adc_command": adc["login_command"],
+            "auth_methods": probe.get("auth_methods") or list(ANTIGRAVITY_AUTH_MODES),
+            "supports_logout": bool(probe.get("supports_logout", False)),
+            "has_oauth_credentials": authenticated and auth_mode in {"oauth-personal", "oauth-business"},
+            "error": probe.get("error"),
+        }
+
+    return await _coalesce_inflight_dict(_ANTIGRAVITY_AUTH_INFLIGHT, key, _probe)
 
 
 @_native_auth_write("antigravity")
@@ -14581,6 +14680,7 @@ def save_antigravity_auth(payload: dict) -> dict:
     update_config_fields(_apply_antigravity_auth)
     if validation_error:
         return {"ok": False, "message": validation_error["message"]}
+    bump_antigravity_auth_epoch()
 
     try:
         restart = restart_backend(

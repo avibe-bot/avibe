@@ -480,7 +480,6 @@ class WebAuthFlow:
     reader_task: asyncio.Task[None] | None = None
     waiter_task: asyncio.Task[None] | None = None
     claude_client: ClaudeSDKClient | None = None
-    pty_master_fd: int | None = None
     antigravity_opener_shim_dir: str | None = None
     url: str | None = None
     device_code: str | None = None
@@ -652,8 +651,16 @@ class AgentAuthService:
             await finish_native_operation(asyncio.gather(task, return_exceptions=True))
 
     @staticmethod
+    def _bump_antigravity_auth_epoch() -> None:
+        try:
+            from vibe.api import bump_antigravity_auth_epoch
+        except ImportError:
+            return
+        bump_antigravity_auth_epoch()
+
+    @staticmethod
     def _close_flow_pty(flow: AgentAuthFlow | WebAuthFlow) -> None:
-        fd = flow.pty_master_fd
+        fd = getattr(flow, "pty_master_fd", None)
         if fd is not None:
             flow.pty_master_fd = None
             try:
@@ -1644,7 +1651,7 @@ class AgentAuthService:
                     if isinstance(flow, WebAuthFlow) and resolved_method == "oauth-business":
                         flow.terminal_command = "agy"
                         flow.instructions = self._t("command.setup.antigravityBusinessFallback", command="agy")
-                    flow.process, flow.pty_master_fd = await self._start_antigravity_login_process(
+                    flow.process = await self._start_antigravity_login_process(
                         owner_flow=flow,
                         auth_method=resolved_method,
                         on_irreversible_start=on_irreversible_start,
@@ -1654,12 +1661,9 @@ class AgentAuthService:
                         flow.reader_task = asyncio.create_task(self._read_antigravity_output_web(flow))
                         self._arm_flow_waiter(flow, self._wait_for_antigravity_completion_web(flow))
                     else:
-                        reader = (
-                            self._read_pty_output(flow.process, flow.pty_master_fd, context, backend)
-                            if flow.pty_master_fd is not None
-                            else self._read_codex_output(flow.process, context, backend)
+                        flow.reader_task = asyncio.create_task(
+                            self._read_codex_output(flow.process, context, backend)
                         )
-                        flow.reader_task = asyncio.create_task(reader)
                         self._arm_flow_waiter(flow, self._wait_for_completion(flow))
                 else:
                     if context is not None and not native_cli:
@@ -1724,9 +1728,6 @@ class AgentAuthService:
 
     async def _write_antigravity_code(self, flow: AgentAuthFlow | WebAuthFlow, raw: str) -> bool:
         payload = f"{raw}\n".encode("utf-8")
-        if flow.pty_master_fd is not None:
-            await _native_auth_thread(os.write, flow.pty_master_fd, payload)
-            return True
         if flow.process is not None and flow.process.stdin is not None and not flow.process.stdin.is_closing():
             flow.process.stdin.write(payload)
             await flow.process.stdin.drain()
@@ -1746,7 +1747,7 @@ class AgentAuthService:
         auth_method: str,
         owner_flow: AgentAuthFlow | WebAuthFlow,
         on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
-    ) -> tuple[asyncio.subprocess.Process, int | None]:
+    ) -> asyncio.subprocess.Process:
         """Show agy's login link while suppressing its PATH-resolved opener."""
         def prepare_env() -> dict[str, str]:
             owner_flow.antigravity_opener_shim_dir = create_antigravity_login_opener_shims()
@@ -1772,7 +1773,7 @@ class AgentAuthService:
             if restore is not None:
                 restore()
             raise
-        return process, None
+        return process
 
     async def _start_claude_control_flow(
         self,
@@ -3307,6 +3308,9 @@ class AgentAuthService:
             # the auth as removed (which is the user-visible truth).
             logger.warning("Failed to clear V2Config after remove for %s: %s", backend, err)
 
+        if backend == "antigravity":
+            self._bump_antigravity_auth_epoch()
+
         # Notify the live controller — reuse the same hook path the
         # OAuth-success flow uses, but skip the auth_mode persistence
         # since we just rewrote those fields ourselves.
@@ -4380,33 +4384,12 @@ class AgentAuthService:
                 flow.claude_client = None
 
     async def _read_antigravity_output_web(self, flow: WebAuthFlow) -> None:
-        """Read ``agy acp --login`` PTY (or pipe) output for Web paste-code sign-in."""
+        """Read ``agy acp --login`` pipe output for Web paste-code sign-in."""
         process = flow.process
         if process is None:
             return
         try:
-            if flow.pty_master_fd is not None:
-                fd = flow.pty_master_fd
-                os.set_blocking(fd, False)
-                while flow.pty_master_fd == fd:
-                    try:
-                        chunk = os.read(fd, 4096)
-                    except BlockingIOError:
-                        if process.returncode is not None:
-                            break
-                        await asyncio.sleep(0.05)
-                        continue
-                    except OSError as err:
-                        if err.errno in (errno.EIO, errno.EBADF):
-                            break
-                        raise
-                    if not chunk:
-                        if process.returncode is not None:
-                            break
-                        await asyncio.sleep(0.05)
-                        continue
-                    self._consume_antigravity_web_text(flow, chunk.decode("utf-8", errors="replace"))
-            elif process.stdout is not None:
+            if process.stdout is not None:
                 while raw := await process.stdout.readline():
                     self._consume_antigravity_web_text(flow, raw.decode("utf-8", errors="replace"))
             self._consume_antigravity_web_text(flow, "", eof=True)
@@ -4414,8 +4397,6 @@ class AgentAuthService:
             raise
         except Exception as err:  # noqa: BLE001
             logger.warning("Antigravity web reader stopped: %s", err)
-        finally:
-            self._close_flow_pty(flow)
 
     @staticmethod
     def _consume_antigravity_text(
@@ -5123,6 +5104,9 @@ class AgentAuthService:
             )
             if strict:
                 raise
+        finally:
+            if backend == "antigravity":
+                self._bump_antigravity_auth_epoch()
 
     async def _terminate_web_flow(
         self,

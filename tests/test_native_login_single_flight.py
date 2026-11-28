@@ -102,7 +102,7 @@ async def test_every_web_backend_publishes_deadline_after_startup_with_waiter(
     async def start_antigravity(**_kwargs):
         nonlocal startup_finished
         startup_finished = datetime.now(timezone.utc)
-        return _SyntheticProcess(), None
+        return _SyntheticProcess()
 
     server = SimpleNamespace(
         get_provider_auth=AsyncMock(return_value={}),
@@ -162,7 +162,7 @@ async def test_every_im_native_backend_publishes_deadline_after_startup_with_wai
     async def start_antigravity(**_kwargs):
         nonlocal startup_finished
         startup_finished = datetime.now(timezone.utc)
-        return process, None
+        return process
 
     service._resolve_opencode_provider = AsyncMock(return_value="oauth-provider")
     service._start_codex_process = start_codex
