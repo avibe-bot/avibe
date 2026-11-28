@@ -4640,6 +4640,7 @@
     "setupPermission": "Allow tool calls in opencode.json",
     "permissionGateHint": "Allow OpenCode tool calls above before you continue.",
     "installHint": "Agent not found. Click to install automatically.",
+    "antigravityCliNote": "Avibe uses the Antigravity CLI (agy command), not the Antigravity desktop app, so the CLI must be installed separately.",
     "installAgent": "Install",
     "installing": "Installing...",
     "showOutput": "Show details",
