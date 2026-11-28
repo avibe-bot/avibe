@@ -2139,15 +2139,31 @@ final class AppModel: ObservableObject {
         // 重试 tries every way in (Product, 11-28), one more each press:
         // the first goes back to automatic for 「仅直连和中继」, or through
         // the listener again; the second and later go by WebKit's own path
-        // for this host, without the listener, as Safari does.
+        // for this host, without the listener, as Safari does. A press that
+        // changed the way opens at once: the open waits in its own slot for
+        // a gate held by the change (the host's route being rewritten).
         let presses = (failureRetries?.runtime == attempt.runtime ? failureRetries?.presses ?? 0 : 0) + 1
         failureRetries = (attempt.runtime, presses)
+        var changed = false
         if directPathPreference(for: attempt.runtime).mode == .direct {
-            revertDirectOnlyToOpenAgain(attempt.runtime)
+            changed = revertDirectOnlyToOpenAgain(attempt.runtime)
         }
-        if presses >= 2 {
-            directPathController?.bypassListener(forInstanceURL: attempt.runtime.instance.url, force: true)
+        if presses >= 2,
+           directPathController?.bypassListener(forInstanceURL: attempt.runtime.instance.url, force: true) == true
+        {
+            changed = true
         }
+        if changed {
+            return openRuntime(attempt.runtime)
+        }
+        return retryRuntimeOpenAsBefore(attempt)
+    }
+
+    /// A Retry with the way in unchanged: through the gate, and kept while
+    /// something else may hold the listener's port. A kept one is made
+    /// again here, without counting as another press.
+    @discardableResult
+    private func retryRuntimeOpenAsBefore(_ attempt: RuntimeOpenAttempt) -> Bool {
         guard authorizeReload(of: attempt.runtime) else {
             holdRetryWhilePortMayBeForeign(.open, of: attempt)
             return false
@@ -3413,7 +3429,10 @@ final class AppModel: ObservableObject {
         heldRuntimeRetry = nil
         switch held.kind {
         case .open:
-            _ = retryRuntimeOpen(attemptID: held.attemptID)
+            // The press it was kept for has been counted (`failureRetries`).
+            if attempt.phase == .failed {
+                retryRuntimeOpenAsBefore(attempt)
+            }
         case .cachedPage:
             retryRuntimeCachedPage()
         case .offlineCachedPage:
