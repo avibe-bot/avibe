@@ -37,9 +37,10 @@ jobs:
       - name: Check out the release candidate's Web UI
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The whole tree: the page's build reads files beside `ui/`
+          # (`vibe/message_types.json`, `vibe/data/*.json`).
           ref: ${{ env.RC_REF }}
           path: rc
-          sparse-checkout: ui
           persist-credentials: false
 
       - name: Build the Web UI
@@ -57,6 +58,8 @@ jobs:
           set +e
           packaging/webkit-proxy-change/run-measurement.sh "${{ matrix.runtime }}" "$RUNNER_TEMP/webkit-proxy-change-${{ matrix.runtime }}"
           status=$?
+          # Which page was measured, beside the evidence.
+          cp "$RUNNER_TEMP/rc-commit.txt" "$RUNNER_TEMP/webkit-proxy-change-${{ matrix.runtime }}/rc-commit.txt" || true
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit "$status"
 
