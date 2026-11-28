@@ -1,6 +1,7 @@
 // Settings › Experimental › Information cocoon (docs/plans/vibey-source-filter-hooks.md). Experimental is a list of
 // experiments; Information cocoon is one row that opens its own page (owner decision 2026-11-27). The page shows the
-// switch, the guide link and, when on, the hook folder and clickable script names (existing Editor
+// switch and usage note (native search off; scripts may call models and slow the Agent, so leave
+// it off for everyday use), the guide link and, when on, the hook folder and clickable script names (existing Editor
 // app, rooted at that folder; opening never creates or runs a hook). The phone's section list with the
 // new row is settings/sections/phone. The failure shown is an example.
 import {

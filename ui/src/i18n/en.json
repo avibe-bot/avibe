@@ -3333,6 +3333,7 @@
         "title": "Information cocoon",
         "summary": "Run your scripts on Vibey's web search, web fetch, file reads and command results.",
         "use": "Use information cocoon",
+        "usageNote": "When enabled, Vibey replaces the model's built-in search with Avibe's search tools. web_search, web_fetch, read and bash pass through the scripts you provide. These scripts may call a model and slow down the Agent's overall work. Enable it only for specific needs; leave it off for everyday use.",
         "guide": "How to write scripts",
         "scripts": "Scripts",
         "scriptsHint": "Put them in this folder; any that are missing are skipped.",

@@ -70,11 +70,18 @@ describe.each([
     await page(lng, true);
     await screen.findByRole('heading', { name: title });
     await screen.findByText(use);
+    // Owner-facing trade-off stays visible before enabling, not only beside installed scripts.
+    const note = await screen.findByText(lng === 'en' ? /Vibey replaces the model's built-in search/ : /Vibey 不再使用模型内置搜索/);
+    for (const tool of ['web_search', 'web_fetch', 'read', 'bash']) expect(note.textContent).toContain(tool);
+    expect(note.textContent).toContain(lng === 'en' ? 'scripts may call a model' : '脚本中可能调用模型');
+    expect(note.textContent).toContain(lng === 'en' ? "slow down the Agent's overall work" : '使 Agent 整体工作变慢');
+    expect(note.textContent).toContain(lng === 'en' ? 'leave it off for everyday use' : '日常不建议开着');
     const toggle = await screen.findByRole('switch');
     await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByText('before_search.py')).toBeNull();
     fireEvent.click(toggle);
     await screen.findByText('before_search.py');
+    expect(note.isConnected).toBe(true);
     await screen.findByText('/home/demo/.avibe/hooks/source_filter');
     const [path, init] = apiFetch.mock.calls[1];
     expect(path).toBe('/api/settings/experimental/source-filter');

@@ -177,15 +177,18 @@ export const SettingsSourceFilterPage: React.FC = () => {
           variant="preference"
           title={t('settings.experimental.sourceFilter.use')}
           description={(
-            <a
-              href={sourceFilterGuideUrl(i18n.language)}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 font-medium text-cyan-ink hover:underline"
-            >
-              <BookOpen className="size-3.5" />
-              {t('settings.experimental.sourceFilter.guide')}
-            </a>
+            <>
+              <span className="mb-2 block">{t('settings.experimental.sourceFilter.usageNote')}</span>
+              <a
+                href={sourceFilterGuideUrl(i18n.language)}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 font-medium text-cyan-ink hover:underline"
+              >
+                <BookOpen className="size-3.5" />
+                {t('settings.experimental.sourceFilter.guide')}
+              </a>
+            </>
           )}
           actions={(
             <ToggleSwitch

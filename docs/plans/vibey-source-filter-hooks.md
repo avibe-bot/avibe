@@ -335,7 +335,11 @@ added, it follows the same rule: one call-level pair of hooks.
   - one row per hook with found / not found and its path;
   - a scope line ("Vibey's web_search and web_fetch only");
   - a docs link.
-  No upload, inline editor, or command input. Every script filename opens that path in the existing
+  No upload, inline editor, or command input. The switch has a persistent usage note: Vibey uses
+  Avibe's search tools instead of model-native search; scripts around `web_search`, `web_fetch`,
+  `read` and `bash` may call a model and slow the Agent's overall work, so enable this only for
+  specific needs and leave it off for everyday use. The note is visible even while disabled.
+  Every script filename opens that path in the existing
   Editor app and roots its explorer at the hook directory returned by the API. Existing Editor
   buffers are retained. Missing scripts remain clickable and show the Editor's file-not-found state;
   opening a filename never creates, writes, or executes a hook, or changes the experiment switch.
