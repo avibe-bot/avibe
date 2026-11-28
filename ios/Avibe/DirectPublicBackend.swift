@@ -48,9 +48,24 @@ struct DirectResolvedAddress: Equatable, Sendable, CustomStringConvertible {
 }
 
 /// Which resolved addresses the public backend may connect to: public
-/// unicast only. Loopback, unspecified, link-local, multicast, private,
-/// shared (CGNAT), and documentation or benchmarking ranges are refused. A
-/// local-network path is the direct backend's job, not this one's.
+/// unicast, and the benchmarking range 198.18.0.0/15 that fake-IP VPNs
+/// answer with. Loopback, unspecified, link-local, multicast, private,
+/// shared (CGNAT), and documentation ranges are refused. A local-network
+/// path is the direct backend's job, not this one's.
+///
+/// 198.18.0.0/15 is allowed since 2026-11-28. A VPN app in fake-IP mode
+/// (the default in Clash, Surge and Shadowrocket) answers every DNS lookup
+/// with an address from it and carries the connection itself. Refused, the
+/// listener could reach no instance under such a VPN and answered every
+/// page `502`, while Safari reached the same instance through the VPN. Why
+/// it is safe to dial:
+/// - The range is not routable on the internet; an address in it exists
+///   only where a local VPN (or a test network) owns it, and the system
+///   resolver gave it to us for the instance's own host name.
+/// - The listener carries WebKit's TLS bytes unchanged: WebKit's session is
+///   for the instance's host name and validates its certificate, so whoever
+///   answers on that address cannot read or alter the page.
+/// - Safari dials the same address for the same name.
 enum DirectPublicAddressPolicy {
     static func allows(_ address: DirectResolvedAddress) -> Bool {
         switch address.family {
@@ -59,6 +74,11 @@ enum DirectPublicAddressPolicy {
         case .ipv6:
             return allowsIPv6(address.bytes)
         }
+    }
+
+    /// 198.18.0.0/15, the benchmarking range fake-IP VPNs answer with.
+    static func isFakeIPRange(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 4 && bytes[0] == 198 && (bytes[1] == 18 || bytes[1] == 19)
     }
 
     static func allowsIPv4(_ bytes: [UInt8]) -> Bool {
@@ -83,9 +103,6 @@ enum DirectPublicAddressPolicy {
         case 192 where second == 0 && (third == 0 || third == 2):
             // IETF protocol assignments, documentation.
             return false
-        case 198 where second == 18 || second == 19:
-            // Benchmarking.
-            return false
         case 198 where second == 51 && third == 100:
             return false
         case 203 where second == 0 && third == 113:
@@ -106,10 +123,15 @@ enum DirectPublicAddressPolicy {
         // IPv4-mapped (::ffff:a.b.c.d) and the NAT64 well-known prefix
         // (64:ff9b::/96), which iOS synthesizes on IPv6-only networks.
         let prefix = Array(bytes[0..<12])
-        if prefix == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF]
-            || prefix == [0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0]
-        {
-            return allowsIPv4(Array(bytes[12..<16]))
+        let carried = Array(bytes[12..<16])
+        if prefix == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF] {
+            return allowsIPv4(carried)
+        }
+        if prefix == [0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0] {
+            // A translator drops this prefix around a non-global IPv4
+            // address (RFC 6052 section 3.1), so a fake-IP VPN's range is
+            // not allowed through it.
+            return allowsIPv4(carried) && !isFakeIPRange(carried)
         }
         // Global unicast only (2000::/3). This excludes the unspecified and
         // loopback addresses, unique-local (fc00::/7), link-local

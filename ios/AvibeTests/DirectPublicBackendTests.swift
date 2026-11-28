@@ -21,6 +21,10 @@ final class DirectPublicBackendTests: XCTestCase {
             [192, 169, 0, 1],
             [198, 20, 0, 1],
             [223, 255, 255, 255],
+            // Fake-IP VPNs' range (benchmarking, 198.18.0.0/15): the VPN
+            // carries the connection, and WebKit's TLS is end to end.
+            [198, 18, 0, 1],
+            [198, 19, 255, 255],
         ]
         let refused: [[UInt8]] = [
             [0, 0, 0, 0],
@@ -34,8 +38,6 @@ final class DirectPublicBackendTests: XCTestCase {
             [192, 168, 1, 20],
             [192, 0, 0, 1],
             [192, 0, 2, 1],
-            [198, 18, 0, 1],
-            [198, 19, 255, 255],
             [198, 51, 100, 1],
             [203, 0, 113, 1],
             [224, 0, 0, 1],
@@ -62,6 +64,8 @@ final class DirectPublicBackendTests: XCTestCase {
             "2a00:1450:4001::1",
             "::ffff:104.16.132.229",
             "64:ff9b::104.16.132.229",
+            // A fake-IP VPN's address, IPv4-mapped.
+            "::ffff:198.18.0.7",
         ]
         let refused = [
             "::",
@@ -77,6 +81,8 @@ final class DirectPublicBackendTests: XCTestCase {
             "::ffff:127.0.0.1",
             "64:ff9b::10.0.0.1",
             "64:ff9b::100.64.0.1",
+            // A translator drops a non-global address (RFC 6052 section 3.1).
+            "64:ff9b::198.18.0.7",
             "4000::1",
         ]
         for text in allowed {
