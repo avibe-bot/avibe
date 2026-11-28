@@ -808,6 +808,18 @@ conforms to. Without a conforming controller the App offers neither:
   tells the page as a closure. The page opens its stream again and catches
   up, on the link. Until 2026-11-28 the view was reloaded instead, at every
   open and every return to the foreground.
+- **The parent domain.** WebKit sends a route's proxy the parent domain of
+  a routed host too (`avibe.bot` for an instance under it; measured
+  2026-11-28). The listener carries exactly that host, on port 443, to the
+  host itself through the public opener and its address policy, under every
+  choice, never over the direct path and in no count of the instance's
+  connections. It refused it before, which only fail-over hid: under
+  「仅直连和中继」 the page's requests to avibe.bot (voice) failed.
+- **What does not work under it.** A request the App makes for the instance
+  after it left the foreground: the listener is closed there and the route
+  has no fail-over. Today that is the Lock Screen card's registration when
+  it is sent after leaving. A voice take is the exception, at a price
+  (below).
 - **Going back to automatic** (`DirectOnlyRevertRules`; `reverted.from` is
   `direct`) happens only on evidence that this phone reached the instance,
   counted per bootstrap (an open, a return to the foreground, a drop):

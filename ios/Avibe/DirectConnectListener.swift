@@ -58,10 +58,11 @@ enum DirectConnectRequest: Equatable {
     case refused(Int)
 
     /// Accepts `CONNECT <host>:443 HTTP/1.1` for exactly one of
-    /// `allowedHosts`, or for a parent domain of one, and refuses everything
-    /// else. WebKit also sends this listener a CONNECT for any subdomain of
-    /// a routed host, which is refused, and for its parent domains, which
-    /// are carried to that host itself (`DirectAuthority.isParentDomain`).
+    /// `allowedHosts`, or for the parent domain of one, and refuses
+    /// everything else. WebKit also sends this listener a CONNECT for any
+    /// subdomain of a routed host, which is refused, and for its parent
+    /// domain, which is carried to that host itself
+    /// (`DirectAuthority.isParentDomain`).
     static func parse(
         _ received: Data,
         allowedHosts: Set<String>,
@@ -117,9 +118,10 @@ enum DirectConnectRequest: Equatable {
         guard hosts.count <= 1 else {
             return .refused(400)
         }
-        // The target decides: exactly an allowed host or a parent domain
-        // of one, on port 443. Another host, a subdomain, another port, no
-        // port, userinfo, and an IP literal all fail here.
+        // The target decides: exactly an allowed host or the parent
+        // domain of one, on port 443. Another host, a subdomain, a
+        // grandparent, another port, no port, userinfo, and an IP literal
+        // all fail here.
         let target = requestLine[1].lowercased()
         guard target.hasSuffix(":443") else {
             return .refused(403)

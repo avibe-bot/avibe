@@ -2876,6 +2876,36 @@ final class DirectConnectListenerTests: XCTestCase {
         )
     }
 
+    /// WebKit sends a route's proxy the parent domain of a routed host too
+    /// (measured). It is accepted, to be carried to that host itself; nothing
+    /// else that is not listed is.
+    func testOnlyTheExactParentDomainOfARoutedHostIsAcceptedBesideIt() {
+        let routed: Set<String> = ["alex-app.avibe.bot", "desk.team.example.com"]
+        func parse(_ target: String) -> DirectConnectRequest {
+            DirectConnectRequest.parse(
+                Data("CONNECT \(target) HTTP/1.1\r\nHost: \(target)\r\n\r\n".utf8),
+                allowedHosts: routed, limit: 4096
+            )
+        }
+        XCTAssertEqual(parse("alex-app.avibe.bot:443"),
+                       .accepted(DirectAuthority(host: "alex-app.avibe.bot")!, earlyData: Data()))
+        XCTAssertEqual(parse("avibe.bot:443"), .accepted(DirectAuthority(host: "avibe.bot")!, earlyData: Data()))
+        XCTAssertEqual(parse("team.example.com:443"),
+                       .accepted(DirectAuthority(host: "team.example.com")!, earlyData: Data()))
+        // A grandparent, a top-level domain, a sibling, a subdomain, a name
+        // that only ends alike, and the parent on another port.
+        for refused in ["example.com:443", "bot:443", "com:443", "other.avibe.bot:443",
+                        "x.alex-app.avibe.bot:443", "notavibe.bot:443", "avibe.bot:8443", "avibe.bot"] {
+            XCTAssertEqual(parse(refused), .refused(403), refused)
+        }
+
+        XCTAssertTrue(DirectAuthority.isParentDomain("avibe.bot", ofAny: routed))
+        XCTAssertFalse(DirectAuthority.isParentDomain("alex-app.avibe.bot", ofAny: routed))
+        XCTAssertFalse(DirectAuthority.isParentDomain("example.com", ofAny: routed))
+        XCTAssertFalse(DirectAuthority.isParentDomain("bot", ofAny: routed))
+        XCTAssertFalse(DirectAuthority.isParentDomain("avibe.bot", ofAny: ["avibe.bot"]))
+    }
+
     func testTheInstanceAnswerIsReadAsAStatusOnly() {
         func parse(_ text: String) -> DirectConnectAnswer {
             DirectConnectAnswer.parse(Data(text.utf8), limit: 4096)

@@ -426,6 +426,40 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
     }
 
+    /// The page's requests to the parent domain of its instance (avibe.bot:
+    /// voice) reach the listener too. They are carried to that host through
+    /// the public opener under every choice, 「仅直连和中继」 included, and
+    /// never over the direct path.
+    @MainActor
+    func testTheParentDomainOfARoutedHostIsCarriedByThePublicOpenerEvenWhenStrictIsLinked() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: baseline)
+        // A second routed host, with a parent domain of two labels.
+        let routed = "alex-app.avibe.example"
+        XCTAssertTrue(controller.routeOwner.add(
+            routed, store: harness.websiteDataStore.identifier,
+            dataStore: harness.websiteDataStore.dataStore, port: port.rawValue
+        ))
+        let parent = try XCTUnwrap(DirectAuthority(host: "avibe.example"))
+        let plan = try XCTUnwrap(controller.plan(for: parent))
+        XCTAssertNil(plan.openDirect)
+        XCTAssertNotNil(plan.openPublic)
+        XCTAssertNil(plan.strictWaitSeconds)
+        XCTAssertFalse(plan.sticky)
+        XCTAssertNil(plan.connectionSettled, "not one of the instance's connections: in no count")
+        XCTAssertTrue(plan.isCurrent())
+        // Under the strict choice for the routed host too.
+        controller.setDirectOnly(true, forInstanceURL: try XCTUnwrap(URL(string: "https://\(routed)")))
+        XCTAssertNotNil(try XCTUnwrap(controller.plan(for: parent)).openPublic)
+        // Nothing else that no route lists gets a plan.
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "other.avibe.example"))))
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "example.org"))))
+    }
+
     /// A tunnel that never goes quiet does not hold the choice up for good.
     @MainActor
     func testTheStrictCutoverClosesATunnelStillBusyAtItsBound() async throws {

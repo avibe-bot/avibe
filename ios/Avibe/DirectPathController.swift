@@ -1673,7 +1673,7 @@ final class DirectPathController {
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
         let host = authority.host
         guard routeOwner.allowedHosts.contains(host) else {
-            // A parent domain of a routed host (avibe.bot, for an instance
+            // The parent domain of a routed host (avibe.bot, for an instance
             // under it): WebKit sends it here though no route lists it. It
             // is not the instance: it goes straight to that host through the
             // public opener under every choice, never over the direct path,
