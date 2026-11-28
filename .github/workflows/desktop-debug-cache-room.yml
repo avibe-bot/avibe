@@ -1,0 +1,33 @@
+name: desktop-debug-cache-room
+on:
+  workflow_run:
+    workflows: [lint]
+    branches: [master]
+    types: [completed]
+permissions: {}
+jobs:
+  retire:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    concurrency: desktop-debug-cache-room-master
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Make room only for measured replacements
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_STARTED: ${{ github.event.workflow_run.created_at }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 scripts/ci_desktop_debug_room.py

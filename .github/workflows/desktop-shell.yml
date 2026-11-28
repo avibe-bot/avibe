@@ -374,9 +374,22 @@ jobs:
           printf 'Desktop Cargo %s/%s: %s compressed bytes, %s repository bytes in use.\n' "$RUNNER_OS" "$RUNNER_ARCH" "$bytes" "$used" >> "$GITHUB_STEP_SUMMARY"
           if (( own + bytes <= 550000000 && used + bytes + reserve + 800000000 <= 10000000000 )); then
             echo 'fits=true' >> "$GITHUB_OUTPUT"
+          elif (( bytes > 0 && bytes <= 550000000 && own > 0 )); then
+            # Only a measurement travels to maintenance, never the archive.
+            printf '%s\n' "$bytes" > "$RUNNER_TEMP/desktop-debug-measurement.txt"
+            echo "blocked_bytes=$bytes" >> "$GITHUB_OUTPUT"
           else
             echo '::notice::Desktop debug cache not saved: exceeds the measured operating budget.'
           fi
+
+      - name: Publish measured cache pressure for trusted maintenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.blocked_bytes != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: debug-room-${{ github.run_attempt }}-${{ steps.cargo-key.outputs.key }}-${{ steps.cargo-size.outputs.blocked_bytes }}
+          path: ${{ runner.temp }}/desktop-debug-measurement.txt
+          retention-days: 1
 
       - name: Save trusted desktop debug dependencies
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.fits == 'true'
