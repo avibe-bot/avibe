@@ -1577,6 +1577,8 @@ def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
         (str(identity.get("sub")), str(identity.get("browser_session_id"))),
         direct=direct,
         owner=owner,
+        page=(direct_path_use.page_sample(request.headers.getlist("x-avibe-page"))
+              if request.path.startswith("/api/") else None),
     )
 
 
@@ -4513,8 +4515,11 @@ async def _event_websocket(websocket: WebSocket, handler: Callable):
         return
 
     async def response():
+        # The adapter counts the accepted stream open as a request, but its
+        # synthetic GET must not carry a page report from the socket handshake.
         scope = {
             **websocket.scope,
+            "headers": [(key, value) for key, value in websocket.scope["headers"] if key.lower() != b"x-avibe-page"],
             "type": "http",
             "method": "GET",
             "scheme": "https" if websocket.scope["scheme"] == "wss" else "http",
