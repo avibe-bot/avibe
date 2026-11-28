@@ -80,9 +80,9 @@ export type HoldGesture = {
 /** A finger (owner decision, 2026-11-04): the microphone opens at 200 ms; a surface that draws the
  *  press's progress shows it from 100 ms. */
 export const HOLD_GESTURE: HoldGesture = { holdMs: 200, ringDelayMs: 100, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60 };
-/** A mouse holds longer than a finger, so a slow click or a trackpad press never opens the
- *  microphone: 350 ms, with the ring from 100 ms (owner decision, 2026-11-04); leaving the held
- *  box (or Esc) cancels (ui/design: composer/hold-desktop/b-pressing). Every surface a mouse can
+/** A mouse holds longer than a finger, so a slow click or a trackpad press never records:
+ *  350 ms, with the ring from 100 ms (owner decision, 2026-11-04); leaving the held box (or Esc)
+ *  cancels (ui/design: composer/hold-desktop/b-pressing). Every surface a mouse can
  *  hold uses these numbers: a composer and a Bot's avatar alike. */
 export const MOUSE_HOLD_GESTURE: Partial<HoldGesture> = {
   holdMs: 350,
