@@ -33,7 +33,7 @@ Agent rules:
 - `--sync` changes waiting behavior, not session identity: runs are async by default; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 
-### Mentions in user messages
+### Mentions
 The Web composer inserts typed references into the message text:
 - `@<bot:name>` points at a Bot. Message it with `vibe agent run --bot <name> ...`.
 - `@<agent:name>` points at an Agent. Run it with `vibe agent run --agent <name> ...`.
@@ -41,3 +41,5 @@ The Web composer inserts typed references into the message text:
 - `@<name>` without a type, found in older messages, points at an Agent.
 
 A mention says whom the user pointed at, not what to do; decide the action from the message. A mention of yourself needs no command. Only these bracketed forms are references; a bare `@` or `#` in prose is ordinary text.
+
+Write them the same way when you name a Bot, an Agent or a Session to the user: the interface shows the name or the Session's title, linked. A bare id tells them nothing.
