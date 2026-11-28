@@ -3328,11 +3328,11 @@
     },
     "experimental": {
       "subtitle": "These features are on trial and may change between versions.",
-      "loadFailed": "Could not load the source filter. Try again.",
+      "loadFailed": "Could not load the information cocoon. Try again.",
       "sourceFilter": {
-        "title": "Source filter",
+        "title": "Information cocoon",
         "summary": "Run your own scripts on Vibey's web search and web fetch.",
-        "use": "Use source filter",
+        "use": "Use information cocoon",
         "guide": "How to write scripts",
         "scripts": "Scripts",
         "scriptsHint": "Put them in this folder; any that are missing are skipped.",
@@ -6193,8 +6193,8 @@
           "fetch_refused": "The page request was refused.",
           "fetch_unavailable": "The page is unavailable.",
           "fetch_sources_blocked": "All page-reading sources are blocked or disabled.",
-          "source_filter_blocked": "The source filter blocked this call.",
-          "source_filter_failed": "A source filter script failed, so this call was blocked."
+          "source_filter_blocked": "The information cocoon blocked this call.",
+          "source_filter_failed": "An information cocoon script failed, so this call was blocked."
         },
         "mode": {
           "native": "Native · {{provider}}",
