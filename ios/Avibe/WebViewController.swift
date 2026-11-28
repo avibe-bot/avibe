@@ -679,6 +679,13 @@ final class WebViewController: UIViewController {
     /// the live page replaces it once the load gate is open (held meanwhile,
     /// as `hasPendingAutoLoad` holds a load).
     private var hasPendingStaleReplacement = false
+    /// Until when a held replacement may still be made: `staleReplacementWindow`
+    /// from the instance's answer. Past it, it is given up for this launch.
+    private var staleReplacementDeadline: ContinuousClock.Instant?
+    /// How long after the instance answered a held replacement may still be
+    /// made (Product, 11-29: 15 s). A replacement made later would come in
+    /// the middle of use.
+    private let staleReplacementWindow: Duration
     /// The live navigation replacing a stale cached page. Until it commits,
     /// the cached page stays on screen; a failure leaves it as it was.
     private var staleReplacementNavigation: WKNavigation?
@@ -961,6 +968,7 @@ final class WebViewController: UIViewController {
         startURL: @escaping () -> URL? = { nil },
         cachedPageConnected: @escaping () -> Void = {},
         cachedPageKeepsShell: @escaping () -> Void = {},
+        staleReplacementWindow: Duration = .seconds(15),
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -1004,6 +1012,7 @@ final class WebViewController: UIViewController {
         self.startURL = startURL
         self.cachedPageConnected = cachedPageConnected
         self.cachedPageKeepsShell = cachedPageKeepsShell
+        self.staleReplacementWindow = staleReplacementWindow
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1437,6 +1446,7 @@ final class WebViewController: UIViewController {
                 guard !Self.replacedStaleBuilds.contains(build) else { return }
                 Self.replacedStaleBuilds.insert(build)
                 self.hasPendingStaleReplacement = true
+                self.staleReplacementDeadline = ContinuousClock.now.advanced(by: self.staleReplacementWindow)
                 self.replaceStaleCachedPage()
             }
         }
@@ -1460,8 +1470,14 @@ final class WebViewController: UIViewController {
             hasPendingStaleReplacement = false
             return
         }
+        guard staleReplacementDeadline.map({ ContinuousClock.now < $0 }) ?? true else {
+            // Held past its window: given up for this launch. The cache entry
+            // is already dropped, so the next launch loads live.
+            hasPendingStaleReplacement = false
+            return
+        }
         guard (directLoadGate?() ?? .open) == .open else {
-            // Held: decided again when the gate changes.
+            // Held: decided again when the gate changes, within the window.
             return
         }
         hasPendingStaleReplacement = false
