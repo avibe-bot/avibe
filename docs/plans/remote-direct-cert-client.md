@@ -24,8 +24,10 @@ at `507d0b04`. Backend routes and production issuance remain separate work.
 
 The pairing fingerprint reuses the existing pairing transaction's identity
 fields, including its credentials; it contains their digest, not their values.
-A changed instance ID, hostname or pairing identity discards every file, pending
-keys included. The existing config-save pairing hook retires files **before**
+A changed instance ID, hostname or pairing identity retires every key and chain,
+pending keys included. If a hostname retry deadline still cannot be transferred
+to its ledger, the existing manifest retains only the hostname and timestamp;
+no new key is allocated until that transfer succeeds. The config-save pairing hook retires files **before**
 pairing replacement/clear is published. A failed config publication may therefore
 lose the optional direct path, never preserve an old key for a new pairing.
 Retirement failure is reported with a fixed warning and does not break pairing;
@@ -88,6 +90,17 @@ a rotation; these are one-shot commands, not settings.
   fences order POSTs, while a separate current-leaf lower bound fences only
   current GETs; neither can starve the other. Transport and credential backoff
   fences every request. Local retry backoff grows from one minute to one hour.
+- A validated, settled `failed` order may explicitly say `failure_origin: "server"`.
+  Only then does the client release that order's own start reservation (if known);
+  earlier starts, including unknown writes, remain charged. Replacement orders
+  back off for one minute, doubling to one hour, and wait until a valid server
+  `retry_at` when later. The floor is stored by hostname before a refund and is
+  checked again immediately before a new start. Re-pairing cannot clear a
+  committed floor. If settlement cannot be saved, the same order remains
+  pollable rather than turning a storage error into permission for a new start.
+  Cleanup still advances the same order. A missing or
+  unknown origin, a malformed retry floor, or a lost reply is not a server-fault
+  exemption. Older persisted failures are not retroactively reclassified.
 - A conflict resumes the supplied order if its key is still held (an active-key
   conflict abandons the pending local rotation). Otherwise it cancels the
   supplied order once, then retries admission at the backend's deadline while
