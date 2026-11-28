@@ -45,7 +45,8 @@ import {
   subscribeNativeDirectBaseline,
   type NativeDirectPathKind,
 } from '../lib/native';
-import { holdPageRequests, installPageFetchCounting, pageConnectionsQuiet } from '../lib/pageConnections';
+import { holdPageRequests, installPageFetchCounting, pageConnectionsHeldBy, pageConnectionsQuiet } from '../lib/pageConnections';
+import { setPageWhyReader, type PageWhy } from '../lib/pageReport';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import { createWorkbenchEventSource } from '../lib/workbenchEventSource';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
@@ -3065,6 +3066,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fruitless: 0,
     // A hand-over was made and its stream has not said yet how it came in.
     awaitingVerdict: false,
+    // The page has asked the shell and waits for its answer.
+    asking: false,
+    // The last hand-over closed nothing and kept nothing: the shell had no
+    // connection of this page's to close.
+    closedNothing: false,
     // The one pending retry, and when it is due: for when the spacing ends,
     // or sooner if something asks to look again before that.
     retryTimer: null as number | null,
@@ -3912,7 +3918,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       failWorkbenchEventStream();
       // EventSource does not expose a failed response's status or JSON body.
       // Probe through apiFetch, then inspect the successful /api/session form;
-      // both 401s and the 200 refresh payload enter the shared login recovery.
+      // both 401s and a 200 `authenticated: false` enter the shared login recovery.
       void apiFetch('/api/session', { cache: 'no-store' })
         .then(recoverRemoteAuthFromSessionProbe)
         .catch(() => undefined);
@@ -4121,6 +4127,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       state.lastAt = Date.now();
       state.count += 1;
       state.awaitingVerdict = true;
+      state.closedNothing = false;
+      state.asking = true;
       closeActiveWorkbenchEventSource();
       setWorkbenchEventConnectionState('reconnecting');
       // No new request may reuse a public connection while the shell decides
@@ -4130,8 +4138,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         result = await nativeDirectHandover();
       } finally {
+        state.asking = false;
         releaseRequests();
       }
+      state.closedNothing = result !== null && result.skipped === undefined && result.closed === 0 && result.kept === 0;
       // Opened again at once, and its handshake announces the gap, as after a
       // closure.
       rebuildWorkbenchEventsAfterClosure();
@@ -4158,6 +4168,48 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
   attemptDirectHandoverRef.current = attemptDirectHandover;
+  // Why this page is not on the direct path now, for the instance's log
+  // (lib/pageReport): the first that applies of `attemptDirectHandover`'s
+  // gates, each by its word, and of what its last attempt found (`not_ours`,
+  // before the bounds and the spacing, so that it names the cause while they
+  // hold). `idle` is what is left when the page has been told it arrives
+  // another way, none of them holds, and no attempt is under way; an attempt
+  // that found no subscriber to the stream reads so too.
+  const directHandoverWhy = (): PageWhy | null => {
+    const state = directHandoverRef.current;
+    if (!nativeDirectHandoverAvailable() || state.disposed) return null;
+    if (nativeDirectBaselineState() !== 'ready') return 'not_ready';
+    if (
+      nativeDirectPreference() !== 'direct'
+      || (nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind()))
+    ) return 'no_path';
+    if (pageOnDirectPath()) return 'on_path';
+    if (state.asking) return 'asked';
+    // Waiting for a quiet page. When nothing is open at this instant, the
+    // write this word leaves with is the request that keeps it busy.
+    if (state.running) return `quiet_${pageConnectionsHeldBy() ?? 'request'}`;
+    if (state.awaitingVerdict && !state.arrived) return 'verdict';
+    // Not told yet how it arrives (its stream is still opening, or has not
+    // said): nothing acts until it is, whether or not a hand-over was made.
+    // Every page is here between its load and its stream's first word.
+    if (pageVia() === null) return 'verdict';
+    // The one hand-over of this stretch is spent, and the page arrives
+    // another way: held by the bound (a shell that names no path arms again
+    // only when its preference leaves the direct path).
+    if (!state.armed) return 'cap';
+    if (state.closedNothing && pageVia() === 'other') return 'not_ours';
+    const sinceLast = Date.now() - state.lastAt;
+    if (
+      sinceLast < DIRECT_HANDOVER_BOUNDS_RESET_MS
+      && (state.count >= DIRECT_HANDOVER_MAX || state.fruitless >= DIRECT_HANDOVER_MAX_FRUITLESS)
+    ) return 'cap';
+    if (sinceLast < (state.arrived || state.halfMet ? DIRECT_HANDOVER_ARRIVAL_SPACING_MS : DIRECT_HANDOVER_SPACING_MS)) {
+      return 'spacing';
+    }
+    return 'idle';
+  };
+  const directHandoverWhyRef = useRef(directHandoverWhy);
+  directHandoverWhyRef.current = directHandoverWhy;
   // The page said it did not come in directly, by its stream or by a
   // request, while the App prefers direct (it opened on a pooled public
   // connection, as on a first load; or one of the two fell back to one, or
@@ -4191,6 +4243,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // One object for the provider's life; named here for the clean-up.
     const handover = directHandoverRef.current;
     handover.disposed = false;
+    const stopPageWhy = setPageWhyReader(() => directHandoverWhyRef.current());
     // A request that says it did not come in directly, between two streams:
     // its connection fell back, or was never moved. Only on a change of the
     // request's own word; the stream's is heard in its handshake.
@@ -4241,6 +4294,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       stopRequestVia();
       stopDirectPreference();
       stopDirectBaseline();
+      stopPageWhy();
       if (handover.retryTimer !== null) window.clearTimeout(handover.retryTimer);
       handover.retryTimer = null;
       handover.disposed = true;

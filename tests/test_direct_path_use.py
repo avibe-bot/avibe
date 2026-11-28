@@ -68,13 +68,72 @@ def test_requests_are_counted_per_session_and_minute_and_logged_once_the_minute_
     assert not any(word in line for line in caplog.messages for word in ("sub-", "browser-"))
 
 
+def test_hourly_changes_compare_majorities_across_real_gaps_and_charge_the_later_hour(caplog):
+    clock = _Clock()
+    counts = IngressCounts(clock)
+    caplog.set_level("INFO", logger="vibe.direct_path_use")
+
+    def note(at, direct, session="private-session"):
+        clock.now = at
+        counts.note(session, direct=direct, owner=False)
+
+    # Single-request minutes qualify. An unchanged strict majority is not a change.
+    note(3500, True)
+    note(3550, False)
+    note(3551, True)
+    note(3552, True)
+    # 90s between actual arrivals, despite the absent minute; charge to hour 1.
+    note(3642, False)
+    note(3660, True)
+    # A >90s silence before a tied minute is still a gap at the next vote.
+    note(3760, False)
+    note(3761, True)
+    note(3780, False)
+    # Another session's traffic cannot bridge this gap.
+    note(3840, False, "another-private-session")
+    note(3870.01, True)
+    clock.now = 10800
+    counts.flush()
+    counts.flush()
+    assert [line for line in _lines(caplog) if " hourly " in line] == [
+        "direct path_use hourly session=1 hours_ago=1 to_direct=0 to_other=0 gap_to_direct=0 gap_to_other=0",
+        "direct path_use hourly session=1 hours_ago=2 to_direct=1 to_other=1 gap_to_direct=1 gap_to_other=1",
+        "direct path_use hourly session=2 hours_ago=2 to_direct=0 to_other=0 gap_to_direct=0 gap_to_other=0",
+    ]
+
+
+def test_hourly_counts_do_not_compare_pooled_or_forgotten_sessions(monkeypatch, caplog):
+    clock = _Clock()
+    counts = IngressCounts(clock)
+    caplog.set_level("INFO", logger="vibe.direct_path_use")
+    monkeypatch.setattr(direct_path_use, "_MAX_SESSIONS_PER_MINUTE", 1)
+    monkeypatch.setattr(direct_path_use, "_MAX_SESSIONS", 2)
+    counts.note("a", direct=True, owner=True)
+    clock.now += 60
+    counts.note("b", direct=False, owner=True)
+    counts.note("a", direct=False, owner=True)  # pooled: break comparison for a only
+    clock.now += 60
+    counts.note("a", direct=False, owner=True)
+    clock.now += 60
+    counts.note("c", direct=True, owner=True)  # b forgotten
+    clock.now += 60
+    counts.note("b", direct=True, owner=True)  # new number, no comparison
+    clock.now = 3600
+    counts.flush()
+    assert [line for line in _lines(caplog) if " hourly " in line] == [
+        f"direct path_use hourly session={n} hours_ago=1 to_direct=0 to_other=0 gap_to_direct=0 gap_to_other=0"
+        for n in (1, 2, 3, 4)
+    ]
+
+
 def test_many_sessions_in_one_minute_share_one_line_past_the_bound(caplog):
     clock = _Clock()
     counts = IngressCounts(clock)
     caplog.set_level("INFO", logger="vibe.direct_path_use")
     bound = direct_path_use._MAX_SESSIONS_PER_MINUTE
     for index in range(bound + 3):
-        counts.note(("sub", index), direct=index % 2 == 0, owner=index == 0)
+        counts.note(("sub", index), direct=index % 2 == 0, owner=index == 0,
+                    page=("asked", 5) if index >= bound else None)
     # A session already counted in the minute keeps its own line.
     counts.note(("sub", 0), direct=True, owner=True)
     clock.now += 60
@@ -87,6 +146,64 @@ def test_many_sessions_in_one_minute_share_one_line_past_the_bound(caplog):
     for index in range(direct_path_use._MAX_SESSIONS + 1):
         counts.note(("other", index), direct=False, owner=False)
     assert len(counts._numbers) == direct_path_use._MAX_SESSIONS
+
+
+@pytest.mark.parametrize("word", [
+    "no_path", "on_path", "not_ready", "verdict", "spacing", "cap", "quiet_request",
+    "quiet_socket", "quiet_frame", "not_ours", "asked", "idle",
+])
+def test_page_report_accepts_only_a_bounded_optional_hold(word):
+    assert direct_path_use.page_sample([word]) == (word, None)
+    for ms in (0, 1, 32, 999, 1000):
+        assert direct_path_use.page_sample([f"{word};hold={ms}"]) == (word, ms)
+
+
+@pytest.mark.parametrize("fields", [
+    [], [""], ["arbitrary;hold=7"], ["Asked"], ["asked "], ["asked; hold=1"],
+    ["asked;hold="], ["asked;hold=00"], ["asked;hold=012"], ["asked;hold=+1"],
+    ["asked;hold=-1"], ["asked;hold=１"], ["asked;hold=1001"], ["asked;hold=1.0"],
+    ["asked;hold=1;hold=2"], ["asked;extra=1"], ["asked;hold=1\n"], ["asked, idle"],
+    ["asked", "asked"], ["asked;hold=" + "9" * 5000],
+])
+def test_bad_page_field_discards_the_whole_sample(fields):
+    assert direct_path_use.page_sample(fields) is None
+
+
+def test_page_fields_follow_only_accepted_api_requests_in_the_same_session_minute(instance, counted, caplog):  # noqa: F811
+    config, _ = instance
+    clock, counts = counted
+    caplog.set_level("INFO", logger="vibe.direct_path_use")
+    owner = _signed_in(config, role="owner", subject="owner")
+    viewer = _signed_in(config)
+
+    def get(client, path, word, **more_headers):
+        answer = client.get(path, base_url=ORIGIN, environ_base=REMOTE_PEER,
+                            headers={"X-Avibe-Page": word, **more_headers})
+        assert "X-Avibe-Page" not in answer.headers
+        return answer
+
+    assert get(owner, "/api/inbox", "quiet_request;hold=1000").status_code == 200
+    assert get(viewer, "/api/session", "idle;hold=0").get_json()["authenticated"] is True
+    assert get(owner, "/api/session", "asked;hold=2").get_json()["authenticated"] is True
+    assert get(owner, "/api/session", "asked").status_code == 200
+    assert get(owner, "/api/session", "verdict;hold=1001").status_code == 200
+    # Two differently cased keys survive the test wrapper's ordinary dict and
+    # reach ASGI as two fields. A comma-coalesced equivalent is invalid too.
+    assert get(owner, "/api/session", "on_path", **{"x-avibe-page": "cap"}).status_code == 200
+    assert get(app.test_client(), "/api/inbox", "not_ours").status_code == 401
+    assert get(owner, "/health", "spacing").status_code == 200
+    clock.now += 60
+    assert get(owner, "/api/session", "on_path").status_code == 200
+    clock.now += 60
+    counts.flush()
+    assert _lines(caplog) == [
+        "direct path_use ingress session=1 role=owner minutes_ago=1 direct=0 other=5"
+        " page_last=asked page_seen=asked,quiet_request hold_count=2 hold_max_ms=1000",
+        "direct path_use ingress session=2 role=member minutes_ago=1 direct=0 other=1"
+        " page_last=idle page_seen=idle hold_count=1 hold_max_ms=0",
+        "direct path_use ingress session=1 role=owner minutes_ago=1 direct=0 other=1"
+        " page_last=on_path page_seen=on_path hold_count=0",
+    ]
 
 
 @pytest.fixture

@@ -1750,6 +1750,16 @@
           "status": "已停用",
           "enable": "去启用",
           "enableLabel": "去启用 {{backend}}（设置 › 后端）"
+        },
+        "direct": {
+          "removed_one": "已移除 {{count}} 个模型",
+          "removed_other": "已移除 {{count}} 个模型",
+          "restore": "恢复",
+          "restoreModel": "恢复 {{model}}",
+          "failRemove": "{{model}} 未能移除",
+          "failRestore": "{{model}} 未能恢复",
+          "readFailed": "没能读到这个后端的模型",
+          "readLive": "列出模型"
         }
       },
       "takeover": {

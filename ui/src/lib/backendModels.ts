@@ -33,8 +33,9 @@ export interface BackendModels {
   hubUnread?: true;
 }
 
-const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
-const CATALOG_REFRESH_MAX_RETRIES = 2;
+/** How a menu reader follows a pending remote catalog refresh: this many re-reads, this far apart. */
+export const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
+export const CATALOG_REFRESH_MAX_RETRIES = 2;
 
 export function modelOptionLabel(model: string, labels?: Record<string, string>): string {
   return labels && Object.prototype.hasOwnProperty.call(labels, model) && labels[model]

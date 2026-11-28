@@ -1333,6 +1333,203 @@ describe('ApiProvider workbench stream liveness', () => {
     page.noteRequestVia(page.beginRequestVia(), word);
   };
 
+  // Why the page has not moved, in the instance's words (lib/pageReport):
+  // each gate of the hand-over by its own word, read as the next report
+  // would send it.
+  const why = async () => (await import('../lib/pageReport')).takePageReport();
+
+  // In the background the phone App closes the port its listener serves. A
+  // request sent on the return before the port is open again goes by a
+  // connection of WebKit's own, and WebKit keeps the page on it: so the page
+  // holds its requests until the shell's answer says the port is open.
+  const returnWith = async (shellPlatform: 'ios' | 'desktop' = 'ios') => {
+    const original = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', original);
+    // A listener of the document that is older than the page's own, and
+    // sends a request the moment the page is shown again.
+    const sendOnReturn = () => {
+      if (document.visibilityState === 'visible') void window.fetch('/api/version');
+    };
+    document.addEventListener('visibilitychange', sendOnReturn);
+    const shell = installDirectShell({ direct: 3 }, shellPlatform);
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    setVisibility('hidden');
+    await vi.advanceTimersByTimeAsync(5_000);
+    setVisibility('visible');
+    document.removeEventListener('visibilitychange', sendOnReturn);
+    return { shell, original };
+  };
+
+  it('holds a return\'s requests until the shell answers that its port is open, and says how long that was', async () => {
+    const { shell, original } = await returnWith();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(original).not.toHaveBeenCalled();
+    await shell.answer(1, 0);
+    expect(original).toHaveBeenCalledTimes(1);
+    // Once, with the page's word, on its next report; then the word alone.
+    expect(await why()).toBe('no_path;hold=300');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await why()).toBe('no_path');
+  });
+
+  it('lets a return\'s requests go after a second when the shell has not answered', async () => {
+    const { original } = await returnWith();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(original).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(original).toHaveBeenCalledTimes(1);
+    expect(await why()).toBe('no_path;hold=1000');
+  });
+
+  it('holds nothing in the desktop app, whose listener keeps its port', async () => {
+    const { original } = await returnWith('desktop');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(original).toHaveBeenCalledTimes(1);
+    expect(await why()).toBe('no_path');
+  });
+
+  it('says why it has not moved: no answer yet, no path, the verdict, on the path, the spacing', async () => {
+    const shell = installDirectShell({ direct: 3 });
+    await mountDirectPage();
+    expect(await why()).toBe('not_ready');
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    // The shell prefers the public path, then the relay: no path to move to.
+    expect(await why()).toBe('no_path');
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'relay' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await why()).toBe('no_path');
+
+    // A direct address: handed over at once, and its stream has not spoken.
+    shell.emit({ preferred: 'direct', sequence: 2, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    expect(await why()).toBe('verdict');
+    emitHandshakeVia(2, 'direct');
+    expect(await why()).toBe('on_path');
+
+    // A request that still arrives another way: wanted again, and held to
+    // the spacing after the last hand-over.
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await why()).toBe('spacing');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('says what keeps a page that waits to be quiet, and when the shell had nothing of its to close', async () => {
+    const shell = await pathShell();
+    shellAnswers(shell, { closed: 0, kept: 0 });
+    const frame = document.createElement('iframe');
+    frame.setAttribute('src', '/show/s1/');
+    document.body.appendChild(frame);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(shell.handovers()).toBe(0);
+    expect(await why()).toBe('quiet_frame');
+
+    frame.remove();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shell.handovers()).toBe(1);
+    // The shell closed nothing and kept nothing, and the page still arrives
+    // another way: its connections are not the shell's to close.
+    emitHandshakeVia(2, 'other');
+    emitControllerLeg(true);
+    expect(await why()).toBe('not_ours');
+  });
+
+  it('says when it has asked the shell, and when it waits for that hand-over\'s stream', async () => {
+    const shell = await pathShell();
+    let answer: (value: unknown) => void = () => {};
+    shell.call.mockImplementation((method: string) =>
+      method === 'direct.handover' ? new Promise((resolve) => { answer = resolve; }) : Promise.resolve(null),
+    );
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await why()).toBe('asked');
+    // The shell kept a busy connection, so the page is armed again: it is
+    // the missing verdict that holds the next hand-over, not the spacing.
+    answer({ closed: 0, kept: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await why()).toBe('verdict');
+    emitHandshakeVia(2, 'other');
+    emitControllerLeg(true);
+    expect(await why()).toBe('spacing');
+  });
+
+  it('says the one hand-over of a stretch is spent, for a shell that names no path', async () => {
+    const shell = installDirectShell({ direct: 2 });
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // Its stream does not say how it came in: the page is left alone until
+    // one does.
+    emitHandshake(2);
+    emitControllerLeg(true);
+    expect(await why()).toBe('verdict');
+    // It came in another way, and this shell arms the page again only when
+    // its preference leaves the direct path.
+    emitHandshakeVia(3, 'other');
+    emitControllerLeg(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    expect(await why()).toBe('cap');
+  });
+
+  it('says when the bounds hold it', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    // Three hand-overs in a row whose stream still came in another way.
+    for (let n = 2; n <= 4; n += 1) {
+      emitHandshakeVia(n, 'other');
+      emitControllerLeg(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    expect(shell.handovers()).toBe(3);
+    emitHandshakeVia(5, 'other');
+    emitControllerLeg(true);
+    expect(await why()).toBe('cap');
+  });
+
+  it('says a page that has not been told how it arrives waits for that, as every page does at its load', async () => {
+    const shell = installDirectShell({ direct: 3 });
+    await mountDirectPage();
+    // The shell arrives at a direct address before it has answered the
+    // page's first question: that arrival starts no hand-over, and a stream
+    // that does not say how it came in asks for none. Nothing is wrong.
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(0);
+    expect(await why()).toBe('verdict');
+  });
+
+  it('names the state that should not last: told it arrives another way, held by nothing, and no attempt under way', async () => {
+    const shell = installDirectShell({ direct: 3 });
+    // A page whose stream nobody subscribes to: the hand-over finds nothing
+    // to hand over and makes no attempt.
+    vi.resetModules();
+    const fresh = await import('./ApiContext');
+    render(<fresh.ApiProvider><div /></fresh.ApiProvider>);
+    await shell.answer(0, 0);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await requestSaid('other');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(0);
+    expect(await why()).toBe('idle');
+  });
+
   it('keeps going while the requests are not on the path, though the stream came in directly', async () => {
     const shell = await pathShell();
     shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });

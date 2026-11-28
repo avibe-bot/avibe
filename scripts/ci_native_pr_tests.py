@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -328,6 +329,28 @@ def verified_merge_paths(root, expected):
     return base, paths
 
 
+def run_logged(command, env, log):
+    """Persist the entire stream, independently of the runner console."""
+    with log.open('wb') as saved, subprocess.Popen(
+        command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    ) as child:
+        with child.stdout as output:
+            shutil.copyfileobj(output, saved)
+        code = child.wait()
+        saved.flush()
+        os.fsync(saved.fileno())
+    # Only replay after the producer and evidence file are finished. The native
+    # runner is POSIX. A slow or closed Actions console must not delay the
+    # verdict indefinitely, nor be mistaken for a failed write to the log.
+    if os.name == 'posix':
+        with log.open('rb') as source:
+            try:
+                subprocess.run(['cat'], stdin=source, timeout=2, check=False)
+            except subprocess.TimeoutExpired:
+                pass
+    return subprocess.CompletedProcess(command, code)
+
+
 def execute_tests(common, target, selectors, required, skip, env, temp, remaining):
     def command(result, only):
         return [*common, "-resultBundlePath", str(result), *["-only-testing:" + s for s in only],
@@ -340,12 +363,7 @@ def execute_tests(common, target, selectors, required, skip, env, temp, remainin
 
     result = temp / f"{target}.xcresult"
     log = temp / f"{target}.log"
-    # Keep live Actions output and a log of this execution only (not discovery).
-    with subprocess.Popen(["tee", str(log)], stdin=subprocess.PIPE) as tee:
-        first = subprocess.run(command(result, selectors), env=env, stdout=tee.stdin, stderr=subprocess.STDOUT)
-        tee.stdin.close()
-        if tee.wait():
-            raise RuntimeError(f"Could not save {target} execution log")
+    first = run_logged(command(result, selectors), env, log)
     if first.returncode == 0:
         verify(report(result), target, required)
         return 0

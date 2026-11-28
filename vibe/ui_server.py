@@ -1577,6 +1577,8 @@ def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
         (str(identity.get("sub")), str(identity.get("browser_session_id"))),
         direct=direct,
         owner=owner,
+        page=(direct_path_use.page_sample(request.headers.getlist("x-avibe-page"))
+              if request.path.startswith("/api/") else None),
     )
 
 
@@ -4513,8 +4515,11 @@ async def _event_websocket(websocket: WebSocket, handler: Callable):
         return
 
     async def response():
+        # The adapter counts the accepted stream open as a request, but its
+        # synthetic GET must not carry a page report from the socket handshake.
         scope = {
             **websocket.scope,
+            "headers": [(key, value) for key, value in websocket.scope["headers"] if key.lower() != b"x-avibe-page"],
             "type": "http",
             "method": "GET",
             "scheme": "https" if websocket.scope["scheme"] == "wss" else "http",
@@ -9369,6 +9374,7 @@ def direct_rendezvous():
     rendezvous_state.log_listener_faults(payload.get("listener_faults"))
     rendezvous_state.log_leg_faults(payload.get("leg_faults"))
     rendezvous_state.log_path_use(payload.get("path_use"))
+    rendezvous_state.log_path_guard(payload.get("path_guard"))
     rendezvous_state.log_startup(payload.get("startup"))
     rendezvous_state.log_handovers(payload.get("handovers"))
     rendezvous_state.log_slow_store_removals(payload.get("slow_store_removals_ms"))
@@ -11438,6 +11444,25 @@ async def direct_model_visibility(backend: str, starlette_request: FastAPIReques
         except ValueError:
             return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
         return jsonify({"ok": True})
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/backend/{backend}/models/visibility", include_in_schema=False)
+async def direct_model_menu_read(backend: str, starlette_request: FastAPIRequest):
+    """A Direct menu and its restore list (rows the backend offers now that the menu hides), for Settings · Models.
+
+    ``?live=1`` lets OpenCode read its options live, which may start it; otherwise it answers from its cache.
+    """
+
+    async def handler():
+        from modules.agents.catalog import is_native_cli_backend
+        from vibe import api
+
+        if not is_native_cli_backend(backend):
+            return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
+        answer = await api.direct_menu_and_removals(backend, live=request.args.get("live") == "1")
+        return jsonify(answer), (200 if answer.get("ok") else 502)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 

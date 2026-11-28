@@ -103,6 +103,15 @@ export type OAuthResult = {
   repaired: SourceRepaired | null;
 };
 
+/** One row of a Direct menu: the selection ID the backend takes, and its display label. */
+export type DirectMenuRow = { id: string; label: string };
+export type DirectMenu = {
+  models: DirectMenuRow[] | null;
+  removed: DirectMenuRow[];
+  /** A remote catalog refresh may still change this answer (as for the Session pickers). */
+  catalogRefreshPending?: boolean;
+};
+
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
   /** Unsaved observation; its transient credential is revoked before settling. */
@@ -134,6 +143,11 @@ export type ModelsApi = {
   refreshAgentPresence(): Promise<AgentSupply[]>;
   /** Per-backend enabled subset + order (the 来源顺序 drawer's read). */
   getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
+  /** A Direct backend's menu (what its Session pickers offer) and the rows removed from it. `live` lets
+   *  OpenCode read its options live, which may start it; otherwise `models` is null until it has a cache. */
+  getDirectMenu(backend: AgentBackend, live?: boolean): Promise<DirectMenu>;
+  /** Remove a model from a Direct backend's menu, or bring it back. */
+  setDirectModelRemoved(backend: AgentBackend, modelId: string, removed: boolean): Promise<void>;
   /** Total write of the exact stored source order. */
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
   /** Store an optional source order and apply it to every existing route atomically. */
@@ -669,6 +683,12 @@ export const modelsApi: ModelsApi = {
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
   refreshAgentPresence: () => call<{ agents: AgentSupply[] }>('/api/models/agents?refresh_cli_presence=1').then((r) => r.agents),
   getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
+  getDirectMenu: (backend, live = false) => call<DirectMenu & { catalog_refresh_pending?: boolean }>(
+    `/api/backend/${encodeURIComponent(backend)}/models/visibility${live ? '?live=1' : ''}`,
+  ).then(({ models, removed, catalog_refresh_pending }) => ({ models, removed, catalogRefreshPending: catalog_refresh_pending === true })),
+  setDirectModelRemoved: (backend, modelId, removed) => call<{ ok: true }>(
+    `/api/backend/${encodeURIComponent(backend)}/models/visibility`, jsonInit('PUT', { model_id: modelId, removed }),
+  ).then(() => undefined),
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).
   putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),

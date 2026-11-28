@@ -1,6 +1,8 @@
 """Verify routing against a compiled catalog and receipts from the result tree."""
 
+import errno
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -341,6 +343,42 @@ def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
     verify_membership(TARGET, sources, tmp_path)
 
 
+@pytest.mark.skipif(os.name != 'posix', reason='Exercise the POSIX nonblocking runner pipe')
+@pytest.mark.parametrize('code', [0, 65])
+def test_full_undrained_console_does_not_delay_log_or_exit(tmp_path, code):
+    path = tmp_path / 'execution.log'
+    producer = ("import sys; sys.stdout.buffer.write(b'A' * 131072); sys.stdout.flush(); "
+                f"sys.stderr.buffer.write(b'Testing started\\n'); sys.exit({code})")
+    driver = ("from scripts.ci_native_pr_tests import run_logged; from pathlib import Path; import os, sys; "
+              "sys.exit(run_logged([sys.executable, '-c', sys.argv[2]], os.environ, Path(sys.argv[1])).returncode)")
+    reader, writer = os.pipe()
+    try:
+        os.set_blocking(writer, False)
+        # Keep the read end open but never drain it, even after the child exits.
+        with pytest.raises(BlockingIOError):
+            while True:
+                os.write(writer, b'x' * 4096)
+        with pytest.raises(BlockingIOError):
+            while True:
+                os.write(writer, b'x')
+        run = subprocess.run([sys.executable, '-c', driver, str(path), producer],
+                             cwd=Path(__file__).resolve().parents[1], stdout=writer,
+                             stderr=subprocess.PIPE, timeout=10)
+        assert run.returncode == code, run.stderr
+        assert path.read_bytes() == b'A' * 131072 + b'Testing started\n'
+    finally:
+        os.close(writer)
+        os.close(reader)
+
+
+def test_native_log_save_failure_is_not_a_test_pass(tmp_path, monkeypatch):
+    def no_space(fd):
+        raise OSError(errno.ENOSPC, 'disk full')
+    monkeypatch.setattr(native.os, 'fsync', no_space)
+    with pytest.raises(OSError, match='disk full'):
+        native.run_logged([sys.executable, '-c', 'print("passed")'], os.environ, tmp_path / 'execution.log')
+
+
 @pytest.mark.parametrize("mode, calls", [
     ("green", 1), ("stall", 2), ("normal assertion", 1), ("budget exhausted", 1),
     ("driver error", 1), ("unattributed file error", 1), ("suite mention", 1), ("early suite end", 1),
@@ -392,12 +430,15 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     env = {"FIXTURE": "same"}
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
 
-    def run(cmd, *, env, stdout=None, stderr=None, check=False):
+    def first(cmd, env, path):
         assert env == {"FIXTURE": "same"} and cmd[-1] == "test-without-building"
         seen.append([s for s in cmd if s.startswith("-only-testing:")])
-        if stdout is not None:
-            stdout.write(log.encode())
-            return subprocess.CompletedProcess(cmd, 0 if mode == "green" else 65)
+        path.write_bytes(log.encode())
+        return subprocess.CompletedProcess(cmd, 0 if mode == "green" else 65)
+
+    def run(cmd, *, env, check):
+        assert env == {"FIXTURE": "same"} and cmd[-1] == "test-without-building"
+        seen.append([s for s in cmd if s.startswith("-only-testing:")])
         assert check
         if mode == "rerun red":
             raise subprocess.CalledProcessError(65, cmd)
@@ -416,6 +457,7 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
             outcomes[COMMON] = "Passed"
         return json.dumps(tree(outcomes, "OtherTests" if mode == "wrong bundle" else TARGET))
 
+    monkeypatch.setattr(native, "run_logged", first)
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(subprocess, "check_output", receipt)
     args = (["xcodebuild"], TARGET, [TARGET], {COMMON, PHONE}, [], env, tmp_path, 0 if mode == "budget exhausted" else 3)
