@@ -118,8 +118,8 @@ _BOTS_ROSTER_INTRO = (
     "conversation's context and the others do not, so every exchange costs some explaining and some waiting. "
     "Working together is worth it when someone else knows what you need, when parts can move at the same time, "
     "or when another mind makes the result better; what you can readily do yourself, you can often just do.\n\n"
-    "Both tables are generated from live definitions; use the first column exactly as listed in commands, and the "
-    "display name when talking to the user. In Chinese, the product calls Bots 伙伴; use that word when you write "
+    "Both tables are generated from live definitions; use the first column exactly as listed in commands and "
+    "mentions, and the display name in prose. In Chinese, the product calls Bots 伙伴; use that word when you write "
     "to the user in Chinese.\n\n"
     "| Bot | Display Name | Role |\n| --- | --- | --- |\n\n\n"
 )
@@ -144,7 +144,7 @@ _PREVIOUS_CALLBACK_RULES = (
     "- `--sync` changes waiting behavior, not session identity: default async runs in the background and return "
     "through callbacks; synchronous runs wait for the result and are still recorded in `vibe runs`.\n"
 )
-_TYPED_MENTIONS = '### Mentions in user messages\nThe Web composer inserts typed references into the message text:\n- `@<bot:name>` points at a Bot. Message it with `vibe agent run --bot <name> ...`.\n- `@<agent:name>` points at an Agent. Run it with `vibe agent run --agent <name> ...`.\n- `#<session-id>` points at a Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read it with `vibe data query`.\n- `@<name>` without a type, found in older messages, points at an Agent.\n\nA mention says whom the user pointed at, not what to do; decide the action from the message. A mention of yourself needs no command. Only these bracketed forms are references; a bare `@` or `#` in prose is ordinary text.'
+_TYPED_MENTIONS = "### Mentions\n`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session; an untyped `@<name>` in older messages is an Agent. The interface shows them as names and titles, linked, so write them this way when you name one to the user; a bare id tells them nothing. In a user's message a mention says whom they pointed at, not what to do, and one of yourself needs no command. Bare `@` or `#` text is not a mention."
 _PREVIOUS_MENTIONS = '### Mentions in user messages\nOn the Web chat the user composes with `@` / `#` autocomplete, which inserts stable references into their message text:\n- `@<agent-name>` points at that enabled Agent (see the table above). Act on it with `vibe agent run --agent <agent-name> ...`.\n- `#<session-id>` points at that Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read its history with `vibe data query`.\n\nTreat these as the user pointing at that Agent or Session, and decide the action from context. Only the bracketed `@<...>` / `#<...>` forms are references; a bare `@` or `#` in prose is ordinary text.'
 
 _CODEX_SKILL_REUSE_GUIDANCE = (
