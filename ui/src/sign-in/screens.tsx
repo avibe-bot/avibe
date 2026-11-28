@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import {
   type FormEvent,
+  type RefObject,
   useCallback,
   useEffect,
   useRef,
@@ -102,32 +103,11 @@ export function SignInStart({
 
 export type EmailMode = 'code' | 'password';
 
-// ui/design: mobile-app/welcome, mobile-app/password
-/**
- * The email step. Code mode sends a verification code; password mode turns the
- * same form into email + password at once (the email is the saved login's
- * username). The password lives only in this step's field state: switching back
- * to code mode clears it, and leaving the step unmounts it.
- */
-export function EmailEntry({
-  mode,
-  email,
-  busy,
-  locked,
-  cooldown,
-  errorKey,
-  retryIn,
-  onBack,
-  onEmailChange,
-  onSubmit,
-  onMode,
-  onSignIn,
-  onPasswordEdit,
-  onForgot,
-  onUseCode,
-}: {
+export type EmailEntryViewProps = {
   mode: EmailMode;
   email: string;
+  password: string;
+  shown: boolean;
   busy: SignInBusy;
   locked: boolean;
   cooldown: number;
@@ -135,19 +115,43 @@ export function EmailEntry({
   retryIn: number;
   onBack: () => void;
   onEmailChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onToggleShown: () => void;
   onSubmit: () => void;
-  onMode: (mode: EmailMode) => void;
-  onSignIn: (password: string) => void;
-  onPasswordEdit: () => void;
+  onSwitchMode: (mode: EmailMode) => void;
   onForgot: () => void;
   onUseCode: () => void;
-}) {
+  emailFieldRef?: RefObject<HTMLInputElement | null>;
+  passwordFieldRef?: RefObject<HTMLInputElement | null>;
+};
+
+// ui/design: mobile-app/welcome, mobile-app/password
+/**
+ * The email step as a props-only view (drawn by design frames and by `EmailEntry`).
+ */
+export function EmailEntryView({
+  mode,
+  email,
+  password,
+  shown,
+  busy,
+  locked,
+  cooldown,
+  errorKey,
+  retryIn,
+  onBack,
+  onEmailChange,
+  onPasswordChange,
+  onToggleShown,
+  onSubmit,
+  onSwitchMode,
+  onForgot,
+  onUseCode,
+  emailFieldRef,
+  passwordFieldRef,
+}: EmailEntryViewProps) {
   const { t } = useTranslation();
   const passwordMode = mode === 'password';
-  const emailField = useRef<HTMLInputElement>(null);
-  const passwordField = useRef<HTMLInputElement>(null);
-  const [password, setPassword] = useState('');
-  const [shown, setShown] = useState(false);
   const { codeActionRegion: actionRegion, revealCodeActions: revealActions } =
     useCodeActionReveal<HTMLFormElement>('mobile-login-password');
   const emailInvalid = errorKey === 'mobileApp.email.invalid';
@@ -160,28 +164,13 @@ export function EmailEntry({
   const codeFixes = wrong || errorKey === 'mobileApp.password.unconfirmed' || busy === 'send';
   const signingIn = busy === 'signIn';
 
-  // Entering password mode focuses the field the person needs next.
-  useEffect(() => {
-    if (mode !== 'password') return;
-    const target = emailField.current?.value.trim() ? passwordField.current : emailField.current;
-    target?.focus();
-  }, [mode]);
-
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (passwordMode) onSignIn(password);
-    else onSubmit();
-  };
-  const switchMode = (next: EmailMode) => {
-    if (locked) return;
-    // Code mode keeps no password: it is cleared on the way out.
-    setPassword('');
-    setShown(false);
-    onMode(next);
+    onSubmit();
   };
 
   return (
-    <SignInFrame back={{ disabled: locked, onBack: passwordMode ? () => switchMode('code') : onBack }}>
+    <SignInFrame back={{ disabled: locked, onBack: passwordMode ? () => onSwitchMode('code') : onBack }}>
       <div className="flex flex-col items-center pt-8 pb-6">
         <img src={mailMascot} alt="" className="mb-5 size-28 object-contain" />
         <h1 className="text-center text-3xl font-semibold leading-tight">
@@ -202,7 +191,7 @@ export function EmailEntry({
           <div className="flex flex-col gap-3">
             <Label htmlFor="mobile-login-email">{t('mobileApp.email.label')}</Label>
             <Input
-              ref={emailField}
+              ref={emailFieldRef}
               id="mobile-login-email"
               name={passwordMode ? 'username' : 'email'}
               type="email"
@@ -227,7 +216,7 @@ export function EmailEntry({
                 // Return moves on to the password instead of submitting.
                 if (!passwordMode || event.key !== 'Enter' || event.nativeEvent.isComposing) return;
                 event.preventDefault();
-                passwordField.current?.focus();
+                passwordFieldRef?.current?.focus();
               }}
             />
             {passwordMode ? null : (
@@ -264,7 +253,7 @@ export function EmailEntry({
               </div>
               <div className="relative">
                 <Input
-                  ref={passwordField}
+                  ref={passwordFieldRef}
                   id="mobile-login-password"
                   name="password"
                   type={shown ? 'text' : 'password'}
@@ -282,10 +271,7 @@ export function EmailEntry({
                     wrong && 'border-destructive',
                   )}
                   onFocus={revealActions}
-                  onChange={(event) => {
-                    setPassword(event.target.value);
-                    onPasswordEdit();
-                  }}
+                  onChange={(event) => onPasswordChange(event.target.value)}
                 />
                 <Button
                   type="button"
@@ -295,7 +281,7 @@ export function EmailEntry({
                   aria-pressed={shown}
                   aria-label={t('mobileApp.password.show')}
                   className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted"
-                  onClick={() => setShown((value) => !value)}
+                  onClick={onToggleShown}
                 >
                   {shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
                 </Button>
@@ -337,7 +323,7 @@ export function EmailEntry({
               size="compact"
               disabled={locked}
               className={cn(alternative, 'gap-2 self-center')}
-              onClick={() => switchMode(passwordMode ? 'code' : 'password')}
+              onClick={() => onSwitchMode(passwordMode ? 'code' : 'password')}
             >
               {passwordMode ? <Mail className="size-4" /> : <KeyRound className="size-4" />}
               {t(passwordMode ? 'mobileApp.password.codeEntry' : 'mobileApp.password.entry')}
@@ -364,6 +350,96 @@ export function EmailEntry({
         {t(passwordMode ? 'mobileApp.password.footer' : 'mobileApp.email.footer')}
       </p>
     </SignInFrame>
+  );
+}
+
+/**
+ * The email step. Code mode sends a verification code; password mode turns the
+ * same form into email + password at once (the email is the saved login's
+ * username). The password lives only in this step's field state: switching back
+ * to code mode clears it, and leaving the step unmounts it.
+ */
+export function EmailEntry({
+  mode,
+  email,
+  busy,
+  locked,
+  cooldown,
+  errorKey,
+  retryIn,
+  onBack,
+  onEmailChange,
+  onSubmit,
+  onMode,
+  onSignIn,
+  onPasswordEdit,
+  onForgot,
+  onUseCode,
+}: {
+  mode: EmailMode;
+  email: string;
+  busy: SignInBusy;
+  locked: boolean;
+  cooldown: number;
+  errorKey: SignInErrorKey | null;
+  retryIn: number;
+  onBack: () => void;
+  onEmailChange: (value: string) => void;
+  onSubmit: () => void;
+  onMode: (mode: EmailMode) => void;
+  onSignIn: (password: string) => void;
+  onPasswordEdit: () => void;
+  onForgot: () => void;
+  onUseCode: () => void;
+}) {
+  const emailField = useRef<HTMLInputElement>(null);
+  const passwordField = useRef<HTMLInputElement>(null);
+  const [password, setPassword] = useState('');
+  const [shown, setShown] = useState(false);
+
+  // Entering password mode focuses the field the person needs next.
+  useEffect(() => {
+    if (mode !== 'password') return;
+    const target = emailField.current?.value.trim() ? passwordField.current : emailField.current;
+    target?.focus();
+  }, [mode]);
+
+  const switchMode = (next: EmailMode) => {
+    if (locked) return;
+    // Code mode keeps no password: it is cleared on the way out.
+    setPassword('');
+    setShown(false);
+    onMode(next);
+  };
+
+  return (
+    <EmailEntryView
+      mode={mode}
+      email={email}
+      password={password}
+      shown={shown}
+      busy={busy}
+      locked={locked}
+      cooldown={cooldown}
+      errorKey={errorKey}
+      retryIn={retryIn}
+      onBack={onBack}
+      onEmailChange={onEmailChange}
+      onPasswordChange={(value) => {
+        setPassword(value);
+        onPasswordEdit();
+      }}
+      onToggleShown={() => setShown((value) => !value)}
+      onSubmit={() => {
+        if (mode === 'password') onSignIn(password);
+        else onSubmit();
+      }}
+      onSwitchMode={switchMode}
+      onForgot={onForgot}
+      onUseCode={onUseCode}
+      emailFieldRef={emailField}
+      passwordFieldRef={passwordField}
+    />
   );
 }
 
