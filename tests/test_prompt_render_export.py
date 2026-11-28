@@ -118,8 +118,8 @@ _BOTS_ROSTER_INTRO = (
     "conversation's context and the others do not, so every exchange costs some explaining and some waiting. "
     "Working together is worth it when someone else knows what you need, when parts can move at the same time, "
     "or when another mind makes the result better; what you can readily do yourself, you can often just do.\n\n"
-    "Both tables are generated from live definitions; use the first column exactly as listed in commands, and the "
-    "display name when talking to the user. In Chinese, the product calls Bots 伙伴; use that word when you write "
+    "Both tables are generated from live definitions; use the first column exactly as listed in commands and "
+    "mentions, and the display name in prose. In Chinese, the product calls Bots 伙伴; use that word when you write "
     "to the user in Chinese.\n\n"
     "| Bot | Display Name | Role |\n| --- | --- | --- |\n\n\n"
 )
