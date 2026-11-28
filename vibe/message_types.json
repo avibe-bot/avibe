@@ -84,8 +84,7 @@
       ],
       "render": "status",
       "agentRenderWhenEvents": [
-        "computer_script_notify",
-        "computer_script_confirm"
+        "computer_script_notify"
       ]
     },
     "vault": {

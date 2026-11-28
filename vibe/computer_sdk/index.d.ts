@@ -193,13 +193,11 @@ export const DesktopBusy: typeof TargetBusy;
 /** @deprecated Foreground input needs no consent; this is never thrown. */
 export class ForegroundConsentRequired extends ControllerError {}
 export class Unavailable extends ControllerError {}
-export class ConfirmRefused extends ControllerError {}
 
 export const computer: Computer;
 
 export interface Avibe {
   notify(message: string): Promise<Effect>;
-  confirm(message: string): Promise<Effect>;
 }
 
 export const avibe: Avibe;

@@ -39,11 +39,10 @@ describe('chatRowKind', () => {
   it('draws a notice addressed to the owner as the Agent, and only by its declared event', () => {
     const declared = messageTypeNames().flatMap((type) =>
       specFor(type).agentRenderWhenEvents.map((event) => ({ type, event })));
-    // The Computer Use script's notify and confirm prompt are the producers today.
-    expect(declared).toEqual(expect.arrayContaining([
+    // The Computer Use script's notify message is the producer today.
+    expect(declared).toEqual([
       { type: 'notify', event: 'computer_script_notify' },
-      { type: 'notify', event: 'computer_script_confirm' },
-    ]));
+    ]);
     for (const { type, event } of declared) {
       const notice = { author: 'agent', type, metadata: { event } };
       expect(row(notice), `${type}/${event}`).toEqual({ kind: 'agentNotice' });

@@ -427,7 +427,7 @@ def test_driver_retired_session_keeps_cli_working_after_scripts_and_turns(
 ) -> None:
     """A script ending, or a Turn ending, never leaves Computer Use dead.
 
-    Live acceptance: a script waited 300 s on ``avibe.confirm`` and timed out;
+    Live acceptance: a script waited 300 s and timed out;
     the driver's five-minute idle TTL had retired the named session meanwhile,
     and every later CLI call in that Avibe Session, in this Turn and the next,
     was refused with "session has ended". Here the fake driver retires the name

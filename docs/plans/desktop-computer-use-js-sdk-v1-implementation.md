@@ -11,12 +11,12 @@ through Controller admission and `ComputerUseServer`. JavaScript scripts need
 the same boundary, a stable object model, and a runner that uses Avibe's private
 desktop Node runtime without resolving packages from the working directory.
 
-The complete v1, including Web/IM confirmation ownership, is expected to exceed
+The complete v1 is expected to exceed
 the implementation brief's approximate 1,800-line split threshold. Delivery is
 therefore divided into two independent PRs:
 
 1. SDK core, runner, Controller script Session, and exact Turn binding.
-2. `avibe.confirm`, `avibe.notify`, and expected-approver binding.
+2. `avibe.notify` delivery on the launching surface.
 
 The second PR starts only after the first PR is delivered through its normal
 review and CI gates.
@@ -52,8 +52,7 @@ review and CI gates.
 
 ### Deferred behavior
 
-- `avibe.confirm`, `avibe.notify`, pending-question ownership, and the
-  verify-confirm-reverify-act continuation are delivered in the second PR.
+- `avibe.notify` delivery is delivered in the second PR.
 - Existing single-operation `vibe computer` leaves are not rebased onto the SDK.
 - Scheduled or unattended runs, automatic Skill saving, browser support,
   Windows desktop actions, and a persistent REPL remain out of scope.

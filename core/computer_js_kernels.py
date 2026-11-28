@@ -5,7 +5,7 @@ The kernel holds no desktop capability of its own: every call opens an
 ordinary exact-Turn script connection (``ComputerScriptSessionManager``) and
 the kernel uses that token only while the call executes. The Controller's
 existing ``/internal/computer-script`` routes therefore keep every safety rule
-(target locks, observe-first, handle descriptors, confirm).
+(target locks, observe-first, handle descriptors).
 
 Lifecycle, all owned here:
 

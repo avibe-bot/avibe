@@ -1,7 +1,7 @@
 import {
   ControllerFault,
   callTool,
-  callScriptInteraction,
+  callScriptNotify,
   controllerFailureAmbiguous,
   runStep,
   sleepWithinDeadline,
@@ -185,13 +185,6 @@ export class Unavailable extends ControllerError {
   }
 }
 
-export class ConfirmRefused extends ControllerError {
-  constructor(message, options = {}) {
-    super(message, { ...options, code: options.code || "confirm_refused" });
-    this.name = "ConfirmRefused";
-  }
-}
-
 function publicError(error) {
   if (error instanceof ControllerError) {
     return error;
@@ -224,9 +217,6 @@ function publicError(error) {
     error.code === "controller_unavailable"
   ) {
     return new Unavailable(error.message, options);
-  }
-  if (error.code === "confirm_refused") {
-    return new ConfirmRefused(error.message, options);
   }
   return new ControllerError(error.message, options);
 }
@@ -1180,14 +1170,7 @@ export const avibe = Object.freeze({
   notify(message) {
     return sdkStep("avibe.notify", async () => {
       validateInteractionMessage(message);
-      return effectResult(await callScriptInteraction("notify", message));
-    });
-  },
-
-  confirm(message) {
-    return sdkStep("avibe.confirm", async () => {
-      validateInteractionMessage(message);
-      return effectResult(await callScriptInteraction("confirm", message));
+      return effectResult(await callScriptNotify(message));
     });
   },
 });

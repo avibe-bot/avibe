@@ -2801,14 +2801,7 @@ class Controller:
             self.computer_js_kernels = None
             if js_kernels is not None:
                 js_kernels.close_all()
-            script_interactions = getattr(
-                self,
-                "computer_script_interactions",
-                None,
-            )
             self.computer_script_interactions = None
-            if script_interactions is not None:
-                script_interactions.close_all()
             script_sessions = getattr(self, "computer_script_sessions", None)
             self.computer_script_sessions = None
             if script_sessions is not None:

@@ -6349,61 +6349,17 @@ async def test_concurrent_im_attachment_retry_keeps_one_reserved_owner(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("sender", "answer", "expected"),
-    [
-        ("U_OWNER", "yes", "confirmed"),
-        ("U_OWNER", "no", "confirm_refused"),
-        ("U_MEMBER", "yes", "pending"),
-    ],
-    ids=["approver-yes", "approver-no", "other-member"],
-)
-async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
+@pytest.mark.parametrize("reply_text", ["yes", "好的"], ids=["en-yes", "zh-hao-de"])
+async def test_im_short_affirmative_replies_are_admitted_as_ordinary_messages(
     managers,
     monkeypatch,
-    sender: str,
-    answer: str,
-    expected: str,
+    reply_text: str,
 ) -> None:
-    """In a shared IM channel only the owner who launched the script answers it.
-
-    The answer is consumed before admission, so it neither queues behind nor
-    steers into the Turn the script is blocking. Another member's reply is an
-    ordinary message and leaves the confirm waiting.
-    """
-    from core.computer_script_interactions import (
-        ComputerScriptInteractionError,
-        ComputerScriptInteractionManager,
-    )
-
+    """Short affirmative IM replies during a running Turn are ordinary queued messages."""
     manager, _other, engine, _engine_b, starts = managers
     await _activate(manager, text="run the script")
     starts_before = list(starts)
     acks = _record_admission_acks(manager)
-    notices: list[str] = []
-
-    async def emit_agent_message(_context, _message_type, text, **_kwargs):
-        notices.append(text)
-        return f"notice-{len(notices)}"
-
-    launching_context = MessageContext(
-        user_id="U_OWNER", channel_id="C1", thread_id="T1", platform="slack"
-    )
-    binding = SimpleNamespace(
-        token="script-token",
-        session_id="ses_fsm",
-        turn=SimpleNamespace(context=launching_context),
-    )
-    interactions = ComputerScriptInteractionManager(
-        SimpleNamespace(
-            config=SimpleNamespace(language="en"),
-            emit_agent_message=emit_agent_message,
-        ),
-        SimpleNamespace(admit=lambda _token: binding),
-    )
-    manager.controller.computer_script_interactions = interactions
-    confirm = asyncio.create_task(interactions.confirm("script-token", "Send it?"))
-    await asyncio.sleep(0)
 
     handler = MessageHandler(
         SimpleNamespace(
@@ -6420,7 +6376,7 @@ async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
     )
     monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
     reply_context = MessageContext(
-        user_id=sender,
+        user_id="U_OWNER",
         channel_id="C1",
         thread_id="T1",
         message_id="native-reply-1",
@@ -6430,8 +6386,8 @@ async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
     await handler._admit_human_delivery(
         manager=manager,
         context=reply_context,
-        dispatch_text=answer,
-        display_text=answer,
+        dispatch_text=reply_text,
+        display_text=reply_text,
         processed_files=[],
         session_key="slack::C1",
         # An explicit OpenCode subagent is the IM input the policy queues.
@@ -6445,28 +6401,8 @@ async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
     )
     delivery = _row(engine, reply_context.platform_specific["delivery_id"])
     assert starts == starts_before
-
-    if expected == "pending":
-        assert confirm.done() is False
-        assert delivery["state"] == "queued"
-        assert [ack[2] for ack in acks] == ["queued"]
-        confirm.cancel()
-        await asyncio.gather(confirm, return_exceptions=True)
-        return
-
-    outcome = (await asyncio.wait_for(asyncio.gather(confirm, return_exceptions=True), 5))[0]
-    assert notices[0] == (
-        "Send it?\n\nReply yes or no. Only the person who started this task can answer."
-    )
-    assert delivery["state"] == "retired"
-    assert acks == []
-    if expected == "confirmed":
-        assert outcome["effect"] == "confirmed"
-        assert notices[-1] == "Confirmed. Continuing."
-    else:
-        assert isinstance(outcome, ComputerScriptInteractionError)
-        assert outcome.code == "confirm_refused"
-        assert notices[-1] == "Declined. The script will not take this step."
+    assert delivery["state"] == "queued"
+    assert [ack[2] for ack in acks] == ["queued"]
 
 
 def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(

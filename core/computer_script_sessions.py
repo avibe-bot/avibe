@@ -168,8 +168,8 @@ class ComputerScriptSessionManager:
             return False
         self._cancel_binding_handles(binding)
         if binding.invalid_code is None:
-            # A normal close ends the connection too: state bound to it, such as
-            # a pending confirm, must not outlive the script.
+            # A normal close ends the connection too, so listeners can drop
+            # any state bound to it.
             self._notify_invalidation(token, "script_connection_invalid")
         return True
 

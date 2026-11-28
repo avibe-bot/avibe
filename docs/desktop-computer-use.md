@@ -216,9 +216,9 @@ the front and leaves it there. Neither asks for confirmation per action.
 The Skill treats readiness as observable state: the target window exists, it
 is stable across observations, and its screenshot or accessibility tree is
 usable. It does not wait a fixed time after launching an application.
-Irreversible external effects, such as sending, paying, or deleting, still
-require the agent to verify, ask for confirmation, verify again, and only then
-act.
+Irreversible external effects, such as sending, paying, or deleting, have the
+agent verify the state, end the Turn and ask the user in ordinary words, then
+verify again and act once they answer.
 
 `observe window` and `zoom` can write screenshots to a caller-selected path.
 Human output includes accessibility state and element tokens when available;

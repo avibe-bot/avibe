@@ -59,10 +59,10 @@ export function chatRowKind(message: ChatRowFields): ChatRowKind {
   // A phase boundary and an ``interim`` narration share the muted Agent bubble:
   // both are the agent's words that do not end the Turn.
   if (isBoundaryMessage(message) || specFor(message.type).render === 'muted') return { kind: 'boundary' };
-  // A notification addressed to the owner (a Computer Use script's notify or
-  // confirm prompt) draws as the Agent's message: a compact pill reads as runtime
-  // status, and a confirm nobody notices times out. A family of its own rather than
-  // ``agent``, because it is not a reply — it must not own the Turn's Vault requests.
+  // A notification addressed to the owner (a Computer Use script's notify
+  // message) draws as the Agent's message instead of a compact runtime status
+  // pill. A family of its own rather than ``agent``, because it is not a reply
+  // — it must not own the Turn's Vault requests.
   if (isAgentRenderedNotice(message)) return { kind: 'agentNotice' };
   // Runtime notifications and legacy error rows are compact status pills, not
   // Agent-authored answers.
