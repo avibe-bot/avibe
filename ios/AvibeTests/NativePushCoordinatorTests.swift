@@ -2060,6 +2060,198 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertEqual(store.installation?.providerGeneration, 2)
     }
 
+    /// An APNs callback that lands while logout waits on a create's answer
+    /// is persisted before logout writes its own state: logout keeps it.
+    func testAPNsCallbackDuringLogoutCreateReconciliationKeepsTheNewestTuple()
+        async throws
+    {
+        let oldToken = Data(repeating: 21, count: 32)
+        let newToken = Data(repeating: 22, count: 32)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: oldToken,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "pending-registration",
+                state: .pending,
+                pendingRevoke: false,
+                bindGeneration: 1
+            )
+        )
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { request in
+            if request.method == "PUT" {
+                await recorder.waitForReleaseIfNeeded()
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let logout = Task {
+            await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
+        }
+        try await recorder.waitForRequestCount(1)
+        XCTAssertEqual(recorder.requests.first?.method, "PUT")
+        coordinator.didRegister(
+            deviceToken: newToken,
+            environment: "production"
+        )
+        try await waitUntil {
+            store.installation?.provider?.deviceToken == newToken
+        }
+        recorder.release()
+        await logout.value
+
+        XCTAssertEqual(recorder.requests.map(\.method), ["PUT", "POST"])
+        XCTAssertNil(store.installation?.accountID)
+        XCTAssertNil(store.installation?.pendingBulkRevokeThroughGeneration)
+        XCTAssertEqual(store.installation?.provider?.deviceToken, newToken)
+        XCTAssertEqual(store.installation?.provider?.environment, "production")
+        XCTAssertEqual(store.installation?.provider?.generation, 2)
+        XCTAssertEqual(store.installation?.providerGeneration, 2)
+        // Patched at the next sign-in, not while signed out.
+        XCTAssertEqual(store.installation?.providerPatchPending, true)
+    }
+
+    /// A logout whose revoke could not reach the relay is retried when the
+    /// signed-out App returns to the foreground, with the installation's own
+    /// credential. Nothing is turned back on.
+    func testSignedOutForegroundRetriesThePendingLogoutRevoke() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 23, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: true
+        )
+        store.installation?.accountID = nil
+        store.installation?.pendingBulkRevokeThroughGeneration = 1
+        store.installation?.pendingBulkRevokeReason = PushRevokeReason.signedOut.rawValue
+        try store.saveRecord(
+            makeRecord(
+                kid: "signed-out",
+                state: .retiring,
+                pendingRevoke: true,
+                bindGeneration: 1
+            )
+        )
+        let recorder = ManagementRecorder()
+        var registrationCalls = 0
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder,
+            account: Locked<MobileAccount?>(nil),
+            registerForRemoteNotifications: { registrationCalls += 1 }
+        )
+
+        NotificationCenter.default.post(
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        try await waitUntil {
+            store.installation?.pendingBulkRevokeThroughGeneration == nil
+        }
+        try await waitUntil { !coordinator.hasWorkInFlight }
+
+        XCTAssertEqual(recorder.requests.map(Self.requestKind), ["POST revoke"])
+        let bulk = try XCTUnwrap(recorder.requests.first)
+        XCTAssertEqual(Self.jsonBody(bulk)?["reason"] as? String, "signed_out")
+        XCTAssertEqual(Self.jsonBody(bulk)?["through_bind_generation"] as? Int, 1)
+        XCTAssertTrue(try store.listRecords().isEmpty)
+        XCTAssertNil(store.installation?.accountID)
+        XCTAssertEqual(store.installation?.providerPatchPending, true)
+        XCTAssertEqual(registrationCalls, 0)
+
+        // Nothing is owed any more: another foreground sends nothing.
+        NotificationCenter.default.post(
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(recorder.requests.count, 1)
+        XCTAssertEqual(registrationCalls, 0)
+    }
+
+    /// Recovery deletes a retired key once its deadline passes, while an
+    /// alert it decrypted can still be in Notification Center. Logout still
+    /// removes that alert: it names the account it was decrypted for.
+    func testLogoutRemovesAnAlertWhoseRetiredKeyAlreadyExpired() async throws {
+        let currentTime = Date(timeIntervalSince1970: 1_794_096_000)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "replacement",
+                state: .active,
+                pendingRevoke: false,
+                bindGeneration: 1
+            )
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "retired",
+                state: .retiring,
+                pendingRevoke: false,
+                bindGeneration: 1,
+                retirementDeadline: currentTime.addingTimeInterval(-1)
+            )
+        )
+        let notificationCenter = FakePushNotificationCenter(
+            delivered: [
+                PushNotificationCenterEntry(
+                    identifier: "decrypted-by-retired",
+                    userInfo: [
+                        "kid": "retired",
+                        "account_id": Self.accountA.id,
+                        "instance_origin": Self.instanceOrigin,
+                        "url": "/chat/session",
+                    ]
+                ),
+                PushNotificationCenterEntry(
+                    identifier: "another-account",
+                    userInfo: [
+                        "kid": "elsewhere",
+                        "account_id": Self.accountB.id,
+                    ]
+                ),
+                PushNotificationCenterEntry(
+                    identifier: "undecrypted",
+                    userInfo: ["avibe": ["kid": "elsewhere"]]
+                ),
+            ]
+        )
+        let coordinator = makeCoordinator(
+            store: store,
+            management: ManagementRecorder(),
+            notificationCenter: notificationCenter,
+            now: { currentTime }
+        )
+        coordinator.resumeAfterAccountActivation()
+        try await waitUntil { store.records["retired"] == nil }
+        try await waitUntil { !coordinator.hasWorkInFlight }
+
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
+
+        XCTAssertEqual(notificationCenter.removedDelivered, ["decrypted-by-retired"])
+        XCTAssertEqual(notificationCenter.removedPending, [])
+    }
+
     func testLogoutRemovesNotificationsForTheFormerAccount() async throws {
         let store = makeInstallationStore(
             providerGeneration: 1,

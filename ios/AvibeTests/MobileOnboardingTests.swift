@@ -3469,6 +3469,52 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    /// Signed out, a revoke a sign-out left owed holds no account operation:
+    /// an email code asked for meanwhile is not refused as busy. The
+    /// sign-in's new store ends the request, whose revoke stays owed.
+    func testASignedOutPushRequestDoesNotHoldUpASignIn() async throws {
+        let hold = HeldCall()
+        var pushCalls = 0
+        let transports = (0..<4).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.pushManagementHandler = { _ in
+                pushCalls += 1
+                await hold.wait()
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return transport
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: transports
+        )
+        coordinator.activateAccountSurface()
+        XCTAssertNil(coordinator.currentAccount)
+
+        let request = Task { @MainActor in
+            try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "POST",
+                    path: "/api/push/apns/installations/current/revoke",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        XCTAssertFalse(coordinator.isHeldBySelectionKeepingOperation)
+
+        let cooldown = try await coordinator.requestOTP(email: "alex@example.com")
+        XCTAssertEqual(cooldown, 60)
+
+        hold.release()
+        do {
+            _ = try await request.value
+            XCTFail("The request outlived the sign-in's new store.")
+        } catch {}
+        XCTAssertEqual(pushCalls, 1)
+    }
+
     /// The list's open (the current block after an open timed out, or any
     /// row) made while a push request the App made on its own is running
     /// waits for that request and then opens, instead of failing as busy.

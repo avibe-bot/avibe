@@ -1260,6 +1260,52 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
+    /// A notification tap usually brings the App to the foreground, where it
+    /// may be updating push or refreshing the account on its own. Those keep
+    /// the selection, so the tap waits for them and then opens its
+    /// conversation instead of being dropped to the instance list.
+    @MainActor
+    func testAPushTapWaitsForASelectionKeepingOperation() async throws {
+        let held = HeldSessionReads()
+        addTeardownBlock { held.release.signal() }
+        let (appModel, _) = try await makeFixtureAppModel(
+            storedSelection: Self.instanceOneSelection,
+            heldSessionReads: held
+        )
+        try await waitUntil("The restored open") {
+            appModel.runtimeIdentity == 1
+        }
+        let refresh = Task { @MainActor in
+            try await appModel.mobileSessionCoordinator.refresh()
+        }
+        try await waitUntil("The refresh's session read") {
+            held.count.current == 2
+        }
+        XCTAssertTrue(
+            appModel.mobileSessionCoordinator.isHeldBySelectionKeepingOperation
+        )
+
+        appModel.pushCoordinator.handleNotificationTap(
+            userInfo: [
+                "account_id": "account-1",
+                "instance_origin": "https://instance-two.example",
+                "url": "/chat/waited",
+            ]
+        )
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotEqual(
+            appModel.route, .onboarding(.instances),
+            "The tap was dropped to the instance list."
+        )
+        XCTAssertEqual(
+            appModel.runtimeIdentity, 1, "It opened during the refresh."
+        )
+
+        held.release.signal()
+        _ = try await refresh.value
+        _ = try await waitForPushRuntime(appModel, instanceID: "instance-2")
+    }
+
     /// The shortcut reaches Settings > Action Button only through the App
     /// Intents metadata Xcode extracts into the App bundle, with its
     /// localized title and Siri phrases beside it.
