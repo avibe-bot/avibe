@@ -220,8 +220,8 @@
     },
     {
       "name": "five_returns_a_minute_apart",
-      "about": "In and out every minute on a healthy path: each return is adopted at once and the level never moves.",
-      "milestones": [{"at_ms": 50000, "key": "a1/i1", "adoptions": 1, "level_s": 0}, {"at_ms": 300000, "key": "a1/i1", "adoptions": 5, "level_s": 0}],
+      "about": "Opened, then left and returned to five times a minute apart, on a healthy path: every link is adopted at once and the level never moves.",
+      "milestones": [{"at_ms": 50000, "key": "a1/i1", "adoptions": 1, "level_s": 0}, {"at_ms": 301000, "key": "a1/i1", "adoptions": 6, "level_s": 0}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
@@ -249,7 +249,9 @@
         {"at_ms": 290000, "event": "link_down", "key": "a1/i1", "link": 5, "cause": "background", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 5}},
         {"at_ms": 290000, "event": "background"},
         {"at_ms": 300000, "event": "foreground"},
-        {"at_ms": 300000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 5}}
+        {"at_ms": 300000, "event": "link_up", "key": "a1/i1", "link": 6, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 5}},
+        {"at_ms": 300000, "event": "adopt", "key": "a1/i1", "link": 6, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 6}},
+        {"at_ms": 301000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": true, "adoptions": 6}}
       ]
     },
     {
@@ -294,74 +296,96 @@
     },
     {
       "name": "own_close_background",
-      "about": "A link that ends by `background` never raises the level, adopted or not, however soon.",
-      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "about": "At level 30 s, a link that ends by `background`, on probation or 15 s after its adoption, changes nothing: the next link waits the same 30 s for the same reason.",
+      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 1, "level_s": 30}, {"at_ms": 90000, "key": "a1/i1", "adoptions": 2, "level_s": 30}, {"at_ms": 125000, "key": "a1/i1", "adoptions": 3, "level_s": 30}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
-        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "background", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 20000, "event": "background"},
-        {"at_ms": 30000, "event": "foreground"},
-        {"at_ms": 31000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
-        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "background", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "background", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 40000, "event": "background"},
+        {"at_ms": 44000, "event": "foreground"},
+        {"at_ms": 45000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 75000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 90000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "background", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 90000, "event": "background"},
+        {"at_ms": 94000, "event": "foreground"},
+        {"at_ms": 95000, "event": "link_up", "key": "a1/i1", "link": 4, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 125000, "event": "adopt", "key": "a1/i1", "link": 4, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 3}}
       ]
     },
     {
       "name": "own_close_choice",
-      "about": "A link that ends by `choice` never raises the level, adopted or not, however soon.",
-      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "about": "At level 30 s, a link that ends by `choice`, on probation or 15 s after its adoption, changes nothing: the next link waits the same 30 s for the same reason.",
+      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 1, "level_s": 30}, {"at_ms": 90000, "key": "a1/i1", "adoptions": 2, "level_s": 30}, {"at_ms": 125000, "key": "a1/i1", "adoptions": 3, "level_s": 30}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
-        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "choice", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
-        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "choice", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "choice", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 45000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 75000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 90000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "choice", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 95000, "event": "link_up", "key": "a1/i1", "link": 4, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 125000, "event": "adopt", "key": "a1/i1", "link": 4, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 3}}
       ]
     },
     {
       "name": "own_close_superseded",
-      "about": "A link that ends by `superseded` never raises the level, adopted or not, however soon.",
-      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "about": "At level 30 s, a link that ends by `superseded`, on probation or 15 s after its adoption, changes nothing: the next link waits the same 30 s for the same reason.",
+      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 1, "level_s": 30}, {"at_ms": 90000, "key": "a1/i1", "adoptions": 2, "level_s": 30}, {"at_ms": 125000, "key": "a1/i1", "adoptions": 3, "level_s": 30}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
-        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "superseded", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
-        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "superseded", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "superseded", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 45000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 75000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 90000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "superseded", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 95000, "event": "link_up", "key": "a1/i1", "link": 4, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 125000, "event": "adopt", "key": "a1/i1", "link": 4, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 3}}
       ]
     },
     {
       "name": "own_close_instance_ended",
-      "about": "A link that ends by `instance_ended` never raises the level, adopted or not, however soon.",
-      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "about": "At level 30 s, a link that ends by `instance_ended`, on probation or 15 s after its adoption, changes nothing: the next link waits the same 30 s for the same reason.",
+      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 1, "level_s": 30}, {"at_ms": 90000, "key": "a1/i1", "adoptions": 2, "level_s": 30}, {"at_ms": 125000, "key": "a1/i1", "adoptions": 3, "level_s": 30}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
-        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "instance_ended", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
-        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "instance_ended", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "instance_ended", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 45000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 75000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 90000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "instance_ended", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 95000, "event": "link_up", "key": "a1/i1", "link": 4, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 125000, "event": "adopt", "key": "a1/i1", "link": 4, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 3}}
       ]
     },
     {
       "name": "own_close_network_change",
-      "about": "A link that ends by `network_change` never raises the level, adopted or not, however soon.",
-      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "about": "At level 30 s, a link that ends by `network_change`, on probation or 15 s after its adoption, changes nothing: the next link waits the same 30 s for the same reason.",
+      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 1, "level_s": 30}, {"at_ms": 90000, "key": "a1/i1", "adoptions": 2, "level_s": 30}, {"at_ms": 125000, "key": "a1/i1", "adoptions": 3, "level_s": 30}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
-        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "network_change", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 31000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
-        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "network_change", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "network_change", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 45000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 75000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 90000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "network_change", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 95000, "event": "link_up", "key": "a1/i1", "link": 4, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 125000, "event": "adopt", "key": "a1/i1", "link": 4, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 3}}
       ]
     },
     {
@@ -461,6 +485,23 @@
       ]
     },
     {
+      "name": "relaunch_drops_the_link",
+      "about": "The process ended with a link in use: after the relaunch no link is up, and a late report of the old link's loss changes nothing.",
+      "milestones": [{"at_ms": 13000, "key": "a1/i1", "adoptions": 1, "level_s": 0}, {"at_ms": 14000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "events": [
+        {"at_ms": 0, "event": "foreground"},
+        {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
+        {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
+        {"at_ms": 10000, "event": "relaunch"},
+        {"at_ms": 11000, "event": "foreground"},
+        {"at_ms": 11000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 12000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 13000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 14000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 14000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}}
+      ]
+    },
+    {
       "name": "relaunch_after_expiry",
       "about": "A relaunch 31 minutes after the early death: the time away counted, the level is 0.",
       "milestones": [{"at_ms": 1880000, "key": "a1/i1", "adoptions": 1, "level_s": 0}, {"at_ms": 1881000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
@@ -511,22 +552,47 @@
     },
     {
       "name": "lost_across_a_background_does_not_count",
-      "about": "A link that was up before the last return to the foreground (a computer that slept), or that is lost while in the background, does not raise the level.",
-      "milestones": [{"at_ms": 4002000, "key": "a1/i1", "adoptions": 1, "level_s": 0}, {"at_ms": 4030000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "about": "Within 10 minutes of its adoption: a link that was up before the last return to the foreground (a computer that slept) and is lost after it, and a link lost while in the background, do not raise the level.",
+      "milestones": [{"at_ms": 202000, "key": "a1/i1", "adoptions": 1, "level_s": 0}, {"at_ms": 230000, "key": "a1/i1", "adoptions": 2, "level_s": 0}, {"at_ms": 231000, "key": "a1/i1", "adoptions": 3, "level_s": 0}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
         {"at_ms": 100000, "event": "background"},
-        {"at_ms": 4000000, "event": "foreground"},
-        {"at_ms": 4001000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 4002000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 4003000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
-        {"at_ms": 4003000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
-        {"at_ms": 4010000, "event": "background"},
-        {"at_ms": 4020000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "lost", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}},
-        {"at_ms": 4030000, "event": "foreground"},
-        {"at_ms": 4030000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
+        {"at_ms": 200000, "event": "foreground"},
+        {"at_ms": 201000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 202000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 203000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 1}},
+        {"at_ms": 203000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 2}},
+        {"at_ms": 210000, "event": "background"},
+        {"at_ms": 220000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "lost", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}},
+        {"at_ms": 230000, "event": "foreground"},
+        {"at_ms": 230000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}},
+        {"at_ms": 231000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 2}},
+        {"at_ms": 231000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 3}}
+      ]
+    },
+    {
+      "name": "adoption_checks_that_must_fail",
+      "about": "A check answers no in the background, for a link that came up before the last return, before the wait is over, twice for one link, and for a link that is no longer the current one; and yes once, for the valid link.",
+      "milestones": [{"at_ms": 95000, "key": "a1/i1", "adoptions": 1, "level_s": 30}, {"at_ms": 101000, "key": "a1/i1", "adoptions": 2, "level_s": 30}],
+      "events": [
+        {"at_ms": 0, "event": "foreground"},
+        {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
+        {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 30000, "event": "background"},
+        {"at_ms": 60000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": false, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 61000, "event": "foreground"},
+        {"at_ms": 62000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": false, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 63000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "superseded", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 63000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 92999, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": false, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 95000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": false, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 96000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 97000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": false, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 101000, "event": "check", "key": "a1/i1", "expect": {"level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}}
       ]
     },
     {
@@ -548,18 +614,81 @@
       ]
     },
     {
-      "name": "two_instances_do_not_touch",
-      "about": "One instance's early death leaves the other's level alone.",
-      "milestones": [{"at_ms": 21000, "key": "a1/i2", "adoptions": 1, "level_s": 30}, {"at_ms": 21000, "key": "a1/i1", "adoptions": 1, "level_s": 0}],
+      "name": "accounts_and_instances_do_not_touch",
+      "about": "Three levels at once: another instance of the same account at 30 s, the same instance under another account at 600 s, and this one untouched at 0.",
+      "milestones": [{"at_ms": 51000, "key": "a1/i2", "adoptions": 1, "level_s": 30}, {"at_ms": 51000, "key": "a2/i1", "adoptions": 1, "level_s": 600}, {"at_ms": 51000, "key": "a1/i1", "adoptions": 1, "level_s": 0}],
       "events": [
         {"at_ms": 0, "event": "foreground"},
         {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
         {"at_ms": 0, "event": "link_up", "key": "a1/i2", "link": 2, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
         {"at_ms": 0, "event": "adopt", "key": "a1/i2", "link": 2, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
+        {"at_ms": 0, "event": "link_up", "key": "a2/i1", "link": 3, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
+        {"at_ms": 0, "event": "adopt", "key": "a2/i1", "link": 3, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
         {"at_ms": 20000, "event": "link_down", "key": "a1/i2", "link": 2, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
-        {"at_ms": 21000, "event": "check", "key": "a1/i2", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
-        {"at_ms": 21000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": true, "adoptions": 1}}
+        {"at_ms": 30000, "event": "link_down", "key": "a2/i1", "link": 3, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 35000, "event": "link_up", "key": "a2/i1", "link": 4, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 50000, "event": "link_down", "key": "a2/i1", "link": 4, "cause": "lost", "expect": {"level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 51000, "event": "check", "key": "a1/i2", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 51000, "event": "check", "key": "a2/i1", "expect": {"level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 51000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": true, "adoptions": 1}}
+      ]
+    },
+    {
+      "name": "the_tunnel_is_ruled_out_while_a_link_waits",
+      "about": "At level 600 s a link is waiting and the user rules the tunnel out: the shell ends that link's turn as a choice and presents the link again under a new number, which is used at once. The old number's timer adopts nothing when it fires.",
+      "milestones": [{"at_ms": 60000, "key": "a1/i1", "adoptions": 2, "level_s": 600}, {"at_ms": 650000, "key": "a1/i1", "adoptions": 2, "level_s": 600}],
+      "events": [
+        {"at_ms": 0, "event": "foreground"},
+        {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
+        {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 45000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "lost", "expect": {"level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 50000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 600000, "level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 60000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "choice", "expect": {"level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 60000, "event": "link_up", "key": "a1/i1", "link": 4, "strict": true, "expect": {"wait_ms": 0, "level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 60000, "event": "adopt", "key": "a1/i1", "link": 4, "expect": {"adopted": true, "level_s": 600, "rose": "probation", "usable": true, "adoptions": 2}},
+        {"at_ms": 650000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": false, "level_s": 600, "rose": "probation", "usable": true, "adoptions": 2}}
+      ]
+    },
+    {
+      "name": "the_tunnel_is_allowed_again_on_a_young_link",
+      "about": "A link used at once under the no-tunnel choice is 15 s old when the tunnel is allowed again: presented again under a new number, it waits the level's 30 s from then.",
+      "milestones": [{"at_ms": 40000, "key": "a1/i1", "adoptions": 2, "level_s": 30}, {"at_ms": 70000, "key": "a1/i1", "adoptions": 3, "level_s": 30}],
+      "events": [
+        {"at_ms": 0, "event": "foreground"},
+        {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
+        {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "strict": true, "expect": {"wait_ms": 0, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "adopt", "key": "a1/i1", "link": 2, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 2}},
+        {"at_ms": 40000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "choice", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 40000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 40000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": false, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 69999, "event": "check", "key": "a1/i1", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 70000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 30, "rose": "adopted", "usable": true, "adoptions": 3}}
+      ]
+    },
+    {
+      "name": "a_repeat_at_the_top_level",
+      "about": "At 600 s, reached by a death on probation, a link is adopted after its 10 minutes and dies 20 s later: the level cannot rise, but the reason becomes `adopted` and the 30 minutes start again from that death.",
+      "milestones": [{"at_ms": 46000, "key": "a1/i1", "adoptions": 1, "level_s": 600}, {"at_ms": 671000, "key": "a1/i1", "adoptions": 2, "level_s": 600}, {"at_ms": 1845000, "key": "a1/i1", "adoptions": 2, "level_s": 600}, {"at_ms": 2469999, "key": "a1/i1", "adoptions": 2, "level_s": 600}, {"at_ms": 2470000, "key": "a1/i1", "adoptions": 2, "level_s": 0}],
+      "events": [
+        {"at_ms": 0, "event": "foreground"},
+        {"at_ms": 0, "event": "link_up", "key": "a1/i1", "link": 1, "expect": {"wait_ms": 0, "level_s": 0, "rose": "none", "usable": false, "adoptions": 0}},
+        {"at_ms": 0, "event": "adopt", "key": "a1/i1", "link": 1, "expect": {"adopted": true, "level_s": 0, "rose": "none", "usable": true, "adoptions": 1}},
+        {"at_ms": 20000, "event": "link_down", "key": "a1/i1", "link": 1, "cause": "lost", "expect": {"level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 25000, "event": "link_up", "key": "a1/i1", "link": 2, "expect": {"wait_ms": 30000, "level_s": 30, "rose": "adopted", "usable": false, "adoptions": 1}},
+        {"at_ms": 45000, "event": "link_down", "key": "a1/i1", "link": 2, "cause": "lost", "expect": {"level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 46000, "event": "check", "key": "a1/i1", "expect": {"level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 50000, "event": "link_up", "key": "a1/i1", "link": 3, "expect": {"wait_ms": 600000, "level_s": 600, "rose": "probation", "usable": false, "adoptions": 1}},
+        {"at_ms": 650000, "event": "adopt", "key": "a1/i1", "link": 3, "expect": {"adopted": true, "level_s": 600, "rose": "probation", "usable": true, "adoptions": 2}},
+        {"at_ms": 670000, "event": "link_down", "key": "a1/i1", "link": 3, "cause": "lost", "expect": {"level_s": 600, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 671000, "event": "check", "key": "a1/i1", "expect": {"level_s": 600, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 1845000, "event": "check", "key": "a1/i1", "expect": {"level_s": 600, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 2469999, "event": "check", "key": "a1/i1", "expect": {"level_s": 600, "rose": "adopted", "usable": false, "adoptions": 2}},
+        {"at_ms": 2470000, "event": "check", "key": "a1/i1", "expect": {"level_s": 0, "rose": "none", "usable": false, "adoptions": 2}}
       ]
     }
   ]

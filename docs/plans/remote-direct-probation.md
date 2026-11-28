@@ -34,19 +34,23 @@ All bounds are inclusive: a wait is over at exactly `wait`, a death at exactly 6
 
 **On probation** the link is open and kept alive, carries no page traffic, and the shell reports no path. The page therefore shows the tunnel and asks for no hand-over. No copy changes. A death there costs the user nothing.
 
-**Only a loss raises the level.** These never do, however soon they come:
+**Only a loss raises the level.** The shell names one cause for every link that ends, the first row below that applies. A decision of our own wins over whatever the transport reports beside it: a link we were closing, or had no more right to use, did not die of its path.
 
-| Cause | What it is |
-| --- | --- |
-| `background` | The App or the window went to the background and closed its link |
-| `choice` | The user chose another connection mode |
-| `superseded` | A newer rendezvous answer replaced the link |
-| `instance_ended` | The instance closed the connection: a typed application close from the peer (a restart, an ended admission, its own idle rule) |
-| `network_change` | A change of network that the shell answered by dialling again, when the loss came from the probe that change started, not merely near it |
+| What the shell knows | Cause | Raises |
+| --- | --- | --- |
+| The App or the window is in the background, or is going there | `background` | never |
+| The user changed the connection mode, or left the instance | `choice` | never |
+| A newer rendezvous answer replaced the link | `superseded` | never |
+| Our own lease on the link ran out, or we withdrew it | `instance_ended` | never |
+| A typed application close from the peer, whatever its reason (a restart, an ended admission, the instance's own idle rule) | `instance_ended` | never |
+| The loss came from the probe that a change of network started, not merely near one | `network_change` | never |
+| Anything else: the transport's idle time-out, a reset, a failed probe on probation | `lost` | yes |
 
 A loss also counts only for a link that came up in the present foreground stretch, while in the foreground: a computer that slept and woke to a dead link is not put on probation.
 
 **With the tunnel ruled out by the user** (「仅直连和中继」) there is nothing to wait on: a link is used at once, whatever the level. Its deaths still count, so the level is right when the choice changes.
+
+**When that choice changes while a link is up**, the link's turn ends and it begins another: the shell gives `link_down` with `choice` and then `link_up` under the new choice, with a new link number, whether or not it dials again. So a link that was waiting is used at once when the tunnel is ruled out, and a link that was used at once waits the level's time, from the change, when the tunnel is allowed again (unless it has held 600 s by then, which sets the level to 0 first). A timer armed for the old number adopts nothing: its number is no longer the current one.
 
 **Nothing moves mid-request.** Adoption concerns new connections only; the hand-over of an open page already waits for a quiet page and closes only quiet connections. The rule never closes a link in use.
 
@@ -57,8 +61,10 @@ A loss also counts only for a link that came up in the present foreground stretc
 | is healthy | at link-up | nothing changes |
 | dies 20 s after each link-up | once | stays on the tunnel: it never outlives 30 s |
 | dies 3 minutes after each link-up | twice | stays on the tunnel: it never outlives 600 s |
-| lives longer than 10 minutes | every time | the worst case, under six falls an hour |
+| holds 10 minutes after each adoption, then dies | every time, at once | the worst case: six falls at most in any hour |
 | is left and returned to every minute, healthy | at every return | the level never moves |
+
+The 10 minutes that clear the level count from the adoption, not from link-up: at a level above 0 the wait comes first.
 
 ## 4. Limits
 
@@ -66,7 +72,7 @@ A loss also counts only for a link that came up in the present foreground stretc
 - **Every return starts a new probation.** At level 30 s, stretches in the foreground shorter than 30 s never reach a direct path until the level expires.
 - **A path that is slow but alive is not judged.** Nothing here measures quality.
 - **An instance that is killed** sends no close, so its death reads as a loss and counts once.
-- **The wall clock.** The expiry is the only thing kept across a relaunch, so it is the only thing on the wall clock. A clock set forward ends a probation early; one set back restarts the 1800 s from the first read after it.
+- **The wall clock.** The expiry is the only thing kept across a relaunch, so it is the only thing on the wall clock. A clock set forward brings the expiry sooner. A read at a wall time *before* the stored time of the last early death moves that stored time to the read, so the 1800 s count from there with no credit for what came before; a step back that still lies after the stored time changes nothing. A wait fixed at link-up is on the monotonic clock: the wall clock never shortens or lengthens it.
 
 ## 5. The shape both shells implement
 
@@ -85,7 +91,9 @@ The same names in Swift and in Rust, so that the runner of the cases is a small 
 
 **Adoption is never inferred.** A link whose wait has passed but whose check has not run is not adopted, and its death is one on probation. A timer that fires late adopts late or not at all.
 
-**The probe is the shell's, not the rule's.** The instance closes a connection that has had no stream for five minutes, and keep-alives do not show that a path carries anything. So on probation, in the foreground, the shell runs its existing CONNECT probe once every 60 s: one stream, bounded, never two at once, closed at once, no page traffic, no usage count, no hand-over count, no lease renewal. It stops at adoption and at the background. A failed probe is a loss only after the link's ownership, its deadline, its close reason and the lifecycle are read again.
+**A change of the user's choice is two calls**, `link_down` with `choice` and `link_up` with a new number (section 2).
+
+**The probe is the shell's, not the rule's.** The instance closes a connection that has had no stream for five minutes, and keep-alives do not show that a path carries anything. So on probation, in the foreground, the shell runs its existing CONNECT probe once every 60 s: one stream, bounded, never two at once, closed at once, no page traffic, no usage count, no hand-over count, no lease renewal. It stops at adoption and at the background. A failed probe is `lost` only when no earlier row of the cause table applies once the link's ownership, its deadline, its close reason and the lifecycle are read again.
 
 ## 6. The cases
 

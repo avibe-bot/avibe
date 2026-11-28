@@ -236,14 +236,17 @@ def cases() -> list[dict[str, Any]]:
 
     s = Script()
     at = 0.0
-    for _ in range(5):
-        s.fg(at); s.up(at); s.adopt(at); s.down(at + 50, "background").bg(at + 50)
-        at += 60
-    s.fg(at).check(at)
+    for visit in range(6):  # the first opening, then five returns
+        s.fg(at); s.up(at); s.adopt(at)
+        if visit < 5:
+            s.down(at + 50, "background").bg(at + 50)
+            at += 60
+    s.check(at + 1)
     case("five_returns_a_minute_apart",
-         "In and out every minute on a healthy path: each return is adopted at once and the level never moves.",
+         "Opened, then left and returned to five times a minute apart, on a healthy path: every link is adopted at "
+         "once and the level never moves.",
          s.events,
-         [{"at_ms": 50_000, "key": K, "adoptions": 1, "level_s": 0}, {"at_ms": 300_000, "key": K, "adoptions": 5, "level_s": 0}])
+         [{"at_ms": 50_000, "key": K, "adoptions": 1, "level_s": 0}, {"at_ms": 301_000, "key": K, "adoptions": 6, "level_s": 0}])
 
     s = Script().fg(0)
     s.up(0); s.adopt(0).down(20, "lost")
@@ -266,13 +269,19 @@ def cases() -> list[dict[str, Any]]:
 
     for cause in ("background", "choice", "superseded", "instance_ended", "network_change"):
         s = Script().fg(0)
-        s.up(0); s.adopt(0).down(20, cause)
+        s.up(0); s.adopt(0).down(20, "lost")  # one early death: the level is 30 s
+        s.up(25); s.down(40, cause)  # on probation
         if cause == "background":
-            s.bg(20).fg(30)
-        s.up(31); s.adopt(31).down(40, cause)
+            s.bg(40).fg(44)
+        s.up(45); s.adopt(75).down(90, cause)  # 15 s after its adoption
+        if cause == "background":
+            s.bg(90).fg(94)
+        s.up(95); s.adopt(125)
         case(f"own_close_{cause}",
-             f"A link that ends by `{cause}` never raises the level, adopted or not, however soon.", s.events,
-             [{"at_ms": 40_000, "key": K, "adoptions": 2, "level_s": 0}])
+             f"At level 30 s, a link that ends by `{cause}`, on probation or 15 s after its adoption, changes "
+             "nothing: the next link waits the same 30 s for the same reason.", s.events,
+             [{"at_ms": 40_000, "key": K, "adoptions": 1, "level_s": 30}, {"at_ms": 90_000, "key": K, "adoptions": 2, "level_s": 30},
+              {"at_ms": 125_000, "key": K, "adoptions": 3, "level_s": 30}])
 
     s = Script().fg(0)
     s.up(0); s.adopt(0).down(20, "lost")
@@ -321,6 +330,15 @@ def cases() -> list[dict[str, Any]]:
          [{"at_ms": 320_000, "key": K, "adoptions": 1, "level_s": 30}, {"at_ms": 351_000, "key": K, "adoptions": 2, "level_s": 30}])
 
     s = Script().fg(0)
+    gone = s.up(0)
+    s.adopt(0).add(10, "relaunch").fg(11).check(11).down(12, "lost", link=gone).check(13)
+    s.up(14); s.adopt(14)
+    case("relaunch_drops_the_link",
+         "The process ended with a link in use: after the relaunch no link is up, and a late report of the old "
+         "link's loss changes nothing.", s.events,
+         [{"at_ms": 13_000, "key": K, "adoptions": 1, "level_s": 0}, {"at_ms": 14_000, "key": K, "adoptions": 2, "level_s": 0}])
+
+    s = Script().fg(0)
     s.up(0); s.adopt(0).down(20, "lost").bg(21)
     s.add(1880, "relaunch").fg(1880).check(1880)
     s.up(1881); s.adopt(1881)
@@ -344,12 +362,25 @@ def cases() -> list[dict[str, Any]]:
           {"at_ms": 50_000, "key": K, "adoptions": 3, "level_s": 600}])
 
     s = Script().fg(0)
-    s.up(0); s.adopt(0).bg(100).fg(4000).down(4001, "lost").check(4002)
-    s.up(4003); s.adopt(4003).bg(4010).down(4020, "lost").fg(4030).check(4030)
+    s.up(0); s.adopt(0).bg(100).fg(200).down(201, "lost").check(202)
+    s.up(203); s.adopt(203).bg(210).down(220, "lost").fg(230).check(230)
+    s.up(231); s.adopt(231)
     case("lost_across_a_background_does_not_count",
-         "A link that was up before the last return to the foreground (a computer that slept), or that is lost while "
-         "in the background, does not raise the level.",
-         s.events, [{"at_ms": 4_002_000, "key": K, "adoptions": 1, "level_s": 0}, {"at_ms": 4_030_000, "key": K, "adoptions": 2, "level_s": 0}])
+         "Within 10 minutes of its adoption: a link that was up before the last return to the foreground (a computer "
+         "that slept) and is lost after it, and a link lost while in the background, do not raise the level.",
+         s.events, [{"at_ms": 202_000, "key": K, "adoptions": 1, "level_s": 0}, {"at_ms": 230_000, "key": K, "adoptions": 2, "level_s": 0},
+                    {"at_ms": 231_000, "key": K, "adoptions": 3, "level_s": 0}])
+
+    s = Script().fg(0)
+    s.up(0); s.adopt(0).down(20, "lost")
+    waiting = s.up(25)
+    s.bg(30).adopt(60, link=waiting).fg(61).adopt(62, link=waiting).down(63, "superseded", link=waiting)
+    valid = s.up(63)
+    s.adopt(92.999, link=valid).adopt(95, link=waiting).adopt(96, link=valid).adopt(97, link=valid).check(101)
+    case("adoption_checks_that_must_fail",
+         "A check answers no in the background, for a link that came up before the last return, before the wait is "
+         "over, twice for one link, and for a link that is no longer the current one; and yes once, for the valid link.",
+         s.events, [{"at_ms": 95_000, "key": K, "adoptions": 1, "level_s": 30}, {"at_ms": 101_000, "key": K, "adoptions": 2, "level_s": 30}])
 
     s = Script().fg(0)
     s.up(0); s.adopt(0).down(20, "lost")
@@ -360,11 +391,56 @@ def cases() -> list[dict[str, Any]]:
          [{"at_ms": 710_000, "key": K, "adoptions": 2, "level_s": 0}])
 
     s = Script().fg(0)
-    other = "a1/i2"
+    other_instance, other_account = "a1/i2", "a2/i1"
     s.up(0); s.adopt(0)
-    s.up(0, key=other); s.adopt(0, key=other).down(20, "lost", key=other).check(21, key=other).check(21)
-    case("two_instances_do_not_touch", "One instance's early death leaves the other's level alone.", s.events,
-         [{"at_ms": 21_000, "key": other, "adoptions": 1, "level_s": 30}, {"at_ms": 21_000, "key": K, "adoptions": 1, "level_s": 0}])
+    second = s.up(0, key=other_instance)
+    s.adopt(0, link=second, key=other_instance)
+    third = s.up(0, key=other_account)
+    s.adopt(0, link=third, key=other_account)
+    s.down(20, "lost", link=second, key=other_instance).down(30, "lost", link=third, key=other_account)
+    s.up(35, key=other_account); s.down(50, "lost", key=other_account)
+    s.check(51, key=other_instance).check(51, key=other_account).check(51)
+    case("accounts_and_instances_do_not_touch",
+         "Three levels at once: another instance of the same account at 30 s, the same instance under another account "
+         "at 600 s, and this one untouched at 0.", s.events,
+         [{"at_ms": 51_000, "key": other_instance, "adoptions": 1, "level_s": 30},
+          {"at_ms": 51_000, "key": other_account, "adoptions": 1, "level_s": 600},
+          {"at_ms": 51_000, "key": K, "adoptions": 1, "level_s": 0}])
+
+    s = Script().fg(0)
+    s.up(0); s.adopt(0).down(20, "lost")
+    s.up(25); s.down(45, "lost")
+    waiting = s.up(50)
+    s.down(60, "choice", link=waiting)
+    s.up(60, strict=True); s.adopt(60).adopt(650, link=waiting)
+    case("the_tunnel_is_ruled_out_while_a_link_waits",
+         "At level 600 s a link is waiting and the user rules the tunnel out: the shell ends that link's turn as a "
+         "choice and presents the link again under a new number, which is used at once. The old number's timer "
+         "adopts nothing when it fires.", s.events,
+         [{"at_ms": 60_000, "key": K, "adoptions": 2, "level_s": 600}, {"at_ms": 650_000, "key": K, "adoptions": 2, "level_s": 600}])
+
+    s = Script().fg(0)
+    s.up(0); s.adopt(0).down(20, "lost")
+    s.up(25, strict=True); s.adopt(25)
+    used = s.link
+    s.down(40, "choice", link=used)
+    s.up(40); s.adopt(40).check(69.999).adopt(70)
+    case("the_tunnel_is_allowed_again_on_a_young_link",
+         "A link used at once under the no-tunnel choice is 15 s old when the tunnel is allowed again: presented "
+         "again under a new number, it waits the level's 30 s from then.", s.events,
+         [{"at_ms": 40_000, "key": K, "adoptions": 2, "level_s": 30}, {"at_ms": 70_000, "key": K, "adoptions": 3, "level_s": 30}])
+
+    s = Script().fg(0)
+    s.up(0); s.adopt(0).down(20, "lost")
+    s.up(25); s.down(45, "lost").check(46)
+    s.up(50); s.adopt(650).down(670, "lost").check(671)
+    s.check(1845).check(2469.999).check(2470)
+    case("a_repeat_at_the_top_level",
+         "At 600 s, reached by a death on probation, a link is adopted after its 10 minutes and dies 20 s later: the "
+         "level cannot rise, but the reason becomes `adopted` and the 30 minutes start again from that death.",
+         s.events, [{"at_ms": 46_000, "key": K, "adoptions": 1, "level_s": 600}, {"at_ms": 671_000, "key": K, "adoptions": 2, "level_s": 600},
+                    {"at_ms": 1_845_000, "key": K, "adoptions": 2, "level_s": 600}, {"at_ms": 2_469_999, "key": K, "adoptions": 2, "level_s": 600},
+                    {"at_ms": 2_470_000, "key": K, "adoptions": 2, "level_s": 0}])
 
     return result
 
