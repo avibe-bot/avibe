@@ -7,7 +7,12 @@ struct NativeHoldInputState: Equatable, Sendable {
     var rate: Int
     var channels: Int
 
-    var text: String { "\(port):\(rate)/\(channels)" }
+    /// `BuiltIn:48000/1`: short enough for the phone's line (`Microphone`
+    /// dropped from the port's name).
+    var text: String {
+        let name = port.hasPrefix("Microphone") ? String(port.dropFirst("Microphone".count)) : port
+        return "\(name):\(rate)/\(channels)"
+    }
     /// The engine can record from it.
     var usable: Bool { rate > 0 && channels > 0 }
 }
@@ -19,7 +24,7 @@ struct NativeHoldInputChange: Equatable, Sendable {
     var to: NativeHoldInputState?
     var restarted: Bool
 
-    /// `MicrophoneBuiltIn:48000/1>BluetoothHFP:16000/1` (`none` for no input),
+    /// `BuiltIn:48000/1>BluetoothHFP:16000/1` (`none` for no input),
     /// and `!` where the input did not start again.
     var text: String {
         "\(from?.text ?? "none")>\(to?.text ?? "none")" + (restarted ? "" : "!")

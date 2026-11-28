@@ -206,8 +206,10 @@ final class NativeHoldCapture {
                 + part("e", liveEarly) + part("q", liveQuiet)
                 + part("buf", firstBufferAt) + part("bytes", firstBufferBytes)
                 + part("adopt", adoptedAt) + part("up", releasedAt)
-                + (restarts > 0 ? " rs=\(restarts)" : "") + (change.map { " cfg=" + $0.text } ?? "")
+                // The end before the change: a line past its length is cut
+                // from its tail (`NativeHoldTimings`).
                 + (end.map { " end=" + $0 } ?? "")
+                + (restarts > 0 ? " rs=\(restarts)" : "") + (change.map { " cfg=" + $0.text } ?? "")
         }
     }
 
@@ -1613,6 +1615,9 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
 
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
+    /// The engine that stopped itself at the bound of an untaken take:
+    /// nothing starts it again, a recovery already queued included.
+    private var stoppedAtTheBound: ObjectIdentifier?
     private var armed: NativeHoldCapture.ArmTimings?
     private let lock = NSLock()
     private var sink: NativeHoldSink?
@@ -1743,8 +1748,11 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
                 [weak self, queue, engineID = ObjectIdentifier(engine)] _ in
                 // On this input's queue, as everything else it does.
                 queue.async {
-                    // An input already taken down ended its take another way.
-                    guard let self, self.engine.map(ObjectIdentifier.init) == engineID else { return }
+                    // An input already taken down, or stopped at the bound,
+                    // ended its take another way.
+                    guard let self, self.engine.map(ObjectIdentifier.init) == engineID,
+                          self.stoppedAtTheBound != engineID
+                    else { return }
                     let change = recovery.changed(restartable)
                     onChange(change)
                     if !change.restarted { onEnd("route") }
@@ -1766,7 +1774,8 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     private func stopAtTheBound(_ stopping: AVAudioEngine) -> Bool {
         guard engine === stopping else { return false }
         // Nothing starts it again: a change of its configuration now finds
-        // no one listening.
+        // no one listening, and one already queued finds it stopped here.
+        stoppedAtTheBound = ObjectIdentifier(stopping)
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
         stopping.inputNode.removeTap(onBus: 0)

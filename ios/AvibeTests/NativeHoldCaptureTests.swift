@@ -1080,7 +1080,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertTrue(change.restarted)
         XCTAssertEqual(input.restarts, 1)
         XCTAssertEqual(recovery.restarts, 1)
-        XCTAssertEqual(change.text, "MicrophoneBuiltIn:48000/1>MicrophoneBuiltIn:24000/1")
+        XCTAssertEqual(change.text, "BuiltIn:48000/1>BuiltIn:24000/1")
 
         // The input gone (a headset unplugged with nothing else to record
         // from): not started again, and the take ends as before.
@@ -1088,7 +1088,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         let gone = recovery.changed(input)
         XCTAssertFalse(gone.restarted)
         XCTAssertEqual(input.restarts, 1)
-        XCTAssertEqual(gone.text, "MicrophoneBuiltIn:24000/1>none!")
+        XCTAssertEqual(gone.text, "BuiltIn:24000/1>none!")
 
         // One that has no format yet, or will not start, ends it too.
         input.state = NativeHoldInputState(port: "BluetoothHFP", rate: 0, channels: 0)
@@ -1132,9 +1132,20 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(timings["cfgToHz"] as? Int, 24_000)
         XCTAssertEqual(timings["cfgToCh"] as? Int, 1)
         XCTAssertTrue(
-            try XCTUnwrap(notes.last).contains(" rs=1 cfg=MicrophoneBuiltIn:48000/1>MicrophoneBuiltIn:24000/1 end=stopped"),
+            try XCTUnwrap(notes.last).hasSuffix(" end=stopped rs=1 cfg=BuiltIn:48000/1>BuiltIn:24000/1"),
             notes.last ?? ""
         )
+        // A hold's full line, every time and this change named, keeps its
+        // end within what the phone keeps of a line (it cuts from the tail).
+        var full = NativeHoldCapture.HoldTimings()
+        full.route = "Speaker"
+        (full.startAfterMs, full.deliveryMs, full.categoryMs, full.activateMs, full.prepareMs) = (50, 29, 26, 54, 19)
+        (full.armedAt, full.beginAt, full.recognisedAt, full.hapticAt, full.startMs) = (107, 107, 217, 217, 658)
+        (full.liveAt, full.firstBufferAt, full.firstBufferBytes, full.adoptedAt, full.releasedAt) = (767, 858, 2720, 227, 1219)
+        full.end = "stopped"
+        full.restarts = 1
+        full.change = NativeHoldInputChange(from: builtIn, to: settled, restarted: true)
+        XCTAssertTrue(full.line.prefix(NativeHoldTimings.maximumLength).contains(" end=stopped"), full.line)
 
         // No input left: the input says so, then ends the take.
         heard = []
@@ -1149,7 +1160,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(timings["cfgFrom"] as? String, "MicrophoneBuiltIn")
         XCTAssertEqual(timings["cfgTo"] as? String, "none")
         XCTAssertNil(timings["cfgToHz"])
-        XCTAssertTrue(try XCTUnwrap(notes.last).contains(" cfg=MicrophoneBuiltIn:48000/1>none! end=route"), notes.last ?? "")
+        XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix(" end=route cfg=BuiltIn:48000/1>none!"), notes.last ?? "")
     }
 
     /// A take the page started keeps the change on the phone's line.
@@ -1162,7 +1173,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             to: NativeHoldInputState(port: "BluetoothHFP", rate: 16_000, channels: 1),
             restarted: true
         ))
-        XCTAssertEqual(notes.last, "hold page cfg=MicrophoneBuiltIn:48000/1>BluetoothHFP:16000/1")
+        XCTAssertEqual(notes.last, "hold page cfg=BuiltIn:48000/1>BluetoothHFP:16000/1")
         capture.stop(take: "t1")
         drain()
     }
