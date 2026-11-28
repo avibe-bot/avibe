@@ -190,13 +190,6 @@ def _installer(tmp_path: Path, *, stderr: str, exit_code: int) -> list[str]:
             id="curl-connect-timeout",
         ),
         pytest.param(
-            "Fatal: Could not connect to the release server to download the manifest. "
-            "Please check your internet connection or firewall settings.\n",
-            "network_unreachable",
-            {"host": "antigravity.google"},
-            id="agy-sh-release-server",
-        ),
-        pytest.param(
             "Fatal: Failed to download release package from "
             "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/releases/agy.tar.gz. "
             "Please check your internet connection or firewall settings.\n",
@@ -334,7 +327,9 @@ def test_desktop_backend_install_failure_returns_output_hint_and_exit_code(monke
 
     script_err = (
         "[official script]\n"
-        "Fatal: Could not connect to the release server to download the manifest.\n\n"
+        "Fatal: Failed to download release package from "
+        "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/releases/agy.tar.gz. "
+        "Please check your internet connection or firewall settings.\n\n"
         "[GitHub release]\n"
         "Failed to fetch release metadata: URLError"
     )
@@ -351,7 +346,10 @@ def test_desktop_backend_install_failure_returns_output_hint_and_exit_code(monke
     assert result["code"] == "archive_download_failed"
     assert result["message"] == "Could not install Antigravity."
     assert result["output"] == script_err
-    assert result["hint"] == "Could not reach antigravity.google. Check your network connection or proxy settings, then try again."
+    assert result["hint"] == (
+        "Could not reach antigravity-cli-auto-updater-974169037036.us-central1.run.app. "
+        "Check your network connection or proxy settings, then try again."
+    )
     assert result["exit_code"] == 1
 
     monkeypatch.setattr(

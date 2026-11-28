@@ -1508,7 +1508,7 @@ def test_antigravity_get_backend_runtime_reports_auto_update_capability_by_insta
             {"bash": "/bin/bash", "curl": "/usr/bin/curl"},
             "/bin/bash",
             [
-                desktop_backends._CURL_INSTALL_RETRY_FLAGS,
+                desktop_backends.CURL_INSTALL_RETRY_FLAGS,
                 desktop_backends._ANTIGRAVITY_INSTALL_SH_URL,
                 "--dir",
             ],
