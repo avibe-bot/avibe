@@ -5,6 +5,7 @@
 // the former key-only translation stub could not catch a stale name in either language.
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
+import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,12 +37,16 @@ const status = (enabled: boolean) => ({
 });
 const answer = (body: unknown, code = 200) => new Response(JSON.stringify(body), { status: code });
 
-async function page(lng: string, detail = false) {
+async function page(lng: string, detail = false, onCommit: ProfilerOnRenderCallback = () => {}) {
   const i18n = createInstance();
   await i18n.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>{detail ? <SettingsSourceFilterPage /> : <SettingsExperimentalPage />}</MemoryRouter>
+      <MemoryRouter>
+        <Profiler id="experimental" onRender={onCommit}>
+          {detail ? <SettingsSourceFilterPage /> : <SettingsExperimentalPage />}
+        </Profiler>
+      </MemoryRouter>
     </I18nextProvider>,
   );
 }
@@ -124,6 +129,51 @@ describe.each([
     expect(apiFetch.mock.calls.every(([path, init]) =>
       !init?.method && (path === '/api/settings/experimental/source-filter' || path.startsWith('/api/files/meta?')),
     )).toBe(true);
+  });
+
+  it.each(['success', 'permission_denied'] as const)('keeps an immediate script click when the loaded panel commits (%s)', async (outcome) => {
+    apiFetch.mockResolvedValueOnce(answer(status(true))).mockResolvedValueOnce(outcome === 'success'
+      ? answer({ ok: true, mtime: 42 })
+      : answer({ ok: false, error: { code: 'permission_denied', message: 'raw failure' } }, 403));
+    let clicked = false;
+    await page(lng, true, () => {
+      const button = screen.queryByRole('button', { name: 'before_search.py', exact: true });
+      if (!button || clicked) return;
+      clicked = true;
+      // A committed panel can receive a click before its passive effects run. Profiler makes
+      // that ordering deterministic without sleeps, runner load, or a longer findBy timeout.
+      button.click();
+    });
+    await waitFor(() => expect(clicked).toBe(true));
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    if (outcome === 'success') {
+      await waitFor(() => expect(launchApp).toHaveBeenCalledOnce());
+      expect(launchApp).toHaveBeenCalledWith({
+        appId: 'editor', title: 'before_search.py', params: {
+          path: '/home/demo/.avibe/hooks/source_filter/before_search.py', filename: 'before_search.py',
+          rootDir: '/home/demo/.avibe/hooks/source_filter', mtime: 42,
+        },
+      });
+    } else {
+      expect((await screen.findByRole('alert')).textContent).toBe((lng === 'en' ? en : zh).apps.fileBrowser.errors.permission_denied);
+      expect(launchApp).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['success', 'permission_denied'] as const)('ignores a pending metadata result after disabling the panel (%s)', async (outcome) => {
+    let finish!: (response: Response) => void;
+    apiFetch.mockResolvedValueOnce(answer(status(true)))
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }))
+      .mockResolvedValueOnce(answer(status(false)));
+    await page(lng, true);
+    fireEvent.click(await screen.findByRole('button', { name: 'before_search.py', exact: true }));
+    fireEvent.click(screen.getByRole('switch'));
+    await waitFor(() => expect(screen.queryByText('before_search.py')).toBeNull());
+    await act(async () => finish(outcome === 'success'
+      ? answer({ ok: true, mtime: 42 })
+      : answer({ ok: false, error: { code: 'permission_denied', message: 'raw failure' } }, 403)));
+    expect(launchApp).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('reports a metadata failure instead of silently opening without save-conflict protection', async () => {
