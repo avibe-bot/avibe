@@ -513,7 +513,10 @@ export function formatMentionsPlainText(
         if (marker.target === 'bot') {
           return formatTarget('bot', marker.name.trim()) ?? full;
         }
-        return formatTarget('agent', marker.name.trim()) ?? full;
+        if (inner.startsWith('agent:')) {
+          return formatTarget('agent', marker.name.trim()) ?? full;
+        }
+        return full;
       },
     );
 

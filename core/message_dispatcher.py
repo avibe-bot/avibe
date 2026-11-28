@@ -2329,7 +2329,7 @@ class ConsolidatedMessageDispatcher:
         platform = self._get_platform(context)
         if platform == "avibe":
             return text
-        if "#" not in text and "@<bot:" not in text:
+        if "#" not in text and "@<bot:" not in text and "@<agent:" not in text:
             return text
         return await asyncio.to_thread(
             render_im_mentions,

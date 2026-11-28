@@ -775,11 +775,17 @@ async def test_dispatcher_resolve_im_mentions_keeps_avibe_canonical(tmp_path):
     dispatcher = ConsolidatedMessageDispatcher.__new__(ConsolidatedMessageDispatcher)
     dispatcher.controller = SimpleNamespace(config=cfg)
 
+    VibeAgentStore(db_path).create(name="vibey", backend="vibey")
+
     avibe_ctx = MessageContext(user_id="u1", channel_id="c1", platform="avibe")
     discord_ctx = MessageContext(user_id="u1", channel_id="c1", platform="discord")
     body = "Check #<sesw34zgzgcvp>."
+    agent_only = "Use @<agent:vibey> for this."
 
     assert await dispatcher._resolve_im_mentions(avibe_ctx, body) == body
+    assert await dispatcher._resolve_im_mentions(avibe_ctx, agent_only) == agent_only
     with patch("core.mention_resolution.create_sqlite_engine", return_value=create_sqlite_engine(db_path)):
         out = await dispatcher._resolve_im_mentions(discord_ctx, body)
+        out_agent = await dispatcher._resolve_im_mentions(discord_ctx, agent_only)
     assert out == "Check [Auth Fix](https://demo.avibe.bot/chat/sesw34zgzgcvp)."
+    assert out_agent == "Use @vibey for this."

@@ -312,7 +312,7 @@ describe('referenceToMarker', () => {
 describe('formatMentionsPlainText', () => {
   it('replaces resolved Session, Bot, Agent, and marker-destination link mentions while preserving code and unresolved ids', () => {
     const out = formatMentionsPlainText(
-      'Check [发版检查](#<sesw34zgzgcvp>), #sesuntitled01, @<bot:product>, @<agent:vibey>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.',
+      'Check [发版检查](#<sesw34zgzgcvp>), #sesuntitled01, @<bot:product>, @<agent:vibey>, @<vibey>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.',
       [
         { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
         { kind: 'session', session_id: 'sesuntitled01', title: null, openable: true },
@@ -321,6 +321,6 @@ describe('formatMentionsPlainText', () => {
       ],
       '未命名会话',
     );
-    expect(out).toBe('Check 登录跳转修复, 未命名会话, @产品伙伴, @vibey, #<sesmissing99>, and `#<sesw34zgzgcvp>`.');
+    expect(out).toBe('Check 登录跳转修复, 未命名会话, @产品伙伴, @vibey, @<vibey>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.');
   });
 });
