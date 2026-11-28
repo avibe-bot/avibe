@@ -329,9 +329,10 @@ async def test_a_continuation_whose_route_refuses_the_cache_lifetime_is_sent_aga
     observation = ThreadObservation(f"paused-ttl-{uuid.uuid4().hex}")
     request = replace(
         _request(cache="default", base_url=f"http://{uuid.uuid4().hex}.invalid/vibey/v1"),
-        thread_observation=observation,
+        thread_observation=observation, successful_wires=[],
     )
     sent, events = await _stream(answer, request)
+    assert [row["body_bytes"] for row in request.successful_wires] == [len(sent[0].content), len(sent[2].content)]
     assert [(a["parent_state"], a["binding"]) for a in observation.attempts] == [
         ("no_local_entry", "pause_turn"),
         ("pause_turn", "ttl_refused"),

@@ -197,6 +197,8 @@ class ModelRequest:
     supports_images: bool = False
     """Resolved by the loop from ``ModelCapabilities``; an unknown capability counts as False."""
     thread_observation: ThreadObservation | None = field(default=None, compare=False, repr=False)
+    # One receipt per completed adapter POST, including completed pause_turn subrequests.
+    successful_wires: list[dict[str, Any]] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

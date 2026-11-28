@@ -227,6 +227,7 @@ class GoogleAdapter(ProviderAdapter):
                 resolver=self._served_hop_resolver,
                 gateway=self._gateway,
                 translate=translate,
+                successful_wires=request.successful_wires,
             )
             try:
                 async for event in driver:

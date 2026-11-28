@@ -23,7 +23,7 @@ from jsonschema import ValidationError
 from config.v2_config import ModelHubModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig, ModelHubSourceConfig
 from core.handlers.model_hub.adapter import ObservationOutcome, RawOutcomeKind, SourceBinding
 from core.handlers.model_hub.capability_evidence import identity_digest
-from core.handlers.model_hub.provenance import SERVED_HOP_HEADER
+from core.handlers.model_hub.provenance import HopOrigin, SERVED_HOP_HEADER
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.handlers.model_hub.stream_wire import (
     ProtocolSSEState,
@@ -290,6 +290,18 @@ async def test_google_native_error_codes_reach_existing_retry_classification(sta
         await result.close_stream()
 
 
+@pytest.mark.parametrize('kind,vendor,url,expected', [
+    ('subscription', 'openai', None, 'subscription'),
+    ('api_key', 'anthropic', None, 'official_api_key'),
+    ('api_key', 'openai', 'https://API.OPENAI.COM:443/v1', 'official_api_key'),
+    ('api_key', 'openai', 'https://relay.invalid/v1', 'relay_key'),
+    ('api_key', 'custom', None, 'unknown'),
+    ('other', 'custom', None, 'unknown'),
+])
+def test_source_kind_uses_the_launch_credential_type_and_endpoint(kind, vendor, url, expected):
+    assert HopOrigin.classify_source(kind, vendor, url) == expected
+
+
 @pytest.mark.parametrize(("stream", "fallback_protocol", "same_origin"), [
     (stream, protocol, same_origin)
     for stream in (False, True)
@@ -305,6 +317,8 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
     fallback = _source(
         "src_fallback01", "Fallback", vendor="custom", protocol=fallback_protocol, model_id="fallback-model",
     )
+    # Different credentials at the two hops: the report must come from the winner.
+    fallback.base_url = "https://relay.invalid/v1"
     if same_origin:
         fallback.protocol = "google"
         fallback.models[0].id = primary.models[0].id
@@ -351,6 +365,7 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
             ) as response:
                 assert response.status == 200, await response.text()
                 assert await response.read() == raw
+                assert response.headers["x-avibe-source-kind"] == "relay_key"
                 origin = json.loads(response.headers[SERVED_HOP_HEADER])
                 assert origin == {
                     "provider": "custom", "api": fallback.protocol, "model": fallback.models[0].id,

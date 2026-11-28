@@ -85,6 +85,7 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
         "previous_input_tokens": 100,
         "writes_by_ttl": {"5m": 10},
         "thread_attempts": [{"mode": "continue", "body_bytes": 450, "full_bytes": 8000}],
+        "successful_wires": [{"body_bytes": 450, "source_id": "src_fixture001", "source_kind": "subscription"}],
         "cache_write_basis": "reported",
         "causes": [],
     }
@@ -115,13 +116,18 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
         conn.commit()
 
     result = run_read_only_query(
-        "select request_id, purpose, idle_s, classification, data_basis, input_tokens, cache_write_basis, writes_by_ttl, thread_attempts "
+        "select request_id, purpose, idle_s, classification, data_basis, input_tokens, cache_write_basis, writes_by_ttl, thread_attempts, successful_wires "
         "from cache_requests order by request_id",
         db_path=state_db, page_request=PageRequest(), user_context=instance_owner_context(),
     )
     by_id = {row["request_id"]: row for row in result.rows}
     assert json.loads(by_id['m-observed']['thread_attempts']) == cache['thread_attempts']
     assert by_id['m-scalar']['thread_attempts'] is None
+    for row in result.rows:
+        if row['request_id'] in {'m-scalar', 'm-invalid'}:
+            assert row['successful_wires'] is None
+        else:
+            assert json.loads(row['successful_wires']) == cache['successful_wires']
     assert by_id["m-observed"]["idle_s"] == 10
     assert by_id["m-observed"]["classification"] == "hit"
     assert by_id["m-observed"]["data_basis"] == "observed"
@@ -131,6 +137,12 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
     assert by_id["m-invalid"]["classification"] == "unknown"
     purposes = {row["purpose"] for row in result.rows if row["request_id"] != "m-observed" and row["request_id"] not in {"m-scalar", "m-invalid"}}
     assert purposes == {"attempt", "fork_turn"}
+    totals = run_read_only_query(
+        "select json_extract(w.value, '$.source_id') as source, sum(json_extract(w.value, '$.body_bytes')) as bytes "
+        "from cache_requests as r, json_each(r.successful_wires) as w group by source",
+        db_path=state_db, page_request=PageRequest(), user_context=instance_owner_context(),
+    )
+    assert [(row['source'], row['bytes']) for row in totals.rows] == [('src_fixture001', 3 * 450)]
 
 def test_cache_view_requires_member_access_for_audit_union(state_db: Path) -> None:
     with sqlite3.connect(state_db) as conn:

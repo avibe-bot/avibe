@@ -230,7 +230,8 @@ CACHE_VIEWS = {
                json_extract(cache, '$.source_id') AS source_id,
                json_extract(cache, '$.thread_attempts') AS thread_attempts,
     """ + ", ".join(f"json_extract(facts, '$.{field}') AS {field}" for field in _FIELDS) + """,
-               cache_valuation(model, usage, json_extract(facts, '$.writes_by_ttl'), json_extract(facts, '$.cache_write_basis')) AS valuation
+               cache_valuation(model, usage, json_extract(facts, '$.writes_by_ttl'), json_extract(facts, '$.cache_write_basis')) AS valuation,
+               json_extract(cache, '$.successful_wires') AS successful_wires
         FROM normalized
     """,
 }

@@ -13,4 +13,20 @@ Owner: `system-prompt-cache-tiers.md`, Metrics. Base: merged PR #3117. Only Vibe
 
 ## Acceptance
 
+## Successful request uploads
+
+`cache_requests.successful_wires` is a JSON array with one entry per **completed Vibey adapter HTTP POST**. `body_bytes` is the length of the serialized request body at the adapter's send boundary. It excludes headers and is not a token count, an estimate of an unchanged prefix, or a measurement of what a gateway or engine subsequently sends upstream. No exact cheap unchanged-prefix byte count is available, so none is recorded.
+
+Each receipt has `source_id` and `source_kind` (`official_api_key`, `relay_key`, `subscription`, or `unknown`). Use these fields, not the request's initially selected route. Hub attribution comes from the serving hop at launch, not today's Source configuration. Unverified or unavailable identity is null; missing classification is `unknown`. Receipts contain no body, URL or credential. A completed pause and its completed follow-up are separate entries. Refused requests, partials and attempts stopped before send contribute no receipt. Historical NULL means unmeasured; `[]` means there was no observed completed POST. As with other request diagnostics, this is not a crash-proof billing ledger.
+
+For upload totals, expand **only** `successful_wires`: `thread_attempts` describes some of the same POSTs plus failed attempts, and `cache_state` is a recovery snapshot, not additional traffic.
+
+```sql
+SELECT json_extract(w.value, '$.source_kind') AS kind,
+       json_extract(w.value, '$.source_id') AS source,
+       count(*) AS completed_posts, sum(json_extract(w.value, '$.body_bytes')) AS uploaded_bytes
+FROM cache_requests AS r, json_each(r.successful_wires) AS w
+GROUP BY kind, source;
+```
+
 Tests at the accounting boundary cover warm/cold request starts (including a long response), route switches, retries, restart/fork, checkpoint and result-clearing causes, and TTL decompositions without double counting. Store contract tests cover optional cache round trips and indexed session-scoped audit recovery. Adapter tests cover prompt events/no-op previews. Isolated database/CLI tests cover every classification, timestamp-derived legacy rows, unknown rates, what-if arithmetic and freshness summaries. Existing C-9, wire conversion, snapshot, fork and shared-prompt tests guard intentional non-changes.
