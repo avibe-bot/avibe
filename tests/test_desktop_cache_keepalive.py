@@ -326,3 +326,105 @@ def test_pr_shell_cache_is_restore_only_and_cannot_create_pr_entries():
     assert "restore-keys" not in cache["with"]
     text = (ROOT / ".github/workflows/desktop-shell.yml").read_text(encoding="utf-8")
     assert "actions/cache@" not in text
+    save = next(item for item in shell['jobs']['shell']['steps'] if 'cache/save@' in item.get('uses', ''))
+    assert save['with']['path'] == cache['with']['path']
+    assert cache['with']['key'] == '${{ steps.trusted.outputs.key }}'
+    assert cache['if'] == "github.event_name == 'pull_request' && steps.trusted.outputs.key != ''"
+    steps = shell['jobs']['shell']['steps']
+    ids = {s['id']: s for s in steps if 'id' in s}
+    assert ids['reuse']['if'] == "github.event_name == 'pull_request' && steps.cargo-read.outputs.cache-hit == 'true'"
+    assert ids['cargo-size']['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.trusted.outputs.fresh != 'true'"
+    assert save['with']['key'] == '${{ steps.cargo-key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}'
+    assert save['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.fits == 'true'"
+
+
+def test_closed_pr_cleanup_rechecks_identity_and_state_before_deleting(monkeypatch):
+    script = workflow('desktop-cache-maintenance.yml')['jobs']['prune-closed-pr-caches']['steps'][0]['run']
+    # Only 2 remains closed with the same cache identity through both reads.
+    def entry(i, ref):
+        return {'id': i, 'ref': ref, 'key': 'node', 'version': 'v1'}
+
+    rows = [entry(i, f'refs/pull/{i}/merge') for i in range(1, 5)]
+    rows += [entry(5, 'refs/heads/master'), entry(6, 'refs/tags/v1'), entry(7, 'refs/pull/7/head')]
+    rows += [entry(8, 'refs/pull/8/merge')]
+    replies = {1: ['open'], 2: ['closed', 'closed'], 3: ['closed', 'open'], 4: ['closed'], 8: ['closed', 'closed']}
+    deleted = []
+
+    def read(cmd):
+        if '--jq' in cmd:
+            n = int(cmd[2].split('/')[-1])
+            return json.dumps({'number': n, 'state': replies[n].pop(0)})
+        if 'ref=' not in cmd[-1]:
+            return json.dumps([{'actions_caches': rows}])
+        from urllib.parse import parse_qs, urlsplit
+        ref = parse_qs(urlsplit(cmd[-1]).query)['ref'][0]
+        matches = [dict(row) for row in rows if row['ref'] == ref]
+        if matches[0]['id'] == 4:
+            matches[0]['version'] = 'changed'
+        return json.dumps([{'actions_caches': matches}])
+
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'fixture/repo')
+    monkeypatch.setattr(subprocess, 'check_output', read)
+    def delete(cmd, capture_output):
+        deleted.append(cmd)
+        if cmd[-1].endswith('/2'):
+            return subprocess.CompletedProcess(cmd, 1, b'HTTP/2.0 404 Not Found\r\n')
+        return subprocess.CompletedProcess(cmd, 0, b'HTTP/2.0 204 No Content\r\n')
+
+    monkeypatch.setattr(subprocess, 'run', delete)
+    exec(script, {})
+    assert deleted == [['gh', 'api', '--include', '--method', 'DELETE', f'repos/fixture/repo/actions/caches/{i}'] for i in (2, 8)]
+
+
+@pytest.mark.parametrize('age_hours,fresh', [(1, 'true'), (25, 'false')])
+def test_cache_lookup_selects_only_master_and_matching_generation(tmp_path, monkeypatch, age_hours, fresh):
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import parse_qs, urlsplit
+
+    step = next(s for s in workflow('desktop-shell.yml')['jobs']['shell']['steps'] if s.get('id') == 'trusted')
+    created = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat()
+    output = tmp_path / 'outputs'
+    monkeypatch.setenv('PREFIX', 'test-profile')
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'example/repo')
+    monkeypatch.setenv('GITHUB_OUTPUT', str(output))
+
+    def read_cache(cmd):
+        assert cmd[:2] == ['gh', 'api']
+        query = parse_qs(urlsplit(cmd[2]).query)
+        assert query['ref'] == ['refs/heads/master'] and query['key'] == ['test-profile-']
+        return json.dumps({'actions_caches': [
+            {'ref': ref, 'key': key, 'created_at': created} for ref, key in [
+                ('refs/pull/1/merge', 'test-profile-99-1'), ('refs/heads/master', 'test-profile-other-1'),
+                ('refs/heads/master', 'test-profile-42-1'),
+            ]
+        ]})
+
+    monkeypatch.setattr(subprocess, 'check_output', read_cache)
+    exec(step['run'], {})
+    assert output.read_text().splitlines() == ['key=test-profile-42-1', f'fresh={fresh}']
+
+
+@pytest.mark.parametrize('mode', ['warm', 'missing debug directory', 'truncated'])
+def test_debug_cache_install_is_staged_or_leaves_a_cold_build(tmp_path, monkeypatch, mode):
+    import tarfile
+
+    steps = workflow('desktop-shell.yml')['jobs']['shell']['steps']
+    step = next(s for s in steps if s.get('id') == 'reuse')
+    assert step['continue-on-error'] is True
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('RUNNER_TEMP', str(tmp_path))
+    monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(tmp_path / 'summary'))
+    data = tmp_path / 'dep'
+    data.write_bytes(b'fixture')
+    archive = tmp_path / 'desktop-debug-deps.tar.gz'
+    with tarfile.open(archive, 'w:gz') as tar:
+        tar.add(data, arcname='other' if mode == 'missing debug directory' else 'debug/deps/libfixture.rlib')
+    if mode == 'truncated':
+        archive.write_bytes(archive.read_bytes()[:20])
+    if mode == 'warm':
+        exec(step['run'], {})
+        assert (tmp_path / 'target/debug/deps/libfixture.rlib').read_bytes() == b'fixture'
+    else:
+        with pytest.raises((FileNotFoundError, tarfile.TarError, EOFError)):
+            exec(step['run'], {})
+        assert not (tmp_path / 'target/debug').exists()
