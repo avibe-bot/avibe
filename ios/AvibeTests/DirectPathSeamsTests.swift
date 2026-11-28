@@ -41,18 +41,18 @@ final class DirectPathSeamsTests: XCTestCase {
     /// count); one is not enough; a link in between keeps the choice.
     func testTwoUnlinkedRendezvousInOneBootstrapRevert() {
         var rules = bootstrapped(unlinked: 5)
-        XCTAssertEqual(rules.observe(seen(0, unlinked: 5)), .keep(nextCheck: nil, reloadsForLink: false))
-        XCTAssertEqual(rules.observe(seen(1, unlinked: 6)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(rules.observe(seen(0, unlinked: 5)), .keep(nextCheck: nil))
+        XCTAssertEqual(rules.observe(seen(1, unlinked: 6)), .keep(nextCheck: nil))
         XCTAssertEqual(rules.observe(seen(2, unlinked: 7)), .revert)
 
         var linked = bootstrapped(unlinked: 0)
-        XCTAssertEqual(linked.observe(seen(1, linked: true, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: true))
+        XCTAssertEqual(linked.observe(seen(1, linked: true, unlinked: 2)), .keep(nextCheck: nil))
 
         // A new bootstrap starts the count again.
         var again = bootstrapped(unlinked: 0)
         _ = again.observe(seen(0, unlinked: 1))
         again.beginBootstrap(unlinkedRendezvous: 1, linked: false)
-        XCTAssertEqual(again.observe(seen(1, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(again.observe(seen(1, unlinked: 2)), .keep(nextCheck: nil))
     }
 
     /// a2: a fresh page and no link within 20 s of it; the check is asked
@@ -61,39 +61,39 @@ final class DirectPathSeamsTests: XCTestCase {
     func testAFreshPageWithoutALinkFor20SecondsReverts() {
         var rules = bootstrapped()
         rules.noteFreshPage(at: at(3))
-        XCTAssertEqual(rules.observe(seen(3)), .keep(nextCheck: at(23), reloadsForLink: false))
+        XCTAssertEqual(rules.observe(seen(3)), .keep(nextCheck: at(23)))
         // A second page does not move the start.
         rules.noteFreshPage(at: at(10))
-        XCTAssertEqual(rules.observe(seen(22.9)), .keep(nextCheck: at(23), reloadsForLink: false))
+        XCTAssertEqual(rules.observe(seen(22.9)), .keep(nextCheck: at(23)))
         XCTAssertEqual(rules.observe(seen(23)), .revert)
 
         var linked = bootstrapped()
         linked.noteFreshPage(at: at(0))
-        XCTAssertEqual(linked.observe(seen(19, linked: true)), .keep(nextCheck: nil, reloadsForLink: true))
-        XCTAssertEqual(linked.observe(seen(40, linked: true)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(linked.observe(seen(19, linked: true)), .keep(nextCheck: nil))
+        XCTAssertEqual(linked.observe(seen(40, linked: true)), .keep(nextCheck: nil))
 
         // The link came up: the bootstrap succeeded. Its loss later is not
         // a2 (the controller counts it as a drop, a new bootstrap), nor a1.
         var established = bootstrapped()
         established.noteFreshPage(at: at(0))
-        XCTAssertEqual(established.observe(seen(1, linked: true)), .keep(nextCheck: nil, reloadsForLink: true))
-        XCTAssertEqual(established.observe(seen(30)), .keep(nextCheck: nil, reloadsForLink: false))
-        XCTAssertEqual(established.observe(seen(31, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(established.observe(seen(1, linked: true)), .keep(nextCheck: nil))
+        XCTAssertEqual(established.observe(seen(30)), .keep(nextCheck: nil))
+        XCTAssertEqual(established.observe(seen(31, unlinked: 2)), .keep(nextCheck: nil))
 
         // The view left for a sign-in page: a2's time does not run while it
         // is away, and starts again at the next fresh page.
         var away = bootstrapped()
         away.noteFreshPage(at: at(0))
         away.noteLeftInstancePage()
-        XCTAssertEqual(away.observe(seen(45)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(away.observe(seen(45)), .keep(nextCheck: nil))
         away.noteFreshPage(at: at(50))
-        XCTAssertEqual(away.observe(seen(60)), .keep(nextCheck: at(70), reloadsForLink: false))
+        XCTAssertEqual(away.observe(seen(60)), .keep(nextCheck: at(70)))
         XCTAssertEqual(away.observe(seen(70)), .revert)
 
         var forgotten = bootstrapped()
         forgotten.noteFreshPage(at: at(0))
         forgotten.beginBootstrap(unlinkedRendezvous: 0, linked: false)
-        XCTAssertEqual(forgotten.observe(seen(30)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(forgotten.observe(seen(30)), .keep(nextCheck: nil))
     }
 
     /// Rule c's clock counts only what the rule counts: not the first
@@ -129,7 +129,7 @@ final class DirectPathSeamsTests: XCTestCase {
         XCTAssertEqual(since, at(4))
         XCTAssertEqual(
             rules.observe(seen(30, listenerDownSince: 4)),
-            .keep(nextCheck: at(64), reloadsForLink: false)
+            .keep(nextCheck: at(64))
         )
         XCTAssertEqual(clock.observe(recovery: (since: at(0), failureAt: at(50), waiting: false)), at(4))
         XCTAssertEqual(rules.observe(seen(64, listenerDownSince: 4)), .revert)
@@ -141,12 +141,12 @@ final class DirectPathSeamsTests: XCTestCase {
     /// not arm it.
     func testThreeDropsInTenMinutesRevertAtTheNextEvidence() {
         var rules = bootstrapped()
-        XCTAssertEqual(rules.observe(seen(0, linked: true)), .keep(nextCheck: nil, reloadsForLink: true))
+        XCTAssertEqual(rules.observe(seen(0, linked: true)), .keep(nextCheck: nil))
         _ = rules.observe(seen(60, drops: 1))
         _ = rules.observe(seen(120, drops: 2))
         // The third drop: armed, but nothing has answered since.
-        XCTAssertEqual(rules.observe(seen(180, drops: 3)), .keep(nextCheck: nil, reloadsForLink: false))
-        XCTAssertEqual(rules.observe(seen(900, drops: 3)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(rules.observe(seen(180, drops: 3)), .keep(nextCheck: nil))
+        XCTAssertEqual(rules.observe(seen(900, drops: 3)), .keep(nextCheck: nil))
         // The instance answers a rendezvous.
         // Rule b sets the choice back with nothing recorded for the page.
         XCTAssertEqual(rules.observe(seen(901, drops: 3, unlinked: 1)), .revertWithoutNotice)
@@ -167,7 +167,7 @@ final class DirectPathSeamsTests: XCTestCase {
         _ = spread.observe(seen(0, drops: 1))
         _ = spread.observe(seen(400, drops: 2))
         _ = spread.observe(seen(700, drops: 3))
-        XCTAssertEqual(spread.observe(seen(701, linked: true, drops: 3)), .keep(nextCheck: nil, reloadsForLink: true))
+        XCTAssertEqual(spread.observe(seen(701, linked: true, drops: 3)), .keep(nextCheck: nil))
     }
 
     /// A drop is a new bootstrap: the unlinked count starts again from it,
@@ -178,8 +178,8 @@ final class DirectPathSeamsTests: XCTestCase {
         _ = rules.observe(seen(1, unlinked: 1))
         // The drop, with one more unlinked answer since the open: a1 would
         // fire without the new bootstrap.
-        XCTAssertEqual(rules.observe(seen(2, drops: 1, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: false))
-        XCTAssertEqual(rules.observe(seen(3, linked: true, drops: 1, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: true))
+        XCTAssertEqual(rules.observe(seen(2, drops: 1, unlinked: 2)), .keep(nextCheck: nil))
+        XCTAssertEqual(rules.observe(seen(3, linked: true, drops: 1, unlinked: 2)), .keep(nextCheck: nil))
     }
 
     /// c: 60 s from the first failed attempt that counts (the caller leaves
@@ -189,11 +189,11 @@ final class DirectPathSeamsTests: XCTestCase {
         var rules = bootstrapped()
         XCTAssertEqual(
             rules.observe(seen(10, listenerDownSince: 5)),
-            .keep(nextCheck: at(65), reloadsForLink: false)
+            .keep(nextCheck: at(65))
         )
         XCTAssertEqual(
             rules.observe(seen(64.9, listenerDownSince: 5)),
-            .keep(nextCheck: at(65), reloadsForLink: false)
+            .keep(nextCheck: at(65))
         )
         XCTAssertEqual(rules.observe(seen(65, listenerDownSince: 5)), .revert)
 
@@ -203,7 +203,7 @@ final class DirectPathSeamsTests: XCTestCase {
         _ = reset.observe(seen(55))
         XCTAssertEqual(
             reset.observe(seen(70, listenerDownSince: 60)),
-            .keep(nextCheck: at(120), reloadsForLink: false)
+            .keep(nextCheck: at(120))
         )
     }
 
@@ -212,7 +212,7 @@ final class DirectPathSeamsTests: XCTestCase {
     func testNothingRevertsWithoutEvidence() {
         var rules = bootstrapped()
         for second in stride(from: 0.0, through: 3_600, by: 30) {
-            XCTAssertEqual(rules.observe(seen(second)), .keep(nextCheck: nil, reloadsForLink: false))
+            XCTAssertEqual(rules.observe(seen(second)), .keep(nextCheck: nil))
         }
     }
 

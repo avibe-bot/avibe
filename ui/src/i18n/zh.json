@@ -8396,7 +8396,7 @@
       "validUntil": "有效期至 {{date}}",
       "noCertificate": "没有有效的证书",
       "directOnly": "仅直连和中继",
-      "directOnlyHint": "建立连接时经过一次 Cloudflare 隧道，之后只走直连和中继。",
+      "directOnlyHint": "每次打开先经 Cloudflare 隧道找到这台电脑，之后只走直连和中继；隧道不通时打不开。",
       "choiceHintDesktop": "这个选择只管这台设备。选「仅直连和中继」后连不上，Avibe Desktop 会自己改回「自动」。",
       "choiceHintDesktopPlain": "这个选择只管这台设备。",
       "choiceRevertedDirectUndated": "「仅直连和中继」连不上，App 已自己改回「自动」。",

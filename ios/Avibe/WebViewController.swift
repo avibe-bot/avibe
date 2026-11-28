@@ -1155,12 +1155,20 @@ final class WebViewController: UIViewController {
         return url
     }
 
-    /// Loads the instance's page again where it is, through
-    /// the load gate as every load the shell starts: 「仅直连和中继」's link
-    /// has come up, and the page's connections move to it.
+    /// Whether the view is loading the instance's document now: a
+    /// main-frame navigation of the primary view has started and not
+    /// finished or failed, and the view is on the instance's origin.
+    var isLoadingInstanceDocument: Bool {
+        !isInvalidatedForAccountTransition && primaryNavigationInProgress && instancePageURL != nil
+    }
+
+    /// Loads the instance's page again where it is, through the load gate
+    /// as every load the shell starts: a change of connection choice closed
+    /// its connections while its document was still loading
+    /// (`AppModel.reloadPageCutWhileLoading`).
     /// Only while the view shows the instance's own document: a sign-in page
     /// (or anything else the primary view may show) is never replaced; the
-    /// return to the instance is a fresh load that takes the link anyway.
+    /// return to the instance is a fresh load anyway.
     func reloadInstancePage() {
         guard
             !isInvalidatedForAccountTransition,

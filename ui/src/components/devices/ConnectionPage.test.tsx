@@ -978,7 +978,7 @@ describe('ConnectionPageView', () => {
     const choice = screen.getByRole('radiogroup', { name: '这台设备' });
     const radios = within(choice).getAllByRole('radio');
     expect(radios.map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ', '仅直']);
-    expect(radios[2].textContent).toContain('建立连接时经过一次 Cloudflare 隧道，之后只走直连和中继。');
+    expect(radios[2].textContent).toContain('每次打开先经 Cloudflare 隧道找到这台电脑，之后只走直连和中继；隧道不通时打不开。');
     unmount();
 
     // Chosen, then direct turned off on the instance: the choice made is still the one shown.

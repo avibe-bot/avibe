@@ -801,8 +801,36 @@ conforms to. Without a conforming controller the App offers neither:
   (`directOnlyNeedsRelaunch`, answered as `pendingRelaunch`). Opens under
   `direct` use the direct path as automatic does. Each load of the
   instance the view starts calls `noteInstanceLoad` first.
-- **The link.** Its first arrival in a bootstrap reloads the view once, so
-  the page's connections move to it.
+- **The link.** A loaded page is not reloaded when it arrives. The
+  controller's cut-over waits, up to five seconds, until the host's tunnel
+  connections have carried nothing for a second, closes what is left, and
+  tells the page as a closure. The page opens its stream again and catches
+  up, on the link. Until 2026-11-28 the view was reloaded instead, at every
+  open and every return to the foreground. One reload remains: when the
+  cut-over closes a connection while the page's document is still loading
+  (a navigation of the view started and not finished, the first or a
+  later one, or its cached page still covered), the cut script, stylesheet
+  or first read would not be made again, so the view loads the page again,
+  on the link, and no closure is reported. Whether it was loading is asked
+  before the close.
+- **The control plane's host.** WebKit sends a route's proxy the parent
+  domain of a routed host too (`avibe.bot` for an instance under it;
+  measured 2026-11-28, and `excludedDomains` cannot keep it off without
+  taking the instance's host off the route). The listener refused it, which
+  only fail-over hid: under 「仅直连和中继」 the page's requests to avibe.bot
+  (voice) failed. Now the listener carries one host that has no route of
+  its own: the control plane's host, only while it is exactly the parent
+  domain of a routed host. It goes to that host itself, on port 443,
+  through the public opener and its address policy, under every choice,
+  never over the direct path, in no count of the instance's connections,
+  and fenced by the selection and account like any other plan. Once the
+  last host under it has left its route (the fallback above), it is refused
+  again. The parent of an instance on any other domain is refused as before.
+- **What does not work under it.** A request the App makes for the instance
+  after it left the foreground: the listener is closed there and the route
+  has no fail-over. Today that is the Lock Screen card's registration when
+  it is sent after leaving. A voice take is the exception, at a price
+  (below).
 - **Going back to automatic** (`DirectOnlyRevertRules`; `reverted.from` is
   `direct`) happens only on evidence that this phone reached the instance,
   counted per bootstrap (an open, a return to the foreground, a drop):
@@ -816,7 +844,20 @@ conforms to. Without a conforming controller the App offers neither:
   (`reverted` stays null: the page shows automatic and no line); a1, a2
   and c record when and from what. Not while the choice waits for the
   next launch. The App then sets the host back with `setDirectOnly(false)`
-  and opens the instance again.
+  and opens the instance again. Since 2026-11-28 also whenever a strict open
+  fails or runs out of time before its first load (B in "Never locked out").
+- **Never locked out** (Product, 2026-11-28). An open that fails or runs out
+  of time before its first load:
+  - under 「仅直连和中继」 goes back to automatic, with the dated line, and
+    opens again (B);
+  - for an automatic host whose every connection the listener gave up, with
+    none carried, takes the host off the store's route for the rest of the
+    process and opens again by WebKit's own path, as Safari does (C). The
+    next launch tries the listener again.
+  - 重试 on the failure screen tries one more way each press: the first goes
+    back to automatic for a strict instance, or through the listener again;
+    the second and later take the host off the route (C) and open by
+    WebKit's own path.
 - **A drop** (the controller counts one when a lost link has not come back
   in 10 s) is news, not a fallback: the App opens the instance again once
   through the route (stop, prepare, open), which is the one pass through

@@ -1156,6 +1156,26 @@ export function nativeDirectAvailable(): boolean {
 }
 
 /**
+ * This page is hidden, in a shell with a direct path: it must not send a
+ * request of its own in answer to its event stream ending.
+ *
+ * The phone App closes its listener's port when it goes to the background,
+ * and that is what ends the stream. A request sent then goes by a connection
+ * of WebKit's own to the public address, and WebKit keeps every later request
+ * of the page on it, where no hand-over can reach it (measured,
+ * docs/plans/remote-direct-ios.md section 8). Whatever such a request would
+ * have fetched is fetched on the return, under the hold: the stream opens
+ * again there and its consumers catch up.
+ *
+ * Everything that reacts to the stream ending asks this, so the rule is one.
+ * The desktop app's listener keeps its port; it follows the same rule, and a
+ * hidden window catches up when it is shown.
+ */
+export function nativeDirectPageHidden(): boolean {
+  return directVersion() >= 1 && document.visibilityState !== 'visible';
+}
+
+/**
  * This document's baseline state. The first call with the `direct`
  * capability starts the baseline read; without it the answer is `absent` and
  * nothing is started.

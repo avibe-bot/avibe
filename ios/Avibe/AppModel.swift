@@ -382,6 +382,9 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var heldRuntimeRetry: (kind: HeldRuntimeRetry, attemptID: Int)?
+    /// How many times 重试 has been pressed on the failure screen for this
+    /// runtime since it last loaded (`retryRuntimeOpen`).
+    private var failureRetries: (runtime: MobileRuntimeContext, presses: Int)?
     /// A runtime whose open is held because its host has a route and the
     /// listener does not serve yet. One slot, not a queue: a newer open, a
     /// stop, or a sign-out clears it, and it is settled only for the
@@ -594,11 +597,18 @@ final class AppModel: ObservableObject {
                 isCurrentRuntime: { [weak self] runtime in
                     self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
                 },
+                controlPlaneHost: controlPlane.baseURL.host,
                 onStatusChanged: { [weak self] in
                     self?.deliverDirectStatus()
                 },
                 onAvailabilityChanged: { [weak self] in
                     self?.directAvailabilityDidChange()
+                },
+                isLoadingDocument: { [weak self] runtime in
+                    self?.isLoadingDocument(of: runtime) ?? false
+                },
+                onLoadingPageCut: { [weak self] runtime in
+                    self?.reloadPageCutWhileLoading(runtime)
                 }
             )
         }
@@ -1613,6 +1623,10 @@ final class AppModel: ObservableObject {
                 ColdStartTimings.shared.firstVisible(cached ? .cached : .live, attemptID: new.id)
             }
         }
+        if new.phase == .documentLoaded, failureRetries?.runtime == new.runtime {
+            // Loaded: the next failure starts 重试's ladder again.
+            failureRetries = nil
+        }
         if new.phase == .documentLoaded || new.phase == .failed,
            let state = runtimeOpenSignpost {
             signposter.endInterval("runtime open", state, "\(String(describing: new.phase), privacy: .public)")
@@ -1957,7 +1971,10 @@ final class AppModel: ObservableObject {
         guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
         }
-        if revertTunnelOnlyIfUnreachable(attemptID: attemptID) || revertDirectOnlyIfListenerDown(attemptID: attemptID) {
+        if revertTunnelOnlyIfUnreachable(attemptID: attemptID)
+            || revertDirectOnlyIfListenerDown(attemptID: attemptID)
+            || fallBackFromListener(attemptID: attemptID)
+        {
             // Opened again, automatic: this attempt is replaced.
             openRuntime(attempt.runtime)
             return true
@@ -2126,6 +2143,34 @@ final class AppModel: ObservableObject {
         // anything is asked: hearing a recorded failure can announce a gate
         // change in this same turn, which must not make the kept one too.
         heldRuntimeRetry = nil
+        // 重试 tries every way in (Product, 11-28), one more each press:
+        // the first goes back to automatic for 「仅直连和中继」, or through
+        // the listener again; the second and later go by WebKit's own path
+        // for this host, without the listener, as Safari does. A press that
+        // changed the way opens at once: the open waits in its own slot for
+        // a gate held by the change (the host's route being rewritten).
+        let presses = (failureRetries?.runtime == attempt.runtime ? failureRetries?.presses ?? 0 : 0) + 1
+        failureRetries = (attempt.runtime, presses)
+        var changed = false
+        if directPathPreference(for: attempt.runtime).mode == .direct {
+            changed = revertDirectOnlyToOpenAgain(attempt.runtime)
+        }
+        if presses >= 2,
+           directPathController?.bypassListener(forInstanceURL: attempt.runtime.instance.url, force: true) == true
+        {
+            changed = true
+        }
+        if changed {
+            return openRuntime(attempt.runtime)
+        }
+        return retryRuntimeOpenAsBefore(attempt)
+    }
+
+    /// A Retry with the way in unchanged: through the gate, and kept while
+    /// something else may hold the listener's port. A kept one is made
+    /// again here, without counting as another press.
+    @discardableResult
+    private func retryRuntimeOpenAsBefore(_ attempt: RuntimeOpenAttempt) -> Bool {
         guard authorizeReload(of: attempt.runtime) else {
             holdRetryWhilePortMayBeForeign(.open, of: attempt)
             return false
@@ -2496,7 +2541,10 @@ final class AppModel: ObservableObject {
                     phase: .failed,
                     attemptID: attemptID
                 )
-                if revertible, revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+                if revertible,
+                   revertTunnelOnlyIfUnreachable(attemptID: attemptID)
+                    || fallBackFromListener(attemptID: attemptID)
+                {
                     // Opened again, automatic, once this callback has
                     // returned; the failed attempt waits for nothing else.
                     let runtime = attempt.runtime
@@ -2654,6 +2702,97 @@ final class AppModel: ObservableObject {
             return false
         }
         storeReversion(of: attempt.runtime, origin: origin, from: .tunnel)
+        return true
+    }
+
+    /// Never locked out by a connection choice (Product, 2026-11-28): this
+    /// open failed, or ran out of time, before its first load.
+    /// - 「仅直连和中继」 goes back to automatic, with the dated line (B): a
+    ///   strict open that cannot reach its instance never strands the user.
+    /// - An automatic host the listener carried nothing for, every
+    ///   connection of it given up, leaves the listener for the rest of the
+    ///   process and loads by WebKit's own path (C), as Safari's pages do:
+    ///   whatever stopped both of the listener's legs (a VPN whose addresses
+    ///   it refuses, a network that drops its connections) is behind
+    ///   WebKit's path for this host from now on.
+    /// The caller opens again. Each can happen once per host per launch: a
+    /// reverted host is automatic, and a bypassed one has no route.
+    private func fallBackFromListener(attemptID: Int) -> Bool {
+        guard
+            let directPathController,
+            runtimeIdentity == attemptID,
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            ![.authenticating, .awaitingUser, .showingCachedLive].contains(attempt.phase),
+            // As the reopen requires.
+            sessionCoordinator.keepsSelectedRuntime(attempt.runtime),
+            // With no network at all, nothing would open by any path.
+            networkPath.isSatisfied
+        else {
+            return false
+        }
+        let runtime = attempt.runtime
+        if directPathPreference(for: runtime).mode == .direct {
+            return revertDirectOnlyToOpenAgain(runtime)
+        }
+        guard directPathController.listenerCannotCarry(forInstanceURL: runtime.instance.url) else {
+            return false
+        }
+        return directPathController.bypassListener(forInstanceURL: runtime.instance.url)
+    }
+
+    /// Whether `runtime`'s document is being loaded: the view's own
+    /// main-frame navigation of the instance's page has started and not
+    /// finished (the first load, or any later one: a restart, a reload
+    /// after the web content process ended), or the open under way has its
+    /// cached page still covered, waiting for the instance
+    /// (`.showingCached`: that navigation has finished, the page has not
+    /// yet read what it needs). A script, stylesheet or first read cut
+    /// there is not made again by WebKit or the page.
+    private func isLoadingDocument(of runtime: MobileRuntimeContext) -> Bool {
+        guard showsOrOpens(runtime) else {
+            return false
+        }
+        if runtimeController?.isLoadingInstanceDocument == true {
+            return true
+        }
+        guard let attempt = runtimeOpenAttempt, attempt.runtime == runtime else {
+            return false
+        }
+        return attempt.phase == .showingCached
+    }
+
+    /// A change of connection choice closed connections of `runtime`'s page
+    /// while its document was still loading (`DirectPathController.cutover`:
+    /// the link of 「仅直连和中继」 arriving on a slow network): the page is
+    /// loaded again, where it is, on the policy now in force.
+    private func reloadPageCutWhileLoading(_ runtime: MobileRuntimeContext) {
+        guard showsOrOpens(runtime) else {
+            return
+        }
+        runtimeController?.reloadInstancePage()
+    }
+
+    /// `runtime` is the one shown or being opened, and still selected: the
+    /// view (`runtimeController`) is its view.
+    private func showsOrOpens(_ runtime: MobileRuntimeContext) -> Bool {
+        (route.runtime == runtime || runtimeOpenAttempt?.runtime == runtime)
+            && sessionCoordinator.isSelectedRuntime(runtime)
+    }
+
+    /// 「仅直连和中继」 back to automatic for an open that is about to be
+    /// made again (B): recorded with its dated line, the page told, and the
+    /// controller's host automatic before that open prepares its route.
+    @discardableResult
+    private func revertDirectOnlyToOpenAgain(_ runtime: MobileRuntimeContext) -> Bool {
+        guard let origin = preferenceOrigin(runtime) else {
+            return false
+        }
+        if directOnlyWatch?.runtime == runtime {
+            endDirectOnlyWatch()
+        }
+        storeReversion(of: runtime, origin: origin, from: .direct)
+        directOnlyControl?.setDirectOnly(false, forInstanceURL: runtime.instance.url)
         return true
     }
 
@@ -2867,7 +3006,7 @@ final class AppModel: ObservableObject {
             revertDirectOnly(runtime, notes: true)
         case .revertWithoutNotice:
             revertDirectOnly(runtime, notes: false)
-        case .keep(let nextCheck, let reloadsForLink):
+        case .keep(let nextCheck):
             if dropped {
                 // The link dropped: the controller only says so (it is not a
                 // fallback). Re-establishing it takes one full reopen (stop,
@@ -2882,9 +3021,6 @@ final class AppModel: ObservableObject {
                 }
                 reopenRuntime(runtime, at: runtimeController?.instancePageURL)
                 return
-            }
-            if reloadsForLink {
-                runtimeController?.reloadInstancePage()
             }
             guard let nextCheck else {
                 return
@@ -3336,7 +3472,10 @@ final class AppModel: ObservableObject {
         heldRuntimeRetry = nil
         switch held.kind {
         case .open:
-            _ = retryRuntimeOpen(attemptID: held.attemptID)
+            // The press it was kept for has been counted (`failureRetries`).
+            if attempt.phase == .failed {
+                retryRuntimeOpenAsBefore(attempt)
+            }
         case .cachedPage:
             retryRuntimeCachedPage()
         case .offlineCachedPage:

@@ -5842,6 +5842,65 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(store.preference(accountID: "account-1", origin: two.serialized).mode, .tunnel)
     }
 
+    /// Never locked out by a connection choice (Product, 2026-11-28).
+    /// 「仅直连和中继」 whose open fails goes back to automatic, says so, and
+    /// opens again. 重试 on the failure screen tries one more way each
+    /// press: the first through the listener again, the second and later by
+    /// WebKit's own path for the host (its route is taken off), as Safari's
+    /// pages go.
+    @MainActor
+    func testAFailedOpenNeverLocksTheUserOutAndRetryTriesEveryWayIn() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport, networkPath: StandInNetworkPath())
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        let firstStore = app.runtimeWebsiteDataStore
+
+        // B: a strict open that fails goes back to automatic and opens again.
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+        let strict = try await select("instance-1", in: app)
+        let failedStrict = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: failedStrict.id,
+            runtime: strict
+        )
+        let reverted = store.preference(accountID: "account-1", origin: instance.serialized)
+        XCTAssertEqual(reverted.mode, .automatic)
+        XCTAssertEqual(reverted.reverted?.reason, .unreachable)
+        XCTAssertEqual(reverted.reverted?.from, .direct)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > failedStrict.id }
+        let runtime = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(firstStore.proxyConfigurations.flatMap(\.matchDomains), ["instance-one.example"])
+
+        // An automatic open that fails while the listener carried nothing
+        // that failed (nothing reached it at all): the failure screen.
+        let failed = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: failed.id,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, failed.id)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+
+        // 重试, first press: the listener again, the route kept.
+        XCTAssertTrue(app.retryRuntimeOpen(attemptID: failed.id))
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(firstStore.proxyConfigurations.flatMap(\.matchDomains), ["instance-one.example"])
+        let again = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: again.id,
+            runtime: runtime
+        )
+
+        // Second press: WebKit's own path for the host; no route left.
+        XCTAssertTrue(app.retryRuntimeOpen(attemptID: again.id))
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertTrue(firstStore.proxyConfigurations.flatMap(\.matchDomains).isEmpty)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized), reverted)
+    }
+
     /// 「仅直连和中继」 with the path controller that enforces it: the page may
     /// choose it, the answer says it takes effect now (`pendingRelaunch`
     /// false), the choice is kept, and the instance opens again where the

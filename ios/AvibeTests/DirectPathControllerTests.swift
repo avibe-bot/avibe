@@ -382,6 +382,348 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNotNil(try XCTUnwrap(controller.plan(for: authority)).openPublic)
     }
 
+    /// The link arrives a second or two after the page opened, while it may
+    /// still be loading through the tunnel. The cut-over waits until that
+    /// tunnel carries nothing, closes it, and tells the page as a closure:
+    /// the page opens its connections again on the link. Nothing is reloaded.
+    @MainActor
+    func testTheStrictCutoverWaitsForABusyTunnelThenClosesItAndTellsThePage() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let page = LoopbackClient(port: port)
+        defer { page.close() }
+        let tunnel = try await establishPublic(page, harness: harness)
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        // Still loading: bytes cross the tunnel for most of a second.
+        for _ in 0..<4 {
+            try await page.send("x")
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        try await page.send("x")
+        let lastByte = ContinuousClock.now
+        XCTAssertFalse(tunnel.isCancelled, "a tunnel that carries the page's load is not cut")
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+
+        try await eventually { tunnel.isCancelled }
+        // Closed once it had carried nothing for a second, not at the bound.
+        let waited = lastByte.duration(to: .now)
+        XCTAssertGreaterThanOrEqual(waited, .milliseconds(900))
+        XCTAssertLessThan(waited, .seconds(8))
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.status("instance-1").closure, 1, "the page hears of the close and opens its connections again")
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+    }
+
+    /// A page whose document is still loading when the cut-over closes its
+    /// tunnel cannot make the cut load again: the shell is told to load the
+    /// page again, once, and no closure is reported to a document that is
+    /// being replaced. What the shell says is asked before the close: a cut
+    /// load ends the navigation, so asked afterwards the page looks loaded.
+    @MainActor
+    func testACutoverThatCutsALoadingPageAsksTheShellToLoadItAgain() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 0.5), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let page = LoopbackClient(port: port)
+        defer { page.close() }
+        let tunnel = try await establishPublic(page, harness: harness)
+        // As in the App: the navigation is under way until its load is cut.
+        harness.loadingDocument = { !tunnel.isCancelled }
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let busy = Task {
+            while !Task.isCancelled {
+                try? await page.send("x")
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { busy.cancel() }
+        try await eventually(timeout: .seconds(5)) { tunnel.isCancelled }
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        try await eventually { harness.loadingPageCuts == [runtime] }
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .open, "the load the shell makes is not held")
+    }
+
+    /// Nothing closed, nothing to load again: a page that is loading while
+    /// the link arrives, with no tunnel connection of its own left.
+    @MainActor
+    func testACutoverThatClosesNothingLeavesALoadingPageAlone() async throws {
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 0.5), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.loadingDocument = { true }
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.loadingPageCuts, [])
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+    }
+
+    /// The page's requests to the control plane's host (avibe.bot: voice)
+    /// reach the listener too, because that host is the parent domain of
+    /// the instance's. With the instance strict and linked, they are carried
+    /// to that host through the public opener, never over the direct path.
+    @MainActor
+    func testTheControlPlaneHostIsCarriedByThePublicOpenerWhileItsInstanceIsStrictAndLinked() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        let child = "team.service.example"
+        let url = try XCTUnwrap(URL(string: "https://\(child)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-under-service")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        let strict = try XCTUnwrap(controller.plan(for: try XCTUnwrap(DirectAuthority(host: child))))
+        XCTAssertNil(strict.openPublic, "the instance's own traffic has no tunnel candidate")
+        XCTAssertNotNil(strict.openDirect)
+
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        let plan = try XCTUnwrap(controller.plan(for: service))
+        XCTAssertNil(plan.openDirect)
+        XCTAssertNotNil(plan.openPublic)
+        XCTAssertNil(plan.strictWaitSeconds)
+        XCTAssertFalse(plan.sticky)
+        XCTAssertNil(plan.connectionSettled, "not one of the instance's connections: in no count")
+
+        // Through the real listener: it reaches the public opener, and
+        // nothing is opened on the direct path.
+        let publicBefore = harness.publicOrigin.streams.opened.count
+        let directBefore = harness.transport.streams.attempts
+        let client = LoopbackClient(port: port)
+        defer { client.close() }
+        let name = Harness.controlPlaneHost
+        try await client.send("CONNECT \(name):443 HTTP/1.1\r\nHost: \(name):443\r\n\r\n")
+        _ = try await harness.publicOrigin.streams.waitForStream(count: publicBefore + 1)
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(harness.transport.streams.attempts, directBefore, "never over the direct path")
+    }
+
+    /// Being a parent domain is not enough: only the control plane's own
+    /// host is carried. And a plan for it is fenced like any other: one
+    /// made before the selection ended is not granted after it.
+    @MainActor
+    func testOnlyTheControlPlaneHostIsCarriedAndItsPlanIsFencedByTheSelection() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        try await harness.signIn()
+
+        // An instance under somebody else's domain: its parent gets no plan,
+        // and the listener refuses it.
+        try await harness.select("instance-under-other")
+        let port = try harness.listenerPort(since: baseline)
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "other.example"))))
+        let refused = LoopbackClient(port: port)
+        defer { refused.close() }
+        try await refused.send("CONNECT other.example:443 HTTP/1.1\r\nHost: other.example:443\r\n\r\n")
+        let answer = String(decoding: try await refused.receiveUntilClosed(), as: UTF8.self)
+        XCTAssertTrue(answer.hasPrefix("HTTP/1.1 403"), answer)
+        // The control plane's host is not a routed host's parent yet either.
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        XCTAssertNil(controller.plan(for: service))
+
+        try await harness.select("instance-under-service")
+        let plan = try XCTUnwrap(controller.plan(for: service))
+        XCTAssertTrue(plan.isCurrent())
+        // The selection ends: what was planned under it is no longer current.
+        controller.runtimeDidStop()
+        XCTAssertFalse(plan.isCurrent())
+        // A sibling of the instance and an unrelated host never get a plan.
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "else.service.example"))))
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "example.org"))))
+    }
+
+    /// The exception lasts only while some route still lists a host under
+    /// the control plane's: with two such hosts, taking one off its route
+    /// (`bypassListener`) changes nothing; taking the last one off refuses a
+    /// new CONNECT for the parent and makes a plan sampled earlier stale,
+    /// though the selection has not changed.
+    @MainActor
+    func testTheControlPlaneHostIsNotCarriedOnceItsLastRoutedHostLeftTheRoute() async throws {
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        let first = try XCTUnwrap(URL(string: "https://team.\(Harness.controlPlaneHost)"))
+        let second = try XCTUnwrap(URL(string: "https://lab.\(Harness.controlPlaneHost)"))
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        try await harness.signIn()
+        try await harness.select("instance-under-service")
+        try await harness.select("instance-under-service-2")
+        let plan = try XCTUnwrap(controller.plan(for: service))
+        XCTAssertTrue(plan.isCurrent())
+
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: first))
+        XCTAssertTrue(plan.isCurrent())
+        XCTAssertNotNil(controller.plan(for: service))
+
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: second))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+        XCTAssertFalse(plan.isCurrent())
+        XCTAssertNil(controller.plan(for: service))
+    }
+
+    /// The route that counts is the current account store's. After the
+    /// account's store is replaced, the old store's route still lists the
+    /// host, but no page of this account can send its parent here: a new
+    /// CONNECT for it is refused, not only a plan made before.
+    @MainActor
+    func testTheControlPlaneHostIsNotCarriedForAnotherStoresRoute() async throws {
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        try await harness.signIn()
+        try await harness.select("instance-under-service")
+        let plan = try XCTUnwrap(controller.plan(for: service))
+
+        await harness.websiteDataStore.rotate()
+        XCTAssertFalse(plan.isCurrent())
+        XCTAssertNil(controller.plan(for: service))
+    }
+
+    /// A tunnel that never goes quiet does not hold the choice up for good.
+    @MainActor
+    func testTheStrictCutoverClosesATunnelStillBusyAtItsBound() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 0.5), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let page = LoopbackClient(port: port)
+        defer { page.close() }
+        let tunnel = try await establishPublic(page, harness: harness)
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let busy = Task {
+            while !Task.isCancelled {
+                try? await page.send("x")
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { busy.cancel() }
+        try await eventually(timeout: .seconds(5)) { tunnel.isCancelled }
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.status("instance-1").closure, 1)
+    }
+
+    /// A host the listener gave up every connection of, and carried none
+    /// for (both legs failing, as under a VPN whose addresses the public leg
+    /// refuses), may leave the route: once, for the rest of the process, and
+    /// its loads then go by WebKit's own path (no route, an open gate). A
+    /// host the listener has carried for keeps its route, unless asked with
+    /// `force` (the second 重试).
+    @MainActor
+    func testAHostTheListenerCannotCarryLeavesTheRouteOnce() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: baseline)
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+        XCTAssertFalse(controller.listenerCannotCarry(forInstanceURL: url))
+
+        harness.publicOrigin.streams.setMode(.fail)
+        harness.transport.streams.setMode(.fail)
+        let refused = LoopbackClient(port: port)
+        defer { refused.close() }
+        try await refused.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        let answer = try await refused.receiveUntilClosed()
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 50"))
+        try await eventually { controller.listenerCannotCarry(forInstanceURL: url) }
+
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: url))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .open)
+        XCTAssertFalse(controller.listenerCannotCarry(forInstanceURL: url))
+        // Once: nothing is left to take off, and the host gets no route
+        // again in this process.
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url))
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url, force: true))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+    }
+
+    @MainActor
+    func testAHostTheListenerCarriedForKeepsItsRouteUnlessForced() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: baseline)
+        let carried = LoopbackClient(port: port)
+        defer { carried.close() }
+        _ = try await establishPublic(carried, harness: harness)
+
+        harness.publicOrigin.streams.setMode(.fail)
+        harness.transport.streams.setMode(.fail)
+        let refused = LoopbackClient(port: port)
+        defer { refused.close() }
+        try await refused.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        _ = try await refused.receiveUntilClosed()
+        let clock = ContinuousClock()
+        let settled = clock.now.advanced(by: .milliseconds(500))
+        while clock.now < settled {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(controller.listenerCannotCarry(forInstanceURL: url))
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url))
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: url, force: true))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+    }
+
+    /// 「仅直连和中继」 is never taken off the route: it goes back to
+    /// automatic first (the App's own rule).
+    @MainActor
+    func testAStrictHostIsNotBypassed() async throws {
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        XCTAssertFalse(controller.bypassListener(forInstanceURL: url, force: true))
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+    }
+
     @MainActor
     func testCONNECTWaitsThroughHostDrainWithoutAnAnswerOrPublicDial() async throws {
         try await checkHeldCONNECT(strictAtFirstLoad: false)
@@ -2479,6 +2821,10 @@ private final class Harness {
     /// How many times the controller said a load gate may have changed.
     private(set) var availabilityChanges = 0
     private(set) var lastOpened: MobileRuntimeContext?
+    /// What the shell answers when asked whether the page's document is
+    /// still loading, and the runtimes it was told to load again.
+    var loadingDocument: () -> Bool = { false }
+    private(set) var loadingPageCuts: [MobileRuntimeContext] = []
 
     /// This harness's own account of path use, on a clock the test moves.
     let pathUseClock = DirectPathUseTestClock()
@@ -2495,6 +2841,7 @@ private final class Harness {
         timing: timing,
         notificationCenter: notifications,
         pathUse: pathUse,
+        controlPlaneHost: Harness.controlPlaneHost,
         onStatusChanged: { [unowned self] in
             self.announcements += 1
             let status = self.status("instance-1")
@@ -2504,6 +2851,12 @@ private final class Harness {
         },
         onAvailabilityChanged: { [unowned self] in
             self.availabilityChanges += 1
+        },
+        isLoadingDocument: { [unowned self] _ in
+            self.loadingDocument()
+        },
+        onLoadingPageCut: { [unowned self] in
+            self.loadingPageCuts.append($0)
         }
     )
 
@@ -2682,6 +3035,9 @@ private final class Harness {
         )
     }
 
+    /// The control plane's host in these tests, as avibe.bot is in the App.
+    static let controlPlaneHost = "service.example"
+
     static func session(accountID: String) -> MobileSessionSnapshot {
         func instance(_ id: String, _ url: String) -> MobileInstance {
             let url = URL(string: url)!
@@ -2702,6 +3058,11 @@ private final class Harness {
                 instance("instance-2", "https://instance-two.example"),
                 instance("instance-custom-port", "https://instance-three.example:8443"),
                 instance("instance-unqualified", "https://avibe-direct-test"),
+                // Under the control plane's host (`controlPlaneHost`), as an
+                // instance is under avibe.bot; and under another domain.
+                instance("instance-under-service", "https://team.\(controlPlaneHost)"),
+                instance("instance-under-service-2", "https://lab.\(controlPlaneHost)"),
+                instance("instance-under-other", "https://app.other.example"),
             ]
         )
     }

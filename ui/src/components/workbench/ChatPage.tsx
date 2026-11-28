@@ -31,7 +31,7 @@ import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { composeReady } from './composeReady';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
-import { isNativeShell } from '../../lib/native';
+import { isNativeShell, nativeDirectPageHidden } from '../../lib/native';
 import { isIosDevice } from '../../lib/platform';
 import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
@@ -2534,7 +2534,11 @@ export const ChatPage: React.FC = () => {
       onConnectionState: (state) => {
         const connected = state === 'connected';
         setEventStreamConnected(connected);
-        if (!connected) void syncTurnState({ quiet: true });
+        // Not from a hidden page in a shell with a direct path: this read
+        // would take the page off that path (`nativeDirectPageHidden`). The
+        // return catches up through `onConnected`, and the interval below
+        // covers a stream that stays down; it never runs while hidden.
+        if (!connected && !nativeDirectPageHidden()) void syncTurnState({ quiet: true });
       },
       onError: () => {
         // ApiContext owns the explicit retry loop; keep the page usable while

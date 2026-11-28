@@ -221,8 +221,10 @@ private final class DirectMeasureAnswer {
 ///   attempt. The caller tracks that instant (`listenerDownSince`).
 ///
 /// A bootstrap begins at an open, at a return to the foreground, and at
-/// each drop. The link's first arrival in a bootstrap asks for one reload
-/// of the view, so the page's connections move to it.
+/// each drop. These rules ask for no reload when the link arrives: the
+/// controller closes the host's tunnel connections and tells the page,
+/// which opens its connections again on the link; only a page whose
+/// document was still loading is loaded again (`DirectPathController.cutover`).
 struct DirectOnlyRevertRules: Equatable {
     static let unlinkedRendezvousLimit: UInt64 = 2
     static let pageWithoutLink: Duration = .seconds(20)
@@ -241,9 +243,8 @@ struct DirectOnlyRevertRules: Equatable {
 
     enum Decision: Equatable {
         /// Keep the choice; look again by `nextCheck` if nothing else
-        /// happens first. `reloadsForLink`: the link has just come up in
-        /// this bootstrap; reload the view once.
-        case keep(nextCheck: ContinuousClock.Instant?, reloadsForLink: Bool)
+        /// happens first.
+        case keep(nextCheck: ContinuousClock.Instant?)
         /// Back to automatic, recording when and from what (a1, a2, c):
         /// the page says so under the choice.
         case revert
@@ -257,8 +258,6 @@ struct DirectOnlyRevertRules: Equatable {
     private var lastStrictFailures: UInt64?
     private var drops: [ContinuousClock.Instant] = []
     private var armed = false
-    private var wasLinked = false
-    private var reloadedForLink = false
     /// The link came up in this bootstrap: it succeeded, and a1 and a2 no
     /// longer apply to it. A later loss is the controller's to count (a
     /// drop, which begins a new bootstrap).
@@ -270,8 +269,6 @@ struct DirectOnlyRevertRules: Equatable {
     mutating func beginBootstrap(unlinkedRendezvous: UInt64, linked: Bool) {
         unlinkedBase = unlinkedRendezvous
         freshPageAt = nil
-        wasLinked = linked
-        reloadedForLink = false
         establishedInBootstrap = linked
     }
 
@@ -332,11 +329,6 @@ struct DirectOnlyRevertRules: Equatable {
                 return .revert
             }
         }
-        let reloadsForLink = seen.linked && !wasLinked && !reloadedForLink
-        if reloadsForLink {
-            reloadedForLink = true
-        }
-        wasLinked = seen.linked
         var next: ContinuousClock.Instant?
         if !seen.linked, !establishedInBootstrap, let page = freshPageAt {
             next = page.advanced(by: Self.pageWithoutLink)
@@ -345,7 +337,7 @@ struct DirectOnlyRevertRules: Equatable {
             let due = since.advanced(by: Self.listenerDown)
             next = next.map { min($0, due) } ?? due
         }
-        return .keep(nextCheck: next, reloadsForLink: reloadsForLink)
+        return .keep(nextCheck: next)
     }
 }
 

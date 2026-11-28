@@ -222,6 +222,38 @@ def log_path_use(entries: Any) -> None:
         )
 
 
+_PUBLIC_FAULT_CAUSES = (
+    "address_benchmark", "address_private", "address_other", "dns_failed",
+    "connect_timeout", "connect_refused", "connect_other",
+)
+_ROUTE_FALLBACK_REASONS = ("open_failed", "open_timed_out", "retry")
+
+
+def _log_counts(entries: Any, name: str, key: str, allowed: tuple[str, ...], *, unique: bool) -> None:
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 5:
+        return
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.keys() != {key, "count"}:
+            return
+        word, count = entry[key], entry["count"]
+        if not isinstance(word, str) or word not in allowed or type(count) is not int or not 1 <= count < 2**31:
+            return
+        if unique and word in seen:
+            return
+        seen.add(word)
+    for entry in entries:
+        logger.info("direct rendezvous %s %s=%s count=%d", name, key, entry[key], entry["count"])
+
+
+def log_public_faults(entries: Any) -> None:
+    _log_counts(entries, "public_fault", "cause", _PUBLIC_FAULT_CAUSES, unique=True)
+
+
+def log_route_fallbacks(entries: Any) -> None:
+    _log_counts(entries, "route_fallback", "reason", _ROUTE_FALLBACK_REASONS, unique=False)
+
+
 def log_path_guard(entries: Any) -> None:
     """A separate optional batch: never invalidate a legacy path_use report."""
     if not isinstance(entries, list) or not 1 <= len(entries) <= 10:

@@ -201,9 +201,13 @@ typealias DirectHandoverProvider = @MainActor (
 
 /// The only writer of `proxyConfigurations`. A store's route lists exact
 /// instance hosts and points at the App's one listener. Its host list only
-/// grows while the store lives: no host is removed and no route is cleared,
-/// because WebKit does not reliably apply a cleared or changed route
-/// (docs/plans/remote-direct-ios.md sections 2 and 5).
+/// grows while the store lives, because WebKit does not reliably apply a
+/// cleared or changed route while a connection of the host lives
+/// (docs/plans/remote-direct-ios.md sections 2 and 5). The one exception is
+/// `remove`: a host the listener could not carry at all, which therefore has
+/// no live connection through it, leaves the route for the rest of the
+/// process (the next connection follows the removal: section 2,
+/// `remove-close`).
 @MainActor
 final class DirectRouteOwner {
     /// The most hosts the process's routes may list together.
@@ -222,11 +226,20 @@ final class DirectRouteOwner {
         let allowsFailover: Bool
     }
     private var hostsByStore: [UUID: [RoutedHost]] = [:]
+    /// The port each store's route was last written with.
+    private var portByStore: [UUID: UInt16] = [:]
     /// Hosts a store loaded without a route and that get none there later:
     /// the listener was failed, closed or never started when they loaded.
     /// (A host that loaded while the first bind was still under way is not
     /// one of them: `DirectPathController.lateRoute`.)
     private var excluded: Set<StoreHost> = []
+
+    /// The hosts `store`'s route lists now. Unlike `allowedHosts`, a host
+    /// taken off the route (`remove`) is not among them, nor is a host only
+    /// another store routes.
+    func routedHosts(store: UUID) -> [String] {
+        (hostsByStore[store] ?? []).map(\.name)
+    }
 
     func routes(_ host: String, store: UUID) -> Bool {
         hostsByStore[store]?.contains { $0.name == host } == true
@@ -296,8 +309,29 @@ final class DirectRouteOwner {
         return true
     }
 
+    /// Takes `host` out of `store`'s route and excludes it there for the rest
+    /// of the process: its loads go by WebKit's own path. Only for a host
+    /// that has no live connection through the listener (it carried none).
+    /// `false` when the host was not routed on that store.
+    @discardableResult
+    func remove(_ host: String, store: UUID, dataStore: WKWebsiteDataStore) -> Bool {
+        guard let hosts = hostsByStore[store], hosts.contains(where: { $0.name == host }) else {
+            return false
+        }
+        let remaining = hosts.filter { $0.name != host }
+        if let port = portByStore[store] {
+            write(remaining, store: store, dataStore: dataStore, port: port)
+        } else {
+            hostsByStore[store] = remaining
+            dataStore.proxyConfigurations = []
+        }
+        excluded.insert(StoreHost(store: store, host: host))
+        return true
+    }
+
     private func write(_ hosts: [RoutedHost], store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) {
         hostsByStore[store] = hosts
+        portByStore[store] = port
         dataStore.proxyConfigurations = [false, true].compactMap { allowsFailover in
             let domains = hosts.filter { $0.allowsFailover == allowsFailover }.map(\.name)
             guard !domains.isEmpty else { return nil }
@@ -355,6 +389,12 @@ struct DirectPathTiming: Sendable {
     /// connection attempt.
     let ownCloseSeconds: TimeInterval
     let portProbeSeconds: TimeInterval
+    /// A change of a host's 「仅直连和中继」 policy closes its connections.
+    /// How long that waits for the host's tunnel connections to carry
+    /// nothing for a second, so that what the page is loading right then
+    /// (it has just opened) is not cut; what is still busy after it is
+    /// closed anyway.
+    let cutoverQuietSeconds: TimeInterval
 
     init(
         listenerWaitSeconds: TimeInterval,
@@ -363,8 +403,10 @@ struct DirectPathTiming: Sendable {
         strictOpenSeconds: TimeInterval = 10,
         retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5],
         ownCloseSeconds: TimeInterval = 3,
-        portProbeSeconds: TimeInterval = 0.3
+        portProbeSeconds: TimeInterval = 0.3,
+        cutoverQuietSeconds: TimeInterval = 5
     ) {
+        self.cutoverQuietSeconds = cutoverQuietSeconds
         self.strictOpenSeconds = strictOpenSeconds
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
@@ -564,6 +606,13 @@ final class DirectPathController {
     /// listener was closed for the background, a return was settled, an
     /// attempt to bind the listener's port again failed, or one succeeded.
     private let onAvailabilityChanged: () -> Void
+    /// Whether the shell is still loading this runtime's document (its
+    /// navigation has started and not finished). Asked just before a
+    /// cut-over closes the host's tunnel connections.
+    private let isLoadingDocument: (MobileRuntimeContext) -> Bool
+    /// A cut-over closed connections of this runtime's page while its
+    /// document was still loading: the shell loads the page again.
+    private let onLoadingPageCut: (MobileRuntimeContext) -> Void
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     private var listener: DirectConnectListener?
@@ -652,7 +701,13 @@ final class DirectPathController {
     // a timed-out CONNECT still using a failover-enabled route during cutover.
     private var hostsNeedingColdStore: Set<String> = []
     private var armed: Set<String> = []
+    /// The control plane's host (avibe.bot). The only host the listener
+    /// carries without a route of its own (`carriesControlPlane`).
+    private let controlPlaneHost: String?
     private var rewriting: Set<String> = []
+    /// Hosts whose policy is changing: from the wait for their tunnel
+    /// connections to go quiet until the drain and rewrite are done.
+    private var cuttingOver: Set<String> = []
     private var policyGeneration: [String: UInt64] = [:]
     private var strictFailures: [String: UInt64] = [:]
     private var unlinkedAnswers: [String: UInt64] = [:]
@@ -803,6 +858,77 @@ final class DirectPathController {
     /// `tunnel` meanwhile: nothing of theirs passes through the listener
     /// yet, so a hand-over could move nothing.
     private var awaitingFirstConnect: Set<String> = []
+    /// What the listener did with each routed host's connections on each
+    /// store in this process: how many it carried (on either leg) and how
+    /// many it gave up. A host it gave up on and never carried may be taken
+    /// off the route (`bypassListener`).
+    private struct Carry {
+        var carried = 0
+        var failed = 0
+    }
+    private var carries: [String: Carry] = [:]
+
+    private static func carryKey(_ host: String, _ store: UUID) -> String {
+        store.uuidString + " " + host
+    }
+
+    private func noteCarry(host: String, store: UUID, carried: Bool) {
+        let key = Self.carryKey(host, store)
+        var carry = carries[key] ?? Carry()
+        if carried { carry.carried += 1 } else { carry.failed += 1 }
+        carries[key] = carry
+    }
+
+    /// The listener gave up every connection of `url`'s host on the current
+    /// store, at least one, and carried none: neither leg could reach the
+    /// instance from here (for example a VPN whose addresses the public leg
+    /// refuses, or a network that drops its connections), while WebKit's own
+    /// path may.
+    func listenerCannotCarry(forInstanceURL url: URL) -> Bool {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return false }
+        let store = websiteDataStore.identifier
+        guard routeOwner.routes(host, store: store), let carry = carries[Self.carryKey(host, store)] else {
+            return false
+        }
+        return carry.failed > 0 && carry.carried == 0
+    }
+
+    /// Takes `url`'s host off the current store's route for the rest of the
+    /// process, so its loads go by WebKit's own path, as Safari's do. Only
+    /// for an automatic host (a 「仅直连和中继」 one must go back to
+    /// automatic first) that the listener has carried nothing for: no
+    /// connection of it lives through the listener, so the next one follows
+    /// the removal. The next launch tries the listener again. `false` when
+    /// nothing changed.
+    ///
+    /// `force` (the second 重试 on the failure screen): also when the
+    /// listener carried some of the host's connections earlier. One still
+    /// alive keeps its way through the listener; every new one goes by
+    /// WebKit's own path.
+    @discardableResult
+    func bypassListener(forInstanceURL url: URL, force: Bool = false) -> Bool {
+        guard let host = DirectAuthority(instanceURL: url)?.host, !needsListener(host) else { return false }
+        let store = websiteDataStore.identifier
+        if !force, let carry = carries[Self.carryKey(host, store)], carry.carried > 0 {
+            return false
+        }
+        if lateRoute?.host == host, lateRoute?.store == store {
+            lateRoute = nil
+            lateRouteTask?.cancel()
+            lateRouteTask = nil
+        }
+        guard routeOwner.remove(host, store: store, dataStore: websiteDataStore.dataStore) else {
+            routeOwner.exclude(host, store: store)
+            return false
+        }
+        armed.remove(host)
+        awaitingFirstConnect.remove(host)
+        Self.logger.notice("Direct path: a host the listener could not carry loads by WebKit's own path")
+        sequence += 1
+        notify()
+        onAvailabilityChanged()
+        return true
+    }
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -815,14 +941,20 @@ final class DirectPathController {
         pathUse: DirectPathUse = .shared,
         probationStore: DirectProbationStoring = DirectProbationDefaultsStore(defaults: .standard),
         probationClock: DirectProbationClock = .system,
+        controlPlaneHost: String? = MobileControlPlaneConfiguration().baseURL.host,
         onStatusChanged: @escaping () -> Void,
-        onAvailabilityChanged: @escaping () -> Void = {}
+        onAvailabilityChanged: @escaping () -> Void = {},
+        isLoadingDocument: @escaping (MobileRuntimeContext) -> Bool,
+        onLoadingPageCut: @escaping (MobileRuntimeContext) -> Void
     ) {
+        self.isLoadingDocument = isLoadingDocument
+        self.onLoadingPageCut = onLoadingPageCut
         self.pathUse = pathUse
         self.probationStore = probationStore
         self.probationClock = probationClock
         self.probation = DirectProbationGuard(stored: probationStore.load())
         self.storedProbation = probation.stored
+        self.controlPlaneHost = controlPlaneHost?.lowercased()
         self.websiteDataStore = websiteDataStore
         self.transport = transport
         self.isCurrentRuntime = isCurrentRuntime
@@ -1107,6 +1239,11 @@ final class DirectPathController {
         // The listener accepts the host before WebKit can be routed to it.
         // Its list only grows: `plan(for:)` refuses a host no route lists.
         await listener.allowHost(authority.host)
+        // And the control plane's host, where WebKit will send it here too
+        // because it is this host's parent domain (`carriesControlPlane`).
+        if let controlPlaneHost, DirectAuthority.isParentDomain(controlPlaneHost, ofAny: [authority.host]) {
+            await listener.allowHost(controlPlaneHost)
+        }
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -1179,7 +1316,7 @@ final class DirectPathController {
     func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
         guard let authority = DirectAuthority(instanceURL: url) else { return .open }
         let host = authority.host
-        if rewriting.contains(host) { return .held }
+        if rewriting.contains(host) || cuttingOver.contains(host) { return .held }
         let strict = needsListener(host)
         guard routeOwner.routes(host, store: websiteDataStore.identifier), let listener else {
             return strict ? .held : .open
@@ -1430,18 +1567,43 @@ final class DirectPathController {
         onAvailabilityChanged()
     }
 
-    /// One drain at a time per host. New plans wait; in-flight plans also
+    /// One change of policy at a time per host. It first waits, for a
+    /// bounded time, until the host's tunnel connections carry nothing: the
+    /// page has just opened and may still be using them. Plans go on as
+    /// they were meanwhile; a load the shell would start waits
+    /// (`loadGate`). Then the drain: new plans wait; in-flight plans also
     /// fail their commit check. Sample the latest choice after the drain so
-    /// a late completion cannot reverse a newer choice or touch another store.
+    /// a late completion cannot reverse a newer choice or touch another
+    /// store.
+    ///
+    /// A page that has loaded is told of what was closed as of any other
+    /// closure: it opens its stream again and catches up, and nothing is
+    /// reloaded. A page whose document was still loading cannot make a cut
+    /// script, stylesheet or first read again (a slow network: the wait ran
+    /// out, or a request was waiting for its answer through the quiet
+    /// second), so the shell loads it again, on the new policy. Whether it
+    /// was loading is asked before the drain, never after: a cut load ends
+    /// the navigation, and the page would look loaded.
     private func cutover(_ host: String) {
         let store = websiteDataStore.identifier
         guard routeOwner.routes(host, store: store), let listener, let port = listenerPort,
-              rewriting.insert(host).inserted else { return }
+              cuttingOver.insert(host).inserted else { return }
         policyGeneration[host, default: 0] &+= 1
+        let quietWait = timing.cutoverQuietSeconds
         Task { [weak self] in
-            await listener.drainHost(host)
+            await listener.waitUntilQuiet(
+                host: host, backend: .publicOrigin,
+                quietSeconds: Self.handoverQuietSeconds, waitSeconds: quietWait
+            )
             guard let self else { return }
+            let loading = self.runtime.flatMap { runtime in
+                DirectAuthority(instanceURL: runtime.instance.url)?.host == host
+                    && self.isLoadingDocument(runtime) ? runtime : nil
+            }
+            self.rewriting.insert(host)
+            let drained = await listener.drainHost(host)
             self.rewriting.remove(host)
+            self.cuttingOver.remove(host)
             if self.websiteDataStore.identifier == store, self.listener === listener {
                 let strict = self.requestedStrict.contains(host) && !self.hostsNeedingColdStore.contains(host)
                     && self.target?.authority.host == host && self.isUsable && !self.isInBackground
@@ -1452,6 +1614,17 @@ final class DirectPathController {
                                            port: port, allowsFailover: allowsFailover), strict {
                     self.armed.insert(host)
                 } else { self.armed.remove(host) }
+            }
+            // After the policy is in force: the connections the page opens
+            // in answer are planned under it.
+            if drained > 0 {
+                if let loading, self.runtime == loading {
+                    // The gate is open again; the load goes by the policy
+                    // now in force. No closure: that document is replaced.
+                    self.onLoadingPageCut(loading)
+                } else {
+                    self.recordClosure(hosts: [host])
+                }
             }
             self.onAvailabilityChanged()
         }
@@ -1836,12 +2009,52 @@ final class DirectPathController {
         }
     }
 
+    /// Whether a CONNECT for `host` is carried though no route lists it:
+    /// only the control plane's own host, only while it is exactly the
+    /// parent domain of a host the current account store's route lists now,
+    /// and not once it is routed itself (its own policy then decides). That
+    /// is read from the route as it stands, not from every host ever
+    /// routed: when the last host under it leaves the route
+    /// (`bypassListener`), or the account's store is replaced, WebKit no
+    /// longer sends the parent here, and anything else on this device that
+    /// asks the loopback port for it is refused again.
+    private func carriesControlPlane(_ host: String) -> Bool {
+        host == controlPlaneHost
+            && !routeOwner.allowedHosts.contains(host)
+            && DirectAuthority.isParentDomain(
+                host, ofAny: routeOwner.routedHosts(store: websiteDataStore.identifier)
+            )
+    }
+
     // MARK: Plans
 
     /// Decides one accepted CONNECT (section 6). `nil` refuses it.
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
         let host = authority.host
-        guard routeOwner.allowedHosts.contains(host) else { return nil }
+        guard routeOwner.allowedHosts.contains(host) else {
+            // The control plane's own host, when it is the parent domain of
+            // a routed host (avibe.bot, for an instance under it): WebKit
+            // sends it here though no route lists it. It is not the
+            // instance: it goes straight to that host through the public
+            // opener and its address policy under every choice, never over
+            // the direct path, and is in no count of the instance's
+            // connections. Fenced as any public-only plan is, so nothing
+            // planned before a change of selection or account is granted
+            // after it; and no longer carried once the host is routed in
+            // its own right or stops being a routed host's parent.
+            guard carriesControlPlane(host) else { return nil }
+            let fence = Fence(selection: selection, pathGeneration: pathGeneration, accountEpoch: accountEpoch)
+            let publicBackend = publicBackend
+            return DirectConnectPlan(
+                scope: scope, generation: pathGeneration, openDirect: nil,
+                openPublic: { try await publicBackend.open(authority) },
+                isCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.isCurrent(fence, lease: nil) && self.carriesControlPlane(host)
+                },
+                directFailed: {}
+            )
+        }
         if awaitingFirstConnect.remove(host) != nil {
             // WebKit brought a connection of this host to the listener: from
             // here on its documents hear what the transport prefers.
@@ -1962,7 +2175,12 @@ final class DirectPathController {
         // relay or given it up: a race that is fenced and planned again is
         // not a connection. Whichever instance is selected by then, the
         // connection was made, and it is counted for its own host.
-        plan.connectionSettled = { [pathUse] carried in
+        let carryStore = websiteDataStore.identifier
+        plan.connectionSettled = { [weak self, pathUse] carried in
+            let carriedAny = carried != nil
+            Task { @MainActor in
+                self?.noteCarry(host: host, store: carryStore, carried: carriedAny)
+            }
             guard let record = lastRace.last else {
                 return
             }
