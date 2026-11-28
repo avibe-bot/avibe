@@ -106,9 +106,10 @@ final class TurnActivityCoordinator {
     private static let settingKey = "avibe.liveActivities.enabled"
     /// Lock Screen and Dynamic Island progress is switched off again (11-28)
     /// for the public build, until the owner approves the card on his phone
-    /// (it was off 11-26, on 11-27). Off, the setting reads and stays off,
-    /// nothing starts a card, and a card an earlier build left ends at launch
-    /// and whenever the App comes to the front. Switching on again also means
+    /// (it was off 11-26, on 11-27). Off, the setting reads off (the user's
+    /// stored choice is kept for a later switched-on build), nothing starts a
+    /// card, and a card an earlier build left ends at launch and whenever the
+    /// App comes to the front. Switching on again also means
     /// adding `lockScreenProgress: 1` to NativeShellMetadata.capabilities.
     static let shipsLockScreenProgress = false
     private let available: Bool
@@ -160,8 +161,9 @@ final class TurnActivityCoordinator {
         self.beginBackgroundTask = beginBackgroundTask
         self.defaults = defaults
         self.available = available
-        // Switched off: a setting an earlier build stored on is forced off.
-        if !available { defaults.set(false, forKey: Self.settingKey) }
+        // Switched off, the stored setting is left as the user set it:
+        // `deviceEnabled` reads off meanwhile, and a later switched-on build
+        // finds the user's own choice.
         self.mayRequest = mayRequest
         self.now = now
         self.enabled = enabled
@@ -194,7 +196,8 @@ final class TurnActivityCoordinator {
     }
 
     func setSetting(_ value: Bool) async {
-        let value = value && available
+        // Switched off: no page shows the row; store nothing, start nothing.
+        guard available else { await endAll(reason: "disabled"); return }
         defaults.set(value, forKey: Self.settingKey)
         if !value { await endAll(reason: "disabled") }
     }
