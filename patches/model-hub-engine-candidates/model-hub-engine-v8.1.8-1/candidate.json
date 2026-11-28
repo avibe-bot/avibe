@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "asset_release_tag": "model-hub-engine-v8.1.8-1",
+  "min_avibe_version": "3.2.8",
+  "manifest_sha256": "8249829f630bd89453c75491969f71158f260e5ea4ca73a04f1d0f84f94c7ec0"
+}
