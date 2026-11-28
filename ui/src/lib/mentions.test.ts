@@ -118,6 +118,46 @@ describe('linkifyMentions', () => {
 
     expect(text).toBe('Ask [@cso](avibe-mention:bot:cso).');
   });
+
+  it('in agentReply mode, links resolved bracketed and bare sessions, keeps unresolved plain text, and tracks exact edits', () => {
+    const input = '好，已经起了一个后台 Agent（#sesw34zgzgcvp），另看 #<ses6jr7c5h2q6>、@<bot:product>，忽略 #<sesmissing99>、#sesmissing88 和 `#sesw34zgzgcvp`。';
+    const { text, edits } = linkifyMentions(
+      input,
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+        { kind: 'session', session_id: 'ses6jr7c5h2q6', title: 'Bridge', openable: true },
+        { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+      ],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#sesw34zgzgcvp', '[#登录跳转修复](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<ses6jr7c5h2q6>', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+      ['@<bot:product>', '[@产品伙伴](avibe-mention:bot:product)'],
+      ['#<sesmissing99>', '#\\<sesmissing99>'],
+    ]);
+    // Unresolved bare id and inline code remain completely untouched.
+    expect(text).toContain('#sesmissing88');
+    expect(text).toContain('`#sesw34zgzgcvp`');
+  });
+
+  it('in agentReply mode, skips URL fragments and markdown link destinations', () => {
+    const input = 'See https://example.com/#sesw34zgzgcvp and [doc](#sesw34zgzgcvp) and #sesw34zgzgcvp.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#sesw34zgzgcvp', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('https://example.com/#sesw34zgzgcvp');
+    expect(text).toContain('[doc](#sesw34zgzgcvp)');
+  });
 });
 
 describe('referenceToMarker', () => {

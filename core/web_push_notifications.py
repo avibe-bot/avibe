@@ -832,9 +832,11 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     # ``badge_count`` is computed per subscription owner at send time, not from
     # this one session's unread count. That keeps it current after the debounce
     # delay and aligned with the recipient's Project-filtered Inbox.
+    raw_body = (message.get("text") or inbox_row.get("preview_text") or "").strip()
     payload = {
         "title": inbox_row.get("title") or inbox_row.get("project_name") or "avibe",
-        "body": (message.get("text") or inbox_row.get("preview_text") or "").strip()[:240],
+        "body": raw_body[:240],
+        "_raw_body": raw_body,
         "url": url,
         "tag": tag,
         "message_id": message.get("id"),
@@ -1602,12 +1604,28 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                         user_key=delivery_owner,
                         contexts=contexts,
                     )
+                    raw_body = payload.get("_raw_body")
+                    if not isinstance(raw_body, str):
+                        raw_body = str(payload.get("body") or "")
+                    from core.mention_resolution import render_plain_mentions_in_conn
+
+                    resolved_body = render_plain_mentions_in_conn(
+                        conn,
+                        raw_body,
+                        include_bare_sessions=True,
+                        authorization_context=contexts.get(delivery_owner),
+                    ).strip()[:240]
                 if not may_dispatch(engine, subscription):
                     continue
                 try:
+                    delivery_payload = {
+                        k: v for k, v in payload.items() if k != "_raw_body"
+                    }
+                    delivery_payload["body"] = resolved_body
+                    delivery_payload["badge_count"] = badge_count
                     send_web_push(
                         subscription=subscription,
-                        payload={**payload, "badge_count": badge_count},
+                        payload=delivery_payload,
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_success(

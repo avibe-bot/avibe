@@ -48,6 +48,9 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
+  "session": {
+    "untitled": "Untitled session"
+  },
   "show": {
     "systemEntry": {
       "defaultTitle": "Show Page"

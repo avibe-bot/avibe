@@ -34,8 +34,11 @@ import {
   linkifyMentions,
   parseMentionHref,
   type MentionReference,
+  type SessionReference,
 } from '@/lib/mentions';
+import { useBots } from '@/context/BotsContext';
 import { BotMentionChip } from './bot-mention-chip';
+import { SessionMentionChip } from './session-mention-chip';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 
 // Shared markdown renderer. react-markdown + remark-gfm (tables, strikethrough,
@@ -463,6 +466,10 @@ export const Markdown: React.FC<{
   /** Mention sidecar — when present, `@<name>` / `#<id>` markers in `content`
    *  render as inline chips (see lib/mentions). */
   references?: MentionReference[];
+  /** Opt-in for Agent-authored replies: resolve `#<session-id>`, bare `#ses...`,
+   *  and `@<bot:handle>` only against resolved `references` (and live Bots),
+   *  leaving unresolved ids as exact plain text without broken chips. */
+  agentMentions?: boolean;
   /** Opt-in: render `$<NAME>` dynamic-ask markers as interactive SecretRequestCards. ONLY the
    *  agent-reply surface sets this — user bubbles, previews, and docs must NOT, or user-authored
    *  or quoted text could mint an "agent asked for this secret" card that creates a vault
@@ -492,17 +499,32 @@ export const Markdown: React.FC<{
   interactive = true,
   softBreaks = false,
   references,
+  agentMentions = false,
   secretRequests = false,
   citations,
   localFileWorkdir,
   onOpenLocalFile,
   readOnly = false,
 }) => {
+  const { bots } = useBots();
+  const resolvedBotHandles = React.useMemo(
+    () => (agentMentions && bots.length > 0 ? new Set(bots.map((bot) => bot.handle)) : undefined),
+    [agentMentions, bots],
+  );
+  const sessionRefMap = React.useMemo(() => {
+    const map = new Map<string, SessionReference>();
+    for (const ref of references ?? []) {
+      if (ref.kind === 'session') map.set(ref.session_id, ref);
+    }
+    return map;
+  }, [references]);
   // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees
-  // them, and only when a sidecar is present — agent replies (no references) skip
-  // this so their code spans are never touched. The links render as chips via the
-  // `a` map. Secret `$<NAME>` markers are rewritten too, but only on the agent-reply
-  // surface (secretRequests) — user bubbles / previews / docs keep them as plain text.
+  // them, either when a sidecar is present or on Agent replies (`agentMentions`,
+  // which only turns resolved Sessions and Bots into chips and escapes unresolved
+  // `<…>` markers so CommonMark renders them as literal plain text). The links
+  // render as chips via the `a` map. Secret `$<NAME>` markers are rewritten too,
+  // but only on the agent-reply surface (secretRequests) — user bubbles / previews
+  // / docs keep them as plain text.
   //
   // Both are replacements, so both move the text after them. The caller measured
   // its citations against `content`; each pass hands back what it changed, and the
@@ -514,8 +536,12 @@ export const Markdown: React.FC<{
     let text = content;
     let binding = citations ?? null;
     const passes: TextEdit[][] = [];
-    if (references && references.length) {
-      const pass = linkifyMentions(text, references);
+    if (agentMentions || (references && references.length)) {
+      const pass = linkifyMentions(
+        text,
+        references,
+        agentMentions ? { agentReply: true, resolvedBotHandles } : undefined,
+      );
       text = pass.text;
       binding = remapCitations(binding, pass.edits);
       passes.push(pass.edits);
@@ -527,7 +553,7 @@ export const Markdown: React.FC<{
       passes.push(pass.edits);
     }
     return { text, binding, passes };
-  }, [content, references, secretRequests, citations]);
+  }, [content, references, agentMentions, resolvedBotHandles, secretRequests, citations]);
   const sourceRef = React.useCallback(
     (root: HTMLDivElement | null) => {
       if (root) bindMarkdownSource(root, { content, text: prepared.text, passes: prepared.passes });
@@ -597,15 +623,27 @@ export const Markdown: React.FC<{
         // a clickable row, and never triggers a fetch or navigation.
         const mention = parseMentionHref(url);
         if (mention?.target === 'bot') {
-          return <BotMentionChip handle={mention.value} fallback={children} className="max-w-[18rem]" />;
+          return <BotMentionChip handle={mention.value} fallback={children} />;
+        }
+        if (mention?.target === 'session') {
+          const ref = sessionRefMap.get(mention.value);
+          const canOpen = interactive && (ref ? ref.openable !== false : false);
+          return (
+            <SessionMentionChip
+              sessionId={mention.value}
+              title={ref ? (ref.title ?? null) : undefined}
+              fallback={children}
+              interactive={canOpen}
+            />
+          );
         }
         if (mention) {
           return (
             <Badge
               variant={mention.kind === '@' ? 'success' : 'info'}
-              className="max-w-[18rem] truncate align-baseline font-medium"
+              className="max-w-[min(16rem,100%)] py-[2px] align-[-0.18em] font-medium leading-none"
             >
-              {children}
+              <span className="min-w-0 truncate">{children}</span>
             </Badge>
           );
         }
@@ -693,7 +731,7 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive, secretRequests, prepared.binding, readOnly, localFileWorkdir, onOpenLocalFile],
+    [interactive, secretRequests, prepared.binding, readOnly, localFileWorkdir, onOpenLocalFile, sessionRefMap],
   );
 
   const urlTransform = (url: string, _key: string, node: { properties?: Record<string, unknown> }) =>

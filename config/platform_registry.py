@@ -42,6 +42,10 @@ class PlatformCapabilities:
     # when a user opts into "Toolcall" visibility. Platforms can keep local
     # history/audit rows while still suppressing noisy IM delivery.
     supports_toolcall_delivery: bool = True
+    # Whether the platform renders clickable masked Markdown links ``[label](url)``
+    # (Slack, Discord, Telegram, Feishu). Plain-text transports (WeChat) set False
+    # so resolved Session mentions render as their title alone rather than raw URLs.
+    supports_markdown_links: bool = True
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             preferred_processing_indicator="typing",
             force_preferred_processing_indicator=True,
             supports_toolcall_delivery=False,
+            supports_markdown_links=False,
         ),
     ),
     # The Vibe Remote Web UI itself, surfaced as a peer platform so the

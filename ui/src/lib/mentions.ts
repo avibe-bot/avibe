@@ -1,5 +1,5 @@
 // Shared contract for @-mentions (Bots and Agents) and #-session references in
-// the chat composer.
+// the chat composer and Agent replies.
 //
 // Marker convention (the agent-facing, transport-stable form) lives inline in the
 // message text and carries the kind (docs/plans/bots.md D3): `@<bot:handle>`
@@ -30,8 +30,11 @@ export type SessionReference = {
   kind: 'session';
   /** Stable `vibe agent run --session-id <id>` handle; carried in the marker. */
   session_id: string;
-  /** Snapshot of the title at send time — the chip label. */
+  /** Current title (or send-time snapshot for legacy rows) — the chip label. */
   title?: string | null;
+  /** Whether the current reader can open `/chat/<session_id>`. Set by read-time
+   *  server enrichment; omitted on legacy/composer-only sidecars. */
+  openable?: boolean;
 };
 
 export type BotReference = {
@@ -61,6 +64,12 @@ export type MentionTrigger = (typeof MENTION_TRIGGERS)[number];
 // Matches `@<…>` / `#<…>`. Inner text excludes `>` and newlines: agent names with
 // `>` are disallowed (enforced at insert time) and session ids are token-safe.
 export const MENTION_MARKER_RE = /([@#])<([^>\n]+)>/g;
+
+// Matches bracketed markers OR bare `#ses...` in Agent replies. Lookbehind keeps
+// URL fragments (`/#ses...`, `x#ses...`), doubled hashes, and backslash escapes
+// untouched while matching inside CJK prose and parentheses (`（#ses...）`).
+const AGENT_MENTION_RE =
+  /([@#])<([^>\n]+)>|(?<![A-Za-z0-9_/:.?=&@#\\])#(ses(?:_[a-z][a-z0-9-]{1,23}|[A-Za-z0-9][A-Za-z0-9_-]{0,62}))(?![A-Za-z0-9_-])/g;
 
 /** The custom link scheme markers are rewritten to before markdown rendering. */
 export const MENTION_LINK_SCHEME = 'avibe-mention';
@@ -93,11 +102,29 @@ function escapeMarkdownLabel(value: string): string {
   return value.replace(/[\\[\]]/g, (m) => `\\${m}`).replace(/\s*\n\s*/g, ' ');
 }
 
+export type LinkifyMentionsOptions = {
+  /** Agent-reply mode: only resolved Sessions (in `references` with
+   *  `openable !== false`) and resolved Bots (in `references` or
+   *  `resolvedBotHandles`) become chips; bare `#ses...` is matched when resolved;
+   *  unresolved `<…>` markers stay exact plain text (backslash-escaped before
+   *  `<` so CommonMark does not drop `<ses...>` as raw inline HTML). */
+  agentReply?: boolean;
+  /** Known live Bot handles from client context (optional supplement to `references`). */
+  resolvedBotHandles?: ReadonlySet<string>;
+};
+
+// Segments skipped verbatim during mention rewriting: fenced code blocks
+// (backticks or tildes), inline code spans, autolinks (`<https://...>`), and
+// Markdown link/image destinations (`](...)`).
+const SKIP_SEGMENT_RE =
+  /```[\s\S]*?```|~~~[\s\S]*?~~~|(`+)[^`\n]+?\1|<https?:\/\/[^>\s]+>|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
+
 /**
- * Rewrite `@<…>` / `#<…>` markers in `text` into markdown links carrying the
- * `avibe-mention:` scheme, so the shared `Markdown` renderer can show them as
- * chips via its `a` component map. Session labels use the title from
- * `references` when available, else the raw id.
+ * Rewrite `@<…>` / `#<…>` (and, in Agent replies, resolved bare `#ses...`)
+ * markers in `text` into markdown links carrying the `avibe-mention:` scheme,
+ * so the shared `Markdown` renderer can show them as chips via its `a`
+ * component map. Session labels use the title from `references` when available,
+ * else the raw id.
  *
  * A marker becomes a link of a different length, which moves everything after
  * it — including any source citation the backend measured in this same text.
@@ -105,19 +132,30 @@ function escapeMarkdownLabel(value: string): string {
  * letting the caller carry those measurements across this pass (see
  * lib/citations). The rewritten text itself is unchanged by that bookkeeping.
  */
-// Inline code spans and fenced code blocks — markers inside these must render
-// literally (e.g. `` `@<T>` ``), so linkify skips them.
-const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`]*`)/g;
-
-export function linkifyMentions(text: string, references?: MentionReference[]): EditedText {
-  const sessionTitles = new Map<string, string>();
+export function linkifyMentions(
+  text: string,
+  references?: MentionReference[],
+  options?: LinkifyMentionsOptions,
+): EditedText {
+  const agentReply = Boolean(options?.agentReply);
+  const resolvedBotHandles = options?.resolvedBotHandles;
+  const sessionRefs = new Map<string, SessionReference>();
   const botNames = new Map<string, string>();
+  const botRefHandles = new Set<string>();
+  const agentRefNames = new Set<string>();
   for (const ref of references ?? []) {
-    if (ref.kind === 'session' && ref.title) sessionTitles.set(ref.session_id, ref.title);
-    if (ref.kind === 'bot' && ref.display_name) botNames.set(ref.handle, ref.display_name);
+    if (ref.kind === 'session') {
+      sessionRefs.set(ref.session_id, ref);
+    } else if (ref.kind === 'bot') {
+      botRefHandles.add(ref.handle);
+      if (ref.display_name) botNames.set(ref.handle, ref.display_name);
+    } else if (ref.kind === 'agent') {
+      agentRefNames.add(ref.name);
+    }
   }
   const edits: TextEdit[] = [];
-  const rewrite = (segment: string, base: number): string =>
+
+  const rewriteLegacy = (segment: string, base: number): string =>
     segment.replace(MENTION_MARKER_RE, (full: string, trigger: string, inner: string, at: number) => {
       let kind: MentionTarget = 'session';
       let value = inner;
@@ -131,26 +169,81 @@ export function linkifyMentions(text: string, references?: MentionReference[]): 
         // live Bot when there is one.
         label = escapeMarkdownLabel(`@${kind === 'bot' ? botNames.get(value) || value : value}`);
       } else {
-        label = escapeMarkdownLabel(`#${sessionTitles.get(inner) || inner}`);
+        const sessionRef = sessionRefs.get(inner);
+        label = escapeMarkdownLabel(`#${sessionRef?.title || inner}`);
       }
       const link = `[${label}](${MENTION_LINK_SCHEME}:${kind}:${encodeURIComponent(value)})`;
       edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
       return link;
     });
-  // Split out code spans/blocks (the odd capture-group chunks) and rewrite markers
-  // only in the surrounding prose, so marker-shaped text inside code stays literal.
-  // The chunks concatenate back to `text`, so a running cursor over them is each
-  // chunk's own offset in the input.
-  let cursor = 0;
-  const rewritten = text
-    .split(CODE_SEGMENT_RE)
-    .map((chunk) => {
-      const base = cursor;
-      cursor += chunk.length;
-      return chunk.startsWith('`') ? chunk : rewrite(chunk, base);
-    })
-    .join('');
-  return { text: rewritten, edits };
+
+  const rewriteAgent = (segment: string, base: number): string =>
+    segment.replace(
+      AGENT_MENTION_RE,
+      (full: string, trigger: string | undefined, inner: string | undefined, bareSession: string | undefined, at: number) => {
+        if (bareSession) {
+          const ref = sessionRefs.get(bareSession);
+          if (!ref || ref.openable === false) return full;
+          const label = escapeMarkdownLabel(`#${ref.title || bareSession}`);
+          const link = `[${label}](${MENTION_LINK_SCHEME}:session:${encodeURIComponent(bareSession)})`;
+          edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
+          return link;
+        }
+        if (!trigger || inner === undefined) return full;
+        if (trigger === '#') {
+          const sid = inner.trim();
+          const ref = sessionRefs.get(sid);
+          if (ref && ref.openable !== false) {
+            const label = escapeMarkdownLabel(`#${ref.title || sid}`);
+            const link = `[${label}](${MENTION_LINK_SCHEME}:session:${encodeURIComponent(sid)})`;
+            edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
+            return link;
+          }
+          // Unresolved `#<...>`: escape `<` so CommonMark renders it as literal
+          // plain text instead of dropping `<ses...>` as raw inline HTML.
+          const escaped = `${trigger}\\<${inner}>`;
+          edits.push({ start: base + at, end: base + at + full.length, inserted: escaped.length });
+          return escaped;
+        }
+        const marker = parseAtMarker(inner);
+        if (marker.target === 'bot') {
+          const handle = marker.name.trim();
+          if (botRefHandles.has(handle) || resolvedBotHandles?.has(handle)) {
+            const label = escapeMarkdownLabel(`@${botNames.get(handle) || handle}`);
+            const link = `[${label}](${MENTION_LINK_SCHEME}:bot:${encodeURIComponent(handle)})`;
+            edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
+            return link;
+          }
+        } else if (agentRefNames.has(marker.name)) {
+          const label = escapeMarkdownLabel(`@${marker.name}`);
+          const link = `[${label}](${MENTION_LINK_SCHEME}:agent:${encodeURIComponent(marker.name)})`;
+          edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
+          return link;
+        }
+        const escaped = `${trigger}\\<${inner}>`;
+        edits.push({ start: base + at, end: base + at + full.length, inserted: escaped.length });
+        return escaped;
+      },
+    );
+
+  const rewrite = agentReply ? rewriteAgent : rewriteLegacy;
+
+  // Partition on code blocks/spans, autolinks, and link destinations; rewrite
+  // only the surrounding prose so markers in code and URLs stay literal.
+  let result = '';
+  let last = 0;
+  SKIP_SEGMENT_RE.lastIndex = 0;
+  for (let m = SKIP_SEGMENT_RE.exec(text); m; m = SKIP_SEGMENT_RE.exec(text)) {
+    if (m.index > last) {
+      result += rewrite(text.slice(last, m.index), last);
+    }
+    result += m[0];
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    result += rewrite(text.slice(last), last);
+  }
+  return { text: result, edits };
 }
 
 /** Parse an `avibe-mention:<kind>:<value>` href back into its parts. */

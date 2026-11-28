@@ -108,7 +108,7 @@ def harness_source(spec: Mapping[str, Any]) -> str:
     # so it is named as the Bot.
     session = _token(spec.get("source_session_id")) or (_token(actor) if source_kind == "agent" else "")
     bot = _BOT_SESSION.fullmatch(session)
-    origin = f"from @<bot:{bot.group(1)}>" if bot else f"from #{session}" if session else ""
+    origin = f"from @<bot:{bot.group(1)}>" if bot else f"from #<{session}>" if session else ""
     if trigger == "watch":
         parts = ["Watch", definition, name]
     elif trigger == "scheduled":
@@ -148,7 +148,7 @@ def _address(session: str) -> tuple[str, str]:
     bot = _BOT_SESSION.fullmatch(session)
     if bot:
         return f"@<bot:{bot.group(1)}>", f"vibe agent run --bot {bot.group(1)} --message ..."
-    return f"#{session}", f"vibe agent run --session-id {session} --message ..."
+    return f"#<{session}>", f"vibe agent run --session-id {session} --message ..."
 
 
 def is_voice_input(metadata: Any) -> bool:

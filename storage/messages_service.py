@@ -403,16 +403,21 @@ def _attach_transcript_identity(
 ) -> list[dict[str, Any]]:
     """Everything a transcript row needs read-side but does not store.
 
-    One entry point for both enrichments so a new transcript window inherits
-    them together instead of picking up whichever one its neighbour happened to
-    call.
+    One entry point for enrichments so every transcript window inherits them
+    together instead of picking up whichever one its neighbour happened to call.
     """
-    return attach_sender_labels(
+    enriched = attach_sender_labels(
         conn,
         _attach_harness_provenance(
             conn, payloads, authorization_context=authorization_context
         ),
     )
+    from core.mention_resolution import enrich_message_rows_in_conn
+
+    enrich_message_rows_in_conn(
+        conn, enriched, authorization_context=authorization_context
+    )
+    return enriched
 
 
 def transcript_order_value(table: Any = messages) -> Any:
@@ -1451,6 +1456,8 @@ def list_inbox_sessions(
     scope_ids: Optional[Iterable[str]] = None,
     hidden_session_ids: Optional[Iterable[str]] = None,
     category: Optional[str] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+    resolve_mentions: bool = False,
 ) -> dict[str, Any]:
     """Per-session ("Slack-like") inbox feed.
 
@@ -1729,6 +1736,13 @@ def list_inbox_sessions(
                 "unread": unread > 0,
                 "category": row["category"],
             }
+        )
+
+    if resolve_mentions or authorization_context is not None:
+        from core.mention_resolution import enrich_inbox_previews_in_conn
+
+        enrich_inbox_previews_in_conn(
+            conn, sessions, authorization_context=authorization_context
         )
 
     next_cursor = None

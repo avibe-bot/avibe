@@ -83,7 +83,7 @@ _HARNESS_SOURCES = [
     pytest.param("webhook", "hook-9", None, "webhook hook-9", id="webhook"),
     pytest.param(
         "agent_run", None, {"source_kind": "agent", "source_actor": "sescaller01"},
-        "agent run run-1 from #sescaller01", id="agent-run",
+        "agent run run-1 from #<sescaller01>", id="agent-run",
     ),
     pytest.param(
         "agent_run", None, {"source_kind": "agent", "source_actor": "ses_main"},
@@ -98,13 +98,13 @@ _HARNESS_SOURCES = [
     pytest.param(
         "agent_run", None,
         {"source_kind": "callback", "source_actor": "run-0", "parent_run_id": "run-0", "source_session_id": "seschild01"},
-        "callback of run run-0 from #seschild01", id="callback",
+        "callback of run run-0 from #<seschild01>", id="callback",
     ),
     pytest.param(
         "agent_run", None,
         {"source_kind": "callback", "source_actor": "run-0:terminal:failed", "parent_run_id": "run-0",
          "source_session_id": "seschild01"},
-        "callback of run run-0 from #seschild01", id="terminal-callback",
+        "callback of run run-0 from #<seschild01>", id="terminal-callback",
     ),
     pytest.param(
         "agent_run", None, {"source_kind": "callback", "source_actor": "vault:vrq_1"},
@@ -156,7 +156,7 @@ def test_every_harness_input_names_its_source_on_its_first_line(tmp_path, trigge
             {"source_kind": "agent", "source_actor": "sescaller01", "callback_session_id": "sescaller01",
              "callback_mode": "failure"},
             "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
-            "not for progress. Open with which of the three it is. Report to #sescaller01 with "
+            "not for progress. Open with which of the three it is. Report to #<sescaller01> with "
             "`vibe agent run --session-id sescaller01 --message ...`.",
             id="session-sender",
         ),
@@ -208,7 +208,7 @@ def test_harness_hint_omits_reverse_dispatch_report_target():
     }
     assert harness_hint(spec, receiver="sesreceiver01") == (
         "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
-        "not for progress. Open with which of the three it is. Report to #sescaller01 with "
+        "not for progress. Open with which of the three it is. Report to #<sescaller01> with "
         "`vibe agent run --session-id sescaller01 --message ...`."
     )
     spec["suppress_report_hint"] = True

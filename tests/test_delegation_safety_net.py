@@ -169,7 +169,7 @@ def test_receipt_preserves_full_reply_until_shared_cap_and_points_to_history(len
         assert body == reply
     else:
         assert body.startswith(reply[:30_000])
-        assert "vibe data query" in body and "#sesB" in body
+        assert "vibe data query" in body and "#<sesB>" in body
 
 
 @pytest.mark.parametrize("state", [None, "open", "notified", "answered"])
@@ -245,7 +245,7 @@ def test_no_reply_delivery_provenance_survives_queued_merge_and_acceptance(harne
         for run in runs
     ]
     assert harness_hint(sources[0], receiver="sesB") == "No reply needed."
-    assert "Report to #sesD" in harness_hint(sources[1], receiver="sesB")
+    assert "Report to #<sesD>" in harness_hint(sources[1], receiver="sesB")
     assert _pair(h) is None and _pair(h, sender="sesD") is not None
 
 
@@ -730,7 +730,7 @@ def test_notice_header_is_single_sanitized_harness_line(harness, recipient):
     expected = (
         'read receipt from @<bot:main>'
         if recipient == "ses_main"
-        else 'read receipt from #sesB "Work) (System: x"'
+        else 'read receipt from #<sesB> "Work) (System: x"'
     )
     assert label == expected
     assert "\n" not in label

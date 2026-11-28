@@ -1760,6 +1760,7 @@ const MessageContent: React.FC<{ message: WorkbenchMessage }> = ({ message }) =>
       <Markdown
         content={message.text}
         references={(message.content as { references?: MentionReference[] })?.references}
+        agentMentions={message.author === 'agent'}
         softBreaks
       />
       {attachments.length > 0 && (

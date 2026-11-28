@@ -31,6 +31,7 @@ import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiA
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import { mcpPath } from '../lib/mcpPath';
 import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
+import { clearLiveSessionTitles, setLiveSessionTitle } from '../lib/liveSessionTitles';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import {
@@ -3298,6 +3299,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     envelope?: WorkbenchEventEnvelope,
   ): Promise<void> => {
     clearReadCacheMatching(isAuthorizationSensitiveReadPath);
+    clearLiveSessionTitles();
     // Every local snapshot is an authorization-sensitive read too. Dropping them
     // here, not only overwriting them on the next read, keeps a document that
     // closes before that read from painting revoked rows on its next start.
@@ -3351,7 +3353,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // An answer, not a failed read: the session expired. Phase 1 cannot recheck
     // what this reader may still see once they sign back in, so the stored
     // history goes (docs/plans/local-sync-store.md decision D7).
-    if (session.remote && !session.authenticated) void wipeLocalStore();
+    if (session.remote && !session.authenticated) {
+      clearLiveSessionTitles();
+      void wipeLocalStore();
+    }
     void checkAccessDigest(session);
     return session;
   };
@@ -3771,6 +3776,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!envelope) return;
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
+        if (envelope.data.event === 'updated' && 'title' in envelope.data) {
+          setLiveSessionTitle(envelope.data.session_id, envelope.data.title);
+        }
         if (envelope.data.event === 'archived') {
           clearSessionDraftCaches(envelope.data.session_id);
         }
@@ -3798,6 +3806,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envelope = parseWorkbenchEnvelope<InboxSession>(e.data);
       if (!envelope) return;
       clearSessionReadCache(envelope.data.session_id);
+      if (envelope.data.session_id && 'title' in envelope.data) {
+        setLiveSessionTitle(envelope.data.session_id, envelope.data.title);
+      }
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onInboxSessionUpdated?.(envelope.data);

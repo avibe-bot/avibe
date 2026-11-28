@@ -6777,6 +6777,7 @@ export const MessageRow = memo(function MessageRow({
       // keeps their line breaks exactly as the ordinary user bubble does.
       softBreaks={isUser || isHarness || (row.kind === 'annotation' && row.annotation.direction === 'user')}
       references={(message.content as { references?: MentionReference[] } | null)?.references}
+      agentMentions={agentAuthored}
       // Only the agent's own words may render `$<NAME>` as an interactive secret-input card;
       // user/harness/system bubbles with the marker stay plain text (no false "agent asked"
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation

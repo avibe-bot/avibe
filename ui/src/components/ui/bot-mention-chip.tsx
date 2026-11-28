@@ -18,14 +18,14 @@ export const BotMentionChip: React.FC<{ handle: string; fallback: ReactNode; cla
   const { botForHandle, displayName } = useBots();
   const bot = botForHandle(handle);
   return (
-    <span className={cn(badgeVariants({ variant: 'success' }), 'gap-1 py-px pl-0.5 align-baseline font-medium', className)}>
+    <span className={cn(badgeVariants({ variant: 'success' }), 'max-w-[min(16rem,100%)] gap-1 py-px pl-0.5 align-[-0.18em] font-medium leading-none', className)}>
       {bot ? (
         <>
           <BotAvatar avatar={bot.avatar} name={displayName(bot)} size={16} />
-          <span className="truncate">{t('bots.mentionName', { name: displayName(bot) })}</span>
+          <span className="min-w-0 truncate">{t('bots.mentionName', { name: displayName(bot) })}</span>
         </>
       ) : (
-        <span className="truncate pl-1.5">{fallback}</span>
+        <span className="min-w-0 truncate pl-1.5">{fallback}</span>
       )}
     </span>
   );
