@@ -3,9 +3,11 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
+from scripts import ci_native_pr_tests as native
 from scripts.ci_native_pr_tests import (
     CONTRACTS,
     Owners,
@@ -425,6 +427,78 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     assert seen == [["-only-testing:" + TARGET], ["-only-testing:" + PHONE]][:calls]
     assert (tmp_path / "ios-simulator-stall.txt").exists() == (calls == 2)
     assert ("::warning title=Simulator stall::" in capfd.readouterr().out) == (calls == 2)
+
+
+@pytest.fixture
+def fixture_project(tmp_path, monkeypatch):
+    # Fixed regression graph from the #4397 shape, not a policy about which
+    # files must remain members in the project's next revision.
+    monkeypatch.chdir(tmp_path)
+    project = {'rootObject': 'root', 'objects': {
+        'root': {'isa': 'PBXProject', 'targets': ['target'], 'mainGroup': 'main'},
+        'target': {'isa': 'PBXNativeTarget', 'name': native.FIXTURE, 'buildPhases': ['phase']},
+        'phase': {'isa': 'PBXSourcesBuildPhase', 'files': ['a', 'b']},
+        'a': {'isa': 'PBXBuildFile', 'fileRef': 'bridge'}, 'b': {'isa': 'PBXBuildFile', 'fileRef': 'app'},
+        'main': {'isa': 'PBXGroup', 'children': ['group'], 'sourceTree': '<group>'},
+        'group': {'isa': 'PBXGroup', 'path': 'Avibe', 'children': ['bridge'], 'sourceTree': '<group>'},
+        'bridge': {'isa': 'PBXFileReference', 'sourceTree': '<group>', 'path': 'NativeBridge.swift'},
+        'app': {'isa': 'PBXFileReference', 'sourceTree': 'SOURCE_ROOT', 'path': 'AvibeSheetFixture/SheetFixtureApp.swift'},
+    }}
+    for name in ('ios/Avibe/NativeBridge.swift', 'ios/AvibeSheetFixture/SheetFixtureApp.swift'):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True)
+        path.touch()
+    monkeypatch.setattr(subprocess, 'check_output', lambda *_: json.dumps(project).encode())
+    return project
+
+
+@pytest.mark.parametrize(('paths', 'fixture_builds', 'fixture_runs'), [
+    (['ios/Avibe/NativeBridge.swift'], 1, 0),  # Shared app source, not under the fixture directory (#4397).
+    (['ios/AvibeSheetFixture/SheetFixtureApp.swift', 'ios/Moved.swift'], 1, 0),  # Deleted/renamed old side.
+    (['ios/Avibe/AppModel.swift', 'ios/Other/NativeBridge.swift'], 0, 0),
+    ([native.PROJECT], 1, 0),  # Removed/retargeted membership is not in the new graph.
+    (['ios/Avibe/NativeBridge.swift', 'ios/AvibeSheetFixtureTests/SomeTest.swift'], 1, 1),
+])
+def test_native_fixture_build_vs_execution(monkeypatch, tmp_path, fixture_project, paths, fixture_builds, fixture_runs):
+    for key in ('SIMULATOR_ID', 'NATIVE_PATH_RECEIPT', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
+        monkeypatch.setenv(key, str(tmp_path / key))
+    target = 'AvibeSheetFixtureTests'
+    changes = {target: [object()]} if fixture_runs else {}
+    monkeypatch.setattr(native, 'verified_merge_paths', lambda *_: ('base', paths))
+    monkeypatch.setattr(native, 'changed_sources', lambda *_: changes)
+    commands, enumerated, executed = [], [], []
+    def run(cmd, **kwargs):
+        commands.append(cmd)
+        assert kwargs['check']
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(native, 'verify_membership', lambda *_: None)
+    monkeypatch.setattr(native, 'enumerate_tests', lambda _, t, __: (enumerated.append(t), set()))
+    monkeypatch.setattr(native, 'selection', lambda *_: (['selected'], set()))
+    monkeypatch.setattr(native, 'execute_tests', lambda _, t, *args: executed.append(t) or 0)
+    native.main()
+    assert [cmd[cmd.index('-scheme') + 1] for cmd in commands if cmd[-1] == 'build-for-testing'] == (
+        ['Avibe'] + ['AvibeSheetFixture'] * fixture_builds
+    )
+    assert enumerated == executed == ['AvibeTests'] + [target] * fixture_runs
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Requires the native OpenStep project reader')
+def test_fixture_members_have_an_outer_native_pr_route(monkeypatch):
+    from scripts.ci_targeted_paths import matched_proofs
+
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    members = native.read_fixture_members()
+    if members is None:
+        pytest.skip('Cannot establish outer route coverage; native selector requires a conservative fixture build')
+    # A new shared source outside ios/ must also reach this selector from Linux.
+    for path in members:
+        assert 'ios-app' in matched_proofs(path), path
+
+
+def test_unreadable_fixture_project_builds_instead_of_skipping(monkeypatch):
+    monkeypatch.setattr(subprocess, 'check_output', lambda *_: b'{}')
+    assert native.needs_fixture_build(['ios/Avibe/AppModel.swift'])
 
 
 def test_only_required_identities_must_pass_from_the_right_bundle():

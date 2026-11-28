@@ -370,6 +370,69 @@ def execute_tests(common, target, selectors, required, skip, env, temp, remainin
     return len(methods)
 
 
+PROJECT = 'ios/Avibe.xcodeproj/project.pbxproj'
+FIXTURE = 'AvibeSheetFixture'
+
+
+def fixture_members(project):
+    """Resolve the fixture application's Compile Sources through the project group tree."""
+    objects = project['objects']
+    root = objects[project['rootObject']]
+    target, = (objects[t] for t in root['targets'] if objects[t].get('name') == FIXTURE)
+    if root.get('projectDirPath') or target.get('fileSystemSynchronizedGroups'):
+        raise ValueError('Non-explicit project membership')
+    phase, = (objects[p] for p in target['buildPhases'] if objects[p]['isa'] == 'PBXSourcesBuildPhase')
+    parents = defaultdict(list)
+    for key, obj in objects.items():
+        if obj['isa'] == 'PBXGroup':
+            for child in obj['children']:
+                parents[child].append(key)
+
+    members = set()
+    for entry in phase['files']:
+        ref = objects[entry]['fileRef']
+        if objects[ref]['isa'] != 'PBXFileReference' or not objects[ref]['path']:
+            raise ValueError('Unknown fixture source reference')
+        parts = []
+        seen = set()
+        while True:
+            obj = objects[ref]
+            part = obj.get('path', '')
+            tree = obj['sourceTree']
+            if ref in seen or tree not in ('<group>', 'SOURCE_ROOT') or '$' in part or Path(part).is_absolute():
+                raise ValueError('Unknown fixture source location')
+            parts.append(part)
+            seen.add(ref)
+            if tree == 'SOURCE_ROOT' or ref == root['mainGroup']:
+                break
+            ref, = parents[ref]
+        path = Path(os.path.normpath(os.path.join('ios', *reversed(parts))))
+        if not path.is_file() or path.resolve() != Path.cwd() / path:
+            raise ValueError(f'Missing or indirect fixture source: {path}')
+        members.add(path.as_posix())
+    return members
+
+
+def read_fixture_members():
+    try:
+        project = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', PROJECT]))
+        return fixture_members(project)
+    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        print(f'Cannot establish fixture source membership; building {FIXTURE}: {exc}', flush=True)
+        return None  # Unknown, never an empty inventory.
+
+
+def needs_fixture_build(paths):
+    # A project edit can remove or move an old member; never rely on the new
+    # inventory alone. --no-renames in verified_merge_paths includes both names.
+    if PROJECT in paths or 'scripts/ci_native_pr_tests.py' in paths or any(
+        p.startswith('ios/Avibe.xcodeproj/xcshareddata/xcschemes/') for p in paths
+    ):
+        return True
+    members = read_fixture_members()
+    return members is None or not members.isdisjoint(paths)
+
+
 def main():
     env = os.environ
     base, paths = verified_merge_paths(Path.cwd(), env['NATIVE_PATH_RECEIPT'])
@@ -377,7 +440,8 @@ def main():
     remaining = 3  # Per PR simulator job, not per scheme.
     for target, scheme in SCHEMES.items():
         sources = changes.get(target, [])
-        if not sources and target != "AvibeTests":
+        compile_only = target == 'AvibeSheetFixtureTests' and not sources
+        if compile_only and not needs_fixture_build(paths):
             continue
         temp = Path(env["RUNNER_TEMP"])
         common = [
@@ -397,6 +461,9 @@ def main():
             "CODE_SIGNING_ALLOWED=NO",
         ]
         subprocess.run([*common, "build-for-testing"], check=True)
+        if compile_only:
+            print(f'{scheme}: compiled; no fixture test change selected for execution.', flush=True)
+            continue
         verify_membership(target, sources, temp / "AvibeDerivedData")
         enabled, disabled = enumerate_tests(common, target, temp)
         selectors, required = selection(target, sources, enabled, disabled)
