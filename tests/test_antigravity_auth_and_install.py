@@ -14,6 +14,7 @@ import logging
 import os
 import stat
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -160,7 +161,7 @@ async def test_pipe_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: Fake
 
     flow = await service.start_web_setup("antigravity", force_reset=True, auth_method="oauth-personal")
     assert flow.backend == "antigravity"
-    assert flow.pty_master_fd is None
+    assert not hasattr(flow, "pty_master_fd")
     assert launches and launches[0]["stdin"] == asyncio.subprocess.PIPE
     assert launches[0]["stdout"] == asyncio.subprocess.PIPE
     assert launches[0]["stderr"] == asyncio.subprocess.STDOUT
@@ -171,7 +172,7 @@ async def test_pipe_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: Fake
     assert await service.submit_web_code(flow.flow_id, "  https://antigravity.google/oauth-callback?code=agy-code-7788&state=fixture  ") == {"ok": True}
 
     status = await _poll_flow(service, flow.flow_id, {"success", "failed"})
-    assert status["state"] == "success" and status["authorization_completed"] is True and flow.pty_master_fd is None
+    assert status["state"] == "success" and status["authorization_completed"] is True
     assert (V2Config.load().agents.antigravity.auth_mode, V2Config.load().agents.antigravity.api_key) == ("oauth-personal", None)
     assert any(inv["argv"] == ["acp", "--login", "--disable-telemetry"] for inv in fake_agy.invocations())
     _assert_passive_invocations(fake_agy)
@@ -875,3 +876,279 @@ async def test_login_opener_shims_are_private_and_retired_with_flow(
             replacement_dir = Path(replacement.antigravity_opener_shim_dir)
             await service.cancel_web_flow(replacement.flow_id)
             assert not replacement_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_antigravity_concurrent_probes_coalesce_inflight_and_isolate_returned_dicts(
+    fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent runtime/connection/auth polls share one --version and one acp probe and deep-copy results."""
+    from vibe import internal_client
+
+    monkeypatch.setattr(
+        internal_client,
+        "backend_application",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "state": "applied", "controller_pid": 42}}),
+    )
+    monkeypatch.setattr(api, "_cached_latest", lambda _name: None)
+    fake_agy.set_state(authenticated=True)
+    fake_agy.clear_logs()
+
+    conn, auth, runtime = await asyncio.gather(
+        api.get_backend_connection("antigravity"),
+        api.get_antigravity_auth_async(),
+        api.get_backend_runtime_async("antigravity"),
+    )
+
+    assert (conn["ok"], conn["auth"], conn["ready"], conn["entry_eligible"]) == (True, "subscription", True, True)
+    assert (auth["ok"], auth["authenticated"], auth["active_auth_mode"]) == (True, True, "oauth-personal")
+    assert (runtime["ok"], runtime["installed"], runtime["status"]) == (True, True, "ok")
+
+    version_launches = [inv for inv in fake_agy.invocations() if inv["argv"] == ["--version"]]
+    acp_launches = [inv for inv in fake_agy.invocations() if inv["argv"][:1] == ["acp"]]
+    assert len(version_launches) == 1
+    assert len(acp_launches) == 1
+    assert fake_agy.rpc_methods() == ["initialize", "session/list"]
+
+    # Coalesced callers receive independent deep copies so dict/list mutations never leak.
+    fake_agy.clear_logs()
+    auth_a, auth_b = await asyncio.gather(
+        api.get_antigravity_auth_async(),
+        api.get_antigravity_auth_async(),
+    )
+    assert len([inv for inv in fake_agy.invocations() if inv["argv"][:1] == ["acp"]]) == 1
+    auth_a["authenticated"] = False
+    auth_a["auth_methods"].append("mutated-method")
+    assert auth_b["authenticated"] is True
+    assert "mutated-method" not in auth_b["auth_methods"]
+
+    cli_a, cli_b = await asyncio.gather(
+        api.detect_cli_async(str(fake_agy.binary), "antigravity"),
+        api.detect_cli_async(str(fake_agy.binary), "antigravity"),
+    )
+    cli_a["status"] = "broken"
+    assert cli_b["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_antigravity_inflight_cancellation_preserves_survivor_and_cancels_when_all_leave(
+    fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling one waiter keeps the shared probe alive; cancelling every waiter cancels the probe."""
+    probe_started = asyncio.Event()
+    allow_finish = asyncio.Event()
+    probe_calls = 0
+    probe_cancelled = False
+
+    async def _slow_probe(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal probe_calls, probe_cancelled
+        probe_calls += 1
+        probe_started.set()
+        try:
+            await allow_finish.wait()
+        except asyncio.CancelledError:
+            probe_cancelled = True
+            raise
+        return {
+            "ok": True,
+            "authenticated": True,
+            "credentials_present": True,
+            "uncertain": False,
+            "auth_methods": ["oauth-personal"],
+            "supports_logout": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _slow_probe)
+
+    async def _wait_for_waiters(expected: int) -> None:
+        await probe_started.wait()
+        for _ in range(100):
+            if any(entry.waiter_count == expected for entry in api._ANTIGRAVITY_AUTH_INFLIGHT.values()):
+                return
+            await asyncio.sleep(0.01)
+        pytest.fail(f"Expected {expected} waiters in _ANTIGRAVITY_AUTH_INFLIGHT")
+
+    # Part 1: cancelling one caller lets the surviving caller finish with the shared probe.
+    t1 = asyncio.create_task(api.get_antigravity_auth_async())
+    t2 = asyncio.create_task(api.get_antigravity_auth_async())
+    await _wait_for_waiters(2)
+    t1.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t1
+    assert probe_cancelled is False
+    allow_finish.set()
+    survivor = await t2
+    assert (survivor["ok"], survivor["authenticated"], survivor["active_auth_mode"]) == (True, True, "oauth-personal")
+    assert probe_calls == 1
+    assert not api._ANTIGRAVITY_AUTH_INFLIGHT
+
+    # Part 2: cancelling all concurrent callers cancels the shared probe cleanly.
+    probe_started.clear()
+    allow_finish.clear()
+    probe_cancelled = False
+    t3 = asyncio.create_task(api.get_antigravity_auth_async())
+    t4 = asyncio.create_task(api.get_antigravity_auth_async())
+    await _wait_for_waiters(2)
+    t3.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t3
+    assert probe_cancelled is False
+    t4.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t4
+    assert probe_cancelled is True
+    assert not api._ANTIGRAVITY_AUTH_INFLIGHT
+
+
+@pytest.mark.asyncio
+async def test_antigravity_no_post_completion_cache_and_epoch_bump_forces_fresh_probe(
+    fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sequential reads never serve stale cached state, and epoch bumps split in-flight probes."""
+    # Part 1: sequential calls observe external auth transitions immediately (no TTL cache).
+    fake_agy.set_state(authenticated=False)
+    before = await api.get_antigravity_auth_async()
+    assert (before["authenticated"], before["active_auth_mode"]) == (False, "none")
+
+    fake_agy.set_state(authenticated=True)
+    after = await api.get_antigravity_auth_async()
+    assert (after["authenticated"], after["active_auth_mode"]) == (True, "oauth-personal")
+
+    # Auth mutations persist a fresh generation marker.
+    monkeypatch.setattr(api, "restart_backend", lambda *_a, **_kw: {"ok": True})
+    gen_0 = api._read_antigravity_auth_generation()
+    assert api.save_antigravity_auth({"auth_mode": "gemini-api-key", "api_key": "AIza-epoch-test"})["ok"] is True
+    gen_1 = api._read_antigravity_auth_generation()
+    assert gen_1 and gen_1 != gen_0
+    assert api.remove_backend_api_key("antigravity")["ok"] is True
+    gen_2 = api._read_antigravity_auth_generation()
+    assert gen_2 and gen_2 != gen_1
+    service = _make_auth_service()
+    await service._persist_backend_auth_mode("antigravity", "oauth-personal")
+    gen_3 = api._read_antigravity_auth_generation()
+    assert gen_3 and gen_3 != gen_2
+    assert (await service.remove_web_auth("antigravity"))["ok"] is True
+    gen_4 = api._read_antigravity_auth_generation()
+    assert gen_4 and gen_4 != gen_3
+    assert len({gen_1, gen_2, gen_3, gen_4}) == 4
+
+    # Part 2: bumping epoch while a slow probe is in flight forces a concurrent caller to run fresh.
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    probe_calls = 0
+
+    async def _probe_with_cutover(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal probe_calls
+        probe_calls += 1
+        call_num = probe_calls
+        if call_num == 1:
+            first_started.set()
+            await release_first.wait()
+            return {
+                "ok": True,
+                "authenticated": False,
+                "credentials_present": False,
+                "uncertain": False,
+                "auth_methods": ["oauth-personal"],
+                "supports_logout": True,
+                "error": "not_logged_in",
+            }
+        return {
+            "ok": True,
+            "authenticated": True,
+            "credentials_present": True,
+            "uncertain": False,
+            "auth_methods": ["oauth-personal"],
+            "supports_logout": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _probe_with_cutover)
+
+    slow_task = asyncio.create_task(api.get_antigravity_auth_async())
+    await first_started.wait()
+    api.bump_antigravity_auth_epoch()
+
+    fresh = await api.get_antigravity_auth_async()
+    assert (fresh["authenticated"], fresh["active_auth_mode"]) == (True, "oauth-personal")
+    assert probe_calls == 2
+
+    release_first.set()
+    stale = await slow_task
+    assert (stale["authenticated"], stale["active_auth_mode"]) == (False, "none")
+    assert not api._ANTIGRAVITY_AUTH_INFLIGHT
+
+
+@pytest.mark.asyncio
+async def test_antigravity_cross_process_generation_marker_splits_inflight_probe(
+    fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IM login in the controller process invalidates an in-flight UI probe via the shared disk marker."""
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    probe_calls = 0
+
+    async def _probe_with_cross_process_login(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal probe_calls
+        probe_calls += 1
+        call_num = probe_calls
+        if call_num == 1:
+            first_started.set()
+            await release_first.wait()
+            return {
+                "ok": True,
+                "authenticated": False,
+                "credentials_present": False,
+                "uncertain": False,
+                "auth_methods": ["oauth-personal"],
+                "supports_logout": True,
+                "error": "not_logged_in",
+            }
+        return {
+            "ok": True,
+            "authenticated": True,
+            "credentials_present": True,
+            "uncertain": False,
+            "auth_methods": ["oauth-personal"],
+            "supports_logout": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _probe_with_cross_process_login)
+
+    # Start a slow passive-auth probe in the UI process before IM login finishes.
+    ui_slow_task = asyncio.create_task(api.get_antigravity_auth_async())
+    await first_started.wait()
+    pre_login_generation = api._read_antigravity_auth_generation()
+
+    # Simulate IM login completing in the separate controller process while keeping
+    # the exact same configured auth_mode ("oauth-personal").
+    service = _make_auth_service()
+    await service._persist_backend_auth_mode("antigravity", "oauth-personal")
+    post_login_generation = api._read_antigravity_auth_generation()
+    assert post_login_generation
+    assert post_login_generation != pre_login_generation
+
+    fresh = await api.get_antigravity_auth_async()
+    assert (fresh["authenticated"], fresh["active_auth_mode"]) == (True, "oauth-personal")
+    assert probe_calls == 2
+
+    release_first.set()
+    stale = await ui_slow_task
+    assert (stale["authenticated"], stale["active_auth_mode"]) == (False, "none")
+    assert not api._ANTIGRAVITY_AUTH_INFLIGHT
+
+
+def test_bump_antigravity_auth_epoch_logs_warning_on_import_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ImportError while importing vibe.api logs a warning instead of failing silently or raising."""
+    monkeypatch.setitem(sys.modules, "vibe.api", None)
+    with caplog.at_level(logging.WARNING, logger=auth_mod.logger.name):
+        AgentAuthService._bump_antigravity_auth_epoch()
+    assert any(
+        record.levelno == logging.WARNING
+        and "Failed to import bump_antigravity_auth_epoch" in record.getMessage()
+        for record in caplog.records
+    )
