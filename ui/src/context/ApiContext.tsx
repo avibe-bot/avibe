@@ -37,6 +37,7 @@ import {
   nativeDirectBaselineState,
   nativeDirectHandover,
   nativeDirectHandoverAvailable,
+  nativeDirectPageHidden,
   nativeDirectPathKind,
   nativeDirectPathReported,
   nativeDirectPreference,
@@ -3919,9 +3920,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // EventSource does not expose a failed response's status or JSON body.
       // Probe through apiFetch, then inspect the successful /api/session form;
       // both 401s and a 200 `authenticated: false` enter the shared login recovery.
-      void apiFetch('/api/session', { cache: 'no-store' })
-        .then(recoverRemoteAuthFromSessionProbe)
-        .catch(() => undefined);
+      //
+      // Not from a hidden page in a shell with a direct path
+      // (`nativeDirectPageHidden`): the request would take the page off that
+      // path. Nothing is lost by waiting: no stream opens while the page is
+      // hidden, and the one the return opens reads the session itself and
+      // fails into this probe.
+      if (!nativeDirectPageHidden()) {
+        void apiFetch('/api/session', { cache: 'no-store' })
+          .then(recoverRemoteAuthFromSessionProbe)
+          .catch(() => undefined);
+      }
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
     };
   }
