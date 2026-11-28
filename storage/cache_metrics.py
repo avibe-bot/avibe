@@ -39,7 +39,11 @@ def upload_receipts(cache_raw: Any) -> str | None:
                 continue
         elif not isinstance(source, str) or len(source) > 4096 or not re.fullmatch(r"src_[a-z0-9]{8,}", source):
             continue
-        valid.append({"body_bytes": size, "source_id": source, "source_kind": kind})
+        # Time is independent of the byte/Source evidence. A missing or malformed clock must
+        # not discard an otherwise valid upload, nor place it in a day using the row timestamp.
+        sent_at = item.get("sent_at_us")
+        valid.append({"body_bytes": size, "source_id": source, "source_kind": kind,
+                      "sent_at_us": sent_at if type(sent_at) is int and 0 <= sent_at < 2**63 else None})
     return json.dumps(valid, separators=(",", ":")) if valid or not raw else None
 
 

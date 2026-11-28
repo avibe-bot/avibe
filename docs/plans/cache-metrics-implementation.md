@@ -31,4 +31,20 @@ FROM request_uploads AS r, json_each(r.successful_wires) AS w
 GROUP BY kind, source;
 ```
 
+For the install-anchored **72-hour per-Source total**, supply the known installation instant as UTC microseconds since the Unix epoch. The example uses `first_day = 0` and `days = 3`; no daily split is needed. To inspect one day, use its zero-based index and `days = 1`. Each successful POST carries its own `sent_at_us`, sampled at dispatch. Neither a later response, transcript commit nor delayed audit changes its day. The interval is `[start, end)`; these are elapsed 24-hour windows, not local calendar days. Missing or invalid receipt times are NULL and remain in all-time totals only. Do not substitute `request_uploads.at` or infer an installation time from the first receipt.
+
+```sql
+WITH anchor(install_us, first_day, days) AS (VALUES (1790861400123456, 0, 3)),
+window(start_us, end_us) AS (
+  SELECT install_us + first_day * 86400000000, install_us + (first_day + days) * 86400000000 FROM anchor
+)
+SELECT json_extract(w.value, '$.source_kind') AS kind,
+       json_extract(w.value, '$.source_id') AS source,
+       count(*) AS completed_posts, sum(json_extract(w.value, '$.body_bytes')) AS uploaded_bytes
+FROM request_uploads AS r, json_each(r.successful_wires) AS w, window
+WHERE json_extract(w.value, '$.sent_at_us') >= start_us
+  AND json_extract(w.value, '$.sent_at_us') < end_us
+GROUP BY kind, source;
+```
+
 Tests at the accounting boundary cover warm/cold request starts (including a long response), route switches, retries, restart/fork, checkpoint and result-clearing causes, and TTL decompositions without double counting. Store contract tests cover optional cache round trips and indexed session-scoped audit recovery. Adapter tests cover prompt events/no-op previews. Isolated database/CLI tests cover every classification, timestamp-derived legacy rows, unknown rates, what-if arithmetic and freshness summaries. Existing C-9, wire conversion, snapshot, fork and shared-prompt tests guard intentional non-changes.

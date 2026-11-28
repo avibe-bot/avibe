@@ -3,6 +3,7 @@
 import asyncio
 import json
 from dataclasses import replace
+from unittest.mock import ANY
 
 import httpx
 import pytest
@@ -39,7 +40,8 @@ async def test_successful_wire_counts_exact_http_bytes_and_actual_serving_source
     headers = {"x-avibe-served-hop": json.dumps(hop), "x-avibe-source-kind": kind}
     sent, events = await _run(req, lambda _: httpx.Response(200, text=body, headers=headers), None, gateway=True)
     assert len(sent) == 1 and isinstance(events[-1], Done)
-    assert receipts == [{"body_bytes": len(sent[0].content), "source_id": source, "source_kind": kind}]
+    assert type(receipts[0]['sent_at_us']) is int
+    assert receipts == [{"body_bytes": len(sent[0].content), "source_id": source, "source_kind": kind, 'sent_at_us': ANY}]
     receipts.clear()
     _, errors = await _run(req, lambda _: httpx.Response(200, text="data: {"), None, gateway=True)
     assert isinstance(errors[-1], ProviderError) and not receipts
@@ -50,7 +52,7 @@ async def test_untrusted_attribution_never_defaults_to_the_requested_route(repor
     req = replace(_direct_request("openai_chat"), successful_wires=[])
     headers = {**_served(source="src_served0001", reported=reported), "x-avibe-source-kind": kind}
     sent, _ = await _run(req, lambda _: httpx.Response(200, text=CHAT, headers=headers), None, gateway=True)
-    assert req.successful_wires == [{"body_bytes": len(sent[0].content), "source_id": expected, "source_kind": "unknown"}]
+    assert req.successful_wires == [{"body_bytes": len(sent[0].content), "source_id": expected, "source_kind": "unknown", 'sent_at_us': ANY}]
 
 
 async def test_injected_resolution_cannot_attribute_another_sources_kind():
@@ -72,7 +74,7 @@ async def test_injected_resolution_cannot_attribute_another_sources_kind():
         adapter = OpenAIChatAdapter(client, gateway=True, served_hop_resolver=resolver)
         events = [e async for e in adapter.stream(req, CancelToken())]
     assert isinstance(events[-1], Done)
-    assert req.successful_wires == [{'source_id': 'src_override01', 'source_kind': 'unknown', 'body_bytes': len(sent[0].content)}]
+    assert req.successful_wires == [{'source_id': 'src_override01', 'source_kind': 'unknown', 'sent_at_us': ANY, 'body_bytes': len(sent[0].content)}]
 
 
 async def test_stop_before_send_leaves_no_receipt():

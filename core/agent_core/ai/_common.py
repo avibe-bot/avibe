@@ -1976,6 +1976,8 @@ async def drive_sse_stream(
                 body_bytes = len(request.content)
                 if on_send is not None:
                     on_send(body_bytes)
+                # Wall clock for reporting only; never use it for deadlines or retry decisions.
+                sent_at_us = time.time_ns() // 1000 if successful_wires is not None else None
                 opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
                     opening,
@@ -2077,7 +2079,7 @@ async def drive_sse_stream(
                                 if reported is None or reported.source_id != source:
                                     kind = None
                             receipt = {
-                                "body_bytes": body_bytes, "source_id": source,
+                                "body_bytes": body_bytes, "sent_at_us": sent_at_us, "source_id": source,
                                 "source_kind": kind if kind in ("official_api_key", "relay_key", "subscription") else "unknown",
                             }
                         async for item in translate(iter_sse_events(response, cancel, capture=capture)):

@@ -130,7 +130,7 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
         if row['request_id'] in {'m-scalar', 'm-invalid'}:
             assert row['successful_wires'] is None
         else:
-            assert json.loads(row['successful_wires']) == cache['successful_wires']
+            assert json.loads(row['successful_wires']) == [{**w, 'sent_at_us': None} for w in cache['successful_wires']]
     assert by_id["m-observed"]["idle_s"] == 10
     assert by_id["m-observed"]["classification"] == "hit"
     assert by_id["m-observed"]["data_basis"] == "observed"
@@ -178,6 +178,44 @@ def test_receipt_only_uploads_do_not_change_report_or_legacy_clock(state_db):
                            {'body_bytes': 8, 'source_kind': 'unknown', 'source_id': None}]}, session='ses-cache')
     assert summary() == expected
     assert len(_documented_upload_totals(state_db)) == 3
+
+
+@pytest.mark.parametrize('after_cutoff_us', [0, 17], ids=['followup-at-cutoff', 'first-completes-after-cutoff'])
+async def test_install_day_uses_each_dispatch_not_terminal_or_row_time(state_db, monkeypatch, after_cutoff_us):
+    import httpx
+    from core.agent_core.ai import _common
+    from dataclasses import replace
+    from tests.agent_core.ai.test_hosted_pause_turn import _request, _stream, _response as stream_body, _served, _text
+
+    install_us, day_us = 1790861400123456, 86_400_000_000
+    cutoff = install_us + day_us
+    clock = [cutoff - 1]
+    monkeypatch.setattr(_common.time, 'time_ns', lambda: clock[0] * 1000)
+    req = replace(_request(), successful_wires=[])
+
+    def answer(n):
+        # Transport sees the POST first; reading the response and later persistence are not its send time.
+        clock[0] = cutoff + after_cutoff_us if n == 1 else cutoff + day_us + 9
+        return httpx.Response(200, headers=_served(), text=stream_body(_text('hello'),
+                              stop_reason='pause_turn' if n == 1 else 'end_turn', input_tokens=1, output_tokens=1))
+
+    sent, _ = await _stream(answer, req)
+    assert [w.get('sent_at_us') for w in req.successful_wires] == [cutoff - 1, cutoff + after_cutoff_us]
+    with sqlite3.connect(state_db) as conn:
+        _session(conn)
+        _response(conn, 'late-row', '2026-12-31T00:00:00Z', cache={'successful_wires': req.successful_wires}, usage=None, context_seq=1)
+        untimed = dict(req.successful_wires[0], body_bytes=10)
+        untimed.pop('sent_at_us')
+        _audit_fixture(conn, 'legacy', 'bot_handle_request', {'successful_wires': [untimed, dict(untimed, sent_at_us='yesterday')]})
+    doc = Path(__file__).resolve().parents[1] / 'docs/plans/cache-metrics-implementation.md'
+    sql = doc.read_text().split('## Successful request uploads')[1].split('```sql\n')[2].split('```')[0]
+    rows = run_read_only_query(sql, db_path=state_db, page_request=None, user_context=instance_owner_context()).rows
+    assert [(r['completed_posts'], r['uploaded_bytes']) for r in rows] == [(2, sum(len(w.content) for w in sent))]
+    for day, wire in enumerate(sent):
+        statement = sql.replace('VALUES (1790861400123456, 0, 3)', f'VALUES ({install_us}, {day}, 1)')
+        rows = run_read_only_query(statement, db_path=state_db, page_request=None, user_context=instance_owner_context()).rows
+        assert [(r['completed_posts'], r['uploaded_bytes']) for r in rows] == [(1, len(wire.content))]
+    assert sum(r['uploaded_bytes'] for r in _documented_upload_totals(state_db)) == sum(len(w.content) for w in sent) + 20
 
 
 def _documented_upload_totals(db):
@@ -240,8 +278,11 @@ async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, mon
         rows = run_read_only_query('select session_id, purpose, successful_wires from request_uploads', db_path=state_db,
                                    page_request=PageRequest(), user_context=instance_owner_context()).rows
         assert len(sent) == 1
+        if rows:
+            assert type(json.loads(rows[0]['successful_wires'])[0]['sent_at_us']) is int
+        from unittest.mock import ANY
         assert [(r['session_id'], r['purpose'], json.loads(r['successful_wires'])) for r in rows] == ([] if ending == 'partial' else [
-            (None, 'bot_handle', [{'body_bytes': sent[0], 'source_id': 'src_served0001', 'source_kind': 'relay_key'}])])
+            (None, 'bot_handle', [{'body_bytes': sent[0], 'source_id': 'src_served0001', 'source_kind': 'relay_key', 'sent_at_us': ANY}])])
     finally:
         engine.dispose()
 
