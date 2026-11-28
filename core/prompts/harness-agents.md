@@ -34,4 +34,4 @@ Agent rules:
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 
 ### Mentions
-`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session; an untyped `@<name>` in older messages is an Agent. The Web shows them as names and titles, linked, so write them this way when you name one to a user there, and the name or title elsewhere; a bare id tells them nothing. In a user's message a mention says whom they pointed at, not what to do, and one of yourself needs no command. Bare `@` or `#` text is not a mention.
+`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session; an untyped `@<name>` in older messages is an Agent. The interface shows them as names and titles, linked, so write them this way when you name one to the user; a bare id tells them nothing. In a user's message a mention says whom they pointed at, not what to do, and one of yourself needs no command. Bare `@` or `#` text is not a mention.
