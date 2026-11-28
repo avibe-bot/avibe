@@ -1,11 +1,15 @@
 # Mobile App onboarding — A / Cloud letter
 
-Status: **approved** by the owner on 2026-11-05 at 23:56 Asia/Shanghai as the
-implementation contract. The owner selected A (云间来信 / Cloud letter) at 21:39
-and approved the final design and merge at 23:56. This is the complete design-only
-handoff for PR #3252. B/C studies and the previous ordinary compositions are
-removed. Unchanged shipped component references remain separate. Product
-implementation is a subsequent task; approval does not verify runtime behavior.
+Status: **shipped** (approved by the owner on 2026-11-05 at 23:56 Asia/Shanghai;
+implemented in `ui/src/mobile/MobileOnboarding.tsx`, `ui/src/sign-in/screens.tsx`,
+and `ui/src/mobile/LicensesPage.tsx`). The owner selected A (云间来信 / Cloud letter)
+at 21:39 and approved the final design and merge at 23:56. All web-rendered
+onboarding, sign-in, empty, account, and licenses frames render the shipped
+product components with status `shipped`; the former proposal kit
+`ui/design/kit/mobile-app.tsx` has been retired and deleted. Only native iOS
+SwiftUI/UIKit stand-ins (`native/*` and the native sheet/gesture/failure states
+in `switcher/*`) remain in `ui/design/kit/mobile-instance-sheet.tsx` with status
+`approved`. Unchanged shipped component references remain in `alignment`.
 
 ## Change contract
 
@@ -78,33 +82,37 @@ flow, and `account/long-email` verifies the account wrapping policy.
 | --- | --- |
 | `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, `providers-row`, `providers-row-error` |
 | `empty` | `default` (desktop + CLI choices), `cli`, `new-account` |
-| `account` | `default`, `no-instance`, `long-email` |
-| `native` | `instance-error`, `window-topbar` |
+| `account` | `default`, `no-instance`, `long-email`, `data` |
+| `native` — iOS native stand-ins (`approved`) | `instance-error`, `window-topbar` |
 | `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |
 
-**50 approved frames / 100 theme captures**, plus 2 shipped references / 4
-captures. The instance list after sign-in is the instance sheet's full page
-(`switcher/first-run`). Frames normally use 390 × 844. Long email
-and long instance names also use 375 × 667. `compact` is a fixture for the small
-OTP composition: smaller illustration and tighter header spacing make room for
-the full email; implementation adapts to available height and keyboard insets.
-Scrolling owns content that exceeds the viewport; it never conceals email text.
+All web-rendered frames above (`welcome`, `empty`, `account`, plus `passkey`,
+`two-factor`, `password`, and `licenses` below) have status `shipped` and render
+the shipped components from `ui/src/mobile/MobileOnboarding.tsx` and
+`ui/src/sign-in/screens.tsx`; `native/*` remain `approved` native iOS stand-ins.
+The instance list after sign-in is the instance sheet's full page
+(`switcher/first-run`). Frames normally use 390 × 844; long email and long
+instance names also use 375 × 667, and `password/keyboard` uses 375 × 407 with
+password focus revealing the form above the keyboard. Scrolling owns content
+that exceeds the viewport; it never conceals email text.
 
-## Kit, primitives and token sources
+## Shipped views, native stand-ins and token sources
 
-All A drafts live in `ui/design/kit/mobile-app.tsx`; no competing direction kit.
+The former `ui/design/kit/mobile-app.tsx` proposal copy has been deleted (#3445).
+Web-rendered frames draw the shipped views exported by
+`ui/src/mobile/MobileOnboarding.tsx` (wrapping `ui/src/sign-in/screens.tsx` and
+`ui/src/mobile/LicensesPage.tsx`); native-only iOS stand-ins live in
+`ui/design/kit/mobile-instance-sheet.tsx`.
 
-| Composition | Purpose and shipped reuse | Existing values / source |
+| View / stand-in | Source | Purpose and shipped reuse |
 | --- | --- | --- |
-| `CloudScreen`, `Brand` | PhoneScreen without instance-only tabs; brand/back/account actions | `--gradient-wizard-platforms`; `p-6`, `max-w-xl`, `h-11`, logo asset, shipped Button |
-| `WelcomePage` | Mascot-led welcome with a friendly invitation | Existing `assets/mascot/cloud-tuanzi-v2.png` at `size-52` inside `size-64`; `shadow-mint-card-lg`, `mint`, `surface`, `rounded-full` |
-| `WelcomeIntro`, `CodeInput` | Email form and six-cell OTP state display | Existing `vibey-message.png`; Input/Label; `rounded-3xl`, `p-6`, `shadow-mint-card`; cells `grid-cols-6 gap-2 aspect-square rounded-2xl text-2xl`; ring uses `mint`, invalid uses `destructive` / `destructive-ink` |
-| `Primary` | Full-width primary action | Brand Button, `size=lg`, `rounded-full`, `shadow-mint-card-sm` |
-| `InstanceRow` (inside `AccountPage`) | Identity, host, ownership, availability and current selection | Button composition; shipped Badge success/secondary/info/outline; `p-5`, `gap-3`, `size-11`, `rounded-3xl`, `border-border`, `bg-surface/80`, `shadow-mint-card-sm` |
-| `EmptyInstancesPage` | Desktop and CLI installation/pairing guidance | Existing icons, raised surface, Button, `surface-2`, `font-mono` only for actual commands |
-| `AccountPage` | Actual account/sign-out component, wrapping override, current instance, full-row switch | MoreAccountSection, InstanceRow, outline Button, existing radius/shadow tokens |
-| `NativeInstanceError` | Instance failure and retry/switch recovery | Existing AlertTriangle, `gold-ink`, raised identity card, brand/outline Button |
-| `NativeWindowTopBar` | Child-window browser actions | Actual MobileAppHeader, compact ghost Buttons; the document underneath is illustrative |
+| `WelcomeScreen` | `ui/src/mobile/MobileOnboarding.tsx` | Mascot-led welcome (`SignInWelcome` + `SignInStart`) with email and optional provider/passkey entries |
+| `EmailEntryScreen`, `CodeEntryScreen` | `ui/src/mobile/MobileOnboarding.tsx` (`EmailEntryView`, `CodeEntry` in `ui/src/sign-in/screens.tsx`) | Email/password form and six-cell OTP verification in `MobileSignInFrame` |
+| `SecondFactorScreen`, `PasskeySignInScreen` | `ui/src/mobile/MobileOnboarding.tsx` (`SecondFactor`, `PasskeySignIn` in `ui/src/sign-in/screens.tsx`) | Two-step verification (passkey, TOTP, recovery, setup) and primary passkey sign-in |
+| `ForgotPasswordScreen`, `WeakPasswordNoticeScreen` | `ui/src/mobile/MobileOnboarding.tsx` (`ForgotPassword`, `WeakPasswordNotice` in `ui/src/sign-in/screens.tsx`) | Forgot-password handoff and one-time weak-password notice |
+| `EmptyInstancesScreen` | `ui/src/mobile/MobileOnboarding.tsx` | Desktop and CLI installation/pairing guidance, plus new-account sign-out hint |
+| `AccountPage`, `AccountDataPage`, `LicensesPage` | `ui/src/mobile/MobileOnboarding.tsx`, `ui/src/mobile/LicensesPage.tsx` | Full-page Account (with wrapped email, current instance, switch action, Account and data, About) and Open-source licenses |
+| `NativeInstanceError`, `NativeWindowTopBar` | `ui/design/kit/mobile-instance-sheet.tsx` | Native iOS stand-ins for SwiftUI/UIKit failure screen and child-window top bar (no web component) |
 
 The old-runtime account fallback is an implementation compatibility state, not
 a new design-frame variant. It reuses the Account avatar and
@@ -209,14 +217,15 @@ production services, accounts, credentials or auth configuration were changed.
 The prior read-only backend source assessment was pinned to `88a2592`; it is
 historical flow evidence, not a live authentication test.
 
-## Two-step verification — approved
+## Two-step verification — shipped
 
-Status: **approved** by the owner on 2026-11-07 at 21:39 Asia/Shanghai, with the
-three decisions in the plan. Plan: `docs/plans/2026-11-07-mobile-two-factor.md`.
-After the email code, an account with avibe.bot two-step verification confirms
-it is the account owner. The page uses the same A composition (`CloudScreen`,
-`Brand`, `Primary`, the six-cell `CodeInput`) and adds no tokens or assets.
-`SecondFactorPage` lives in `ui/design/kit/mobile-app.tsx`.
+Status: **shipped** (approved by the owner on 2026-11-07 at 21:39 Asia/Shanghai,
+with the three decisions in the plan; implemented in `ui/src/sign-in/screens.tsx`
+and rendered via `SecondFactorScreen` in `ui/src/mobile/MobileOnboarding.tsx`).
+Plan: `docs/plans/2026-11-07-mobile-two-factor.md`. After the email code, an
+account with avibe.bot two-step verification confirms it is the account owner.
+The page uses the same A composition (`CloudScreen`, `Brand`, `Primary`,
+`OtpCells`) and adds no tokens or assets.
 
 | File / surface | States |
 | --- | --- |
@@ -232,12 +241,15 @@ verification opens avibe.bot and returns to "I've turned it on · Continue".
 The system passkey sheet is native and is not drawn; `passkey-waiting` is the
 page behind it.
 
-## Password sign-in — approved
+## Password sign-in — shipped
 
-Status: **approved** by the owner on 2026-11-08 at 12:46 Asia/Shanghai, with
-the four decisions below. On 2026-11-09 at 01:51 Asia/Shanghai the owner
-replaced decision 2 (identifier-first) with one form: "Sign in with password"
-turns the email step into email + password at once. Plan:
+Status: **shipped** (approved by the owner on 2026-11-08 at 12:46 Asia/Shanghai,
+with the four decisions below; implemented in `ui/src/sign-in/screens.tsx` and
+rendered via `EmailEntryScreen`, `ForgotPasswordScreen`, and
+`WeakPasswordNoticeScreen` in `ui/src/mobile/MobileOnboarding.tsx`). On
+2026-11-09 at 01:51 Asia/Shanghai the owner replaced decision 2
+(identifier-first) with one form: "Sign in with password" turns the email step
+into email + password at once. Plan:
 `docs/plans/2026-11-08-mobile-password-sign-in.md`. An account that set a
 password on avibe.bot (Account security → Set or change password) can sign in
 with it instead of the email code. The email code stays the primary path and
@@ -245,11 +257,7 @@ the only way to create an account in the app. After either first factor, an
 account with two-step verification continues to `two-factor/*`; everyone else
 reaches the instance picker. The pages reuse the A composition (`CloudScreen`,
 `Brand`, `Primary`, the raised tile and card, the email card) and add no
-tokens or assets. `PasswordPage` (the email step in password mode),
-`ForgotPasswordPage` and `WeakPasswordNotice` live in
-`ui/design/kit/mobile-app.tsx`; the email step in code mode is `WelcomeIntro`
-with the `password` fixture flag, so the approved `welcome/*` frames are
-unchanged.
+tokens or assets.
 
 | File / surface | States |
 | --- | --- |
@@ -350,28 +358,28 @@ password capture. A screenshot proves layout only. Keychain suggestions and
 saving, keyboard insets, focus and announcements, and real Supabase answers
 belong to the implementation PR and a device check.
 
-## Open-source licenses — approved
+## Open-source licenses — shipped
 
-Status: **approved** by 产品伙伴 on 2026-11-11 at 19:38 Asia/Shanghai, as the
-implementation contract (the owner delegated this page's review; no further
-owner review). A build of the App that contains iroh ships several hundred
-open-source components, and the MPL-2.0 ones (attohttpc and the uniffi family)
-need a visible offer of their source code (`packaging/iroh-apple`, #3551). The
-App's own surface is Account, so its new About section opens 开源许可 /
-Open-source licenses. The page reuses the A composition (`CloudScreen`,
-`Brand`, `PageTitle`, the raised card) and adds no tokens or assets.
-The entry and page body are the shipped `AboutSection` and `LicensesContent`
-(`ui/src/mobile/LicensesPage.tsx`); `LicensesScreen` and Account's `licenses`
-flag in `ui/design/kit/mobile-app.tsx` place them in the A screen. Above
-About, Account has one row, 账号与数据 / Account and data, which pushes a page
-(`switcher/account-data`) holding 隐私政策 / Privacy policy and, as one plain
-red line at the very bottom, 删除账号 / Delete account (owner, 2026-11-17:
-not on Account's first screen; red text only, no card, icon or hint). Both open avibe.bot
-pages inside the App (`app.openPage`); deletion uses the App's sign-in and
-returns to Welcome once the session reads signed out. The App
-reads `licenses.json`, generated by `ios/scripts/app_licenses.py` from the
-notices of the JavaScript the bundle ships and, once the iroh pin is published,
-the published native notices; the frame fixture is illustrative.
+Status: **shipped** (approved by 产品伙伴 on 2026-11-11 at 19:38 Asia/Shanghai;
+implemented in `ui/src/mobile/MobileOnboarding.tsx` and
+`ui/src/mobile/LicensesPage.tsx`). A build of the App that contains iroh ships
+several hundred open-source components, and the MPL-2.0 ones (attohttpc and the
+uniffi family) need a visible offer of their source code
+(`packaging/iroh-apple`, #3551). The App's own surface is Account, so its new
+About section opens 开源许可 / Open-source licenses. The page reuses the A
+composition (`CloudScreen`, `Brand`, `PageTitle`, the raised card) and adds no
+tokens or assets. The frames render the shipped `AccountPage` (with `licenses`)
+and `LicensesPage` (`AboutSection` and `LicensesContent` from
+`ui/src/mobile/LicensesPage.tsx`). Above About, Account has one row, 账号与数据 /
+Account and data, which pushes a page (`switcher/account-data`, `account/data`)
+holding 隐私政策 / Privacy policy and, as one plain red line at the very bottom,
+删除账号 / Delete account (owner, 2026-11-17: not on Account's first screen; red
+text only, no card, icon or hint). Both open avibe.bot pages inside the App
+(`app.openPage`); deletion uses the App's sign-in and returns to Welcome once
+the session reads signed out. The App reads `licenses.json`, generated by
+`ios/scripts/app_licenses.py` from the notices of the JavaScript the bundle
+ships and, once the iroh pin is published, the published native notices; the
+frame fixture is illustrative.
 
 | File / surface | States |
 | --- | --- |

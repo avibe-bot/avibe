@@ -70,7 +70,15 @@ import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/s
 import { pageErrorKey, type SignInErrorKey } from '@/sign-in/errors';
 import { SignInWelcome } from '@/sign-in/welcome';
 import { useOperationOwner, type OperationToken } from '@/sign-in/operationOwner';
-import { PasskeySignIn, SignInStart, WeakPasswordNotice } from '@/sign-in/screens';
+import {
+  CodeEntry,
+  EmailEntryView,
+  ForgotPassword,
+  PasskeySignIn,
+  SecondFactor,
+  SignInStart,
+  WeakPasswordNotice,
+} from '@/sign-in/screens';
 import type { SignInMethods, SignInProvider, WeakPasswordReason } from '@/sign-in/types';
 import { type SignInBusyAction, useSignInFlow } from '@/sign-in/useSignInFlow';
 import { mobileSignInAdapter, mobileSignInStep } from './signInAdapter';
@@ -329,6 +337,51 @@ export function PasskeySignInScreen(props: Parameters<typeof PasskeySignIn>[0]) 
   return (
     <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
       <PasskeySignIn {...props} />
+    </SignInChrome>
+  );
+}
+
+/** The email/password entry step in the App's frame, as a view (props only); design frames draw it. */
+export function EmailEntryScreen(props: Parameters<typeof EmailEntryView>[0]) {
+  return (
+    <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+      <EmailEntryView {...props} />
+    </SignInChrome>
+  );
+}
+
+/** The email-code verification step in the App's frame, as a view (props only); design frames draw it. */
+export function CodeEntryScreen(props: Parameters<typeof CodeEntry>[0]) {
+  return (
+    <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+      <CodeEntry {...props} />
+    </SignInChrome>
+  );
+}
+
+/** The two-step verification step in the App's frame, as a view (props only); design frames draw it. */
+export function SecondFactorScreen(props: Parameters<typeof SecondFactor>[0]) {
+  return (
+    <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+      <SecondFactor {...props} />
+    </SignInChrome>
+  );
+}
+
+/** The forgot-password step in the App's frame, as a view (props only); design frames draw it. */
+export function ForgotPasswordScreen(props: Parameters<typeof ForgotPassword>[0]) {
+  return (
+    <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+      <ForgotPassword {...props} />
+    </SignInChrome>
+  );
+}
+
+/** The one-time weak-password notice in the App's frame, as a view (props only); design frames draw it. */
+export function WeakPasswordNoticeScreen(props: Parameters<typeof WeakPasswordNotice>[0]) {
+  return (
+    <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+      <WeakPasswordNotice {...props} />
     </SignInChrome>
   );
 }
@@ -977,6 +1030,11 @@ function Account({
   );
 }
 
+/** Account as a full page (`#account`, `#runtime-account`), as a view (props only); design frames draw it. */
+export function AccountPage(props: Omit<Parameters<typeof Account>[0], 'inSheet'>) {
+  return <Account {...props} />;
+}
+
 /**
  * Account in the sheet, as a view (props only); design frames draw it. With `onClose` it is the
  * sheet's root (`#sheet-account`); without, it is pushed from the list, with Back.
@@ -1054,10 +1112,13 @@ export function AccountDataSheetPage(props: Omit<Parameters<typeof AccountData>[
 
 function Licenses({
   licenses,
+  openGroup,
   onBack,
   onOpenLink,
 }: {
   licenses: AppLicenses;
+  /** A group drawn open, for design frames; people open groups themselves. */
+  openGroup?: number;
   onBack: () => void;
   onOpenLink: (url: string) => void;
 }) {
@@ -1066,9 +1127,14 @@ function Licenses({
     <CloudScreen>
       <Brand back onBack={onBack} />
       <PageTitle title={t('mobileApp.licenses.title')} subtitle={t('mobileApp.licenses.intro')} />
-      <LicensesContent licenses={licenses} onOpenLink={onOpenLink} />
+      <LicensesContent licenses={licenses} openGroup={openGroup} onOpenLink={onOpenLink} />
     </CloudScreen>
   );
+}
+
+/** Open-source licenses as a full page, as a view (props only); design frames draw it. */
+export function LicensesPage(props: Parameters<typeof Licenses>[0]) {
+  return <Licenses {...props} />;
 }
 
 function Boot() {
