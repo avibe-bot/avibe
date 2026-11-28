@@ -44,6 +44,52 @@ jobs:
           --field version=0.0.0
           --field warmup=true
 
+  prune-closed-pr-caches:
+    # Run only default-branch maintenance code. No PR checkout, inputs or
+    # pull_request_target trigger. A PR merge ref cannot be read by releases.
+    if: github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'master')
+    permissions:
+      actions: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Reclaim entries private to closed PR merge refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import json, os, re, subprocess
+          from urllib.parse import urlencode
+
+          repo = 'repos/' + os.environ['GITHUB_REPOSITORY']
+          def caches(ref=None):
+              query = {'per_page': 100}
+              if ref:
+                  query['ref'] = ref
+              pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp',
+                  repo + '/actions/caches?' + urlencode(query)]))
+              return [row for page in pages for row in page['actions_caches']]
+
+          # Inventory before deleting (pagination must not shift). Recheck the
+          # exact id/ref/version and current PR state immediately before DELETE.
+          for row in caches():
+              ref = row['ref']
+              match = re.fullmatch(r'refs/pull/([1-9][0-9]*)/merge', ref)
+              if not match or type(row['id']) is not int or row['id'] <= 0:
+                  continue
+              pull = repo + '/pulls/' + match[1]
+              def closed():
+                  pr = json.loads(subprocess.check_output(['gh', 'api', pull, '--jq', '{number,state}']))
+                  return pr == {'number': int(match[1]), 'state': 'closed'}
+              if not closed():
+                  continue
+              if not any(all(v[k] == row[k] for k in ('id','ref','key','version')) for v in caches(ref)):
+                  continue
+              if closed():
+                  subprocess.run(['gh', 'api', '--method', 'DELETE', repo + '/actions/caches/' + str(row['id'])], check=True)
+                  print(f"Removed cache {row['id']} from closed PR {match[1]}.")
+
   prune-desktop-caches:
     if: >-
       github.event_name == 'workflow_dispatch' ||

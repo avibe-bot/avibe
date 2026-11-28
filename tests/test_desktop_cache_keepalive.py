@@ -326,3 +326,37 @@ def test_pr_shell_cache_is_restore_only_and_cannot_create_pr_entries():
     assert "restore-keys" not in cache["with"]
     text = (ROOT / ".github/workflows/desktop-shell.yml").read_text(encoding="utf-8")
     assert "actions/cache@" not in text
+    save = next(item for item in shell['jobs']['shell']['steps'] if 'cache/save@' in item.get('uses', ''))
+    assert save['with'] == cache['with']
+    assert save['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.fits == 'true'"
+
+
+def test_closed_pr_cleanup_rechecks_identity_and_state_before_deleting(monkeypatch):
+    script = workflow('desktop-cache-maintenance.yml')['jobs']['prune-closed-pr-caches']['steps'][0]['run']
+    # Only 2 remains closed with the same cache identity through both reads.
+    def entry(i, ref):
+        return {'id': i, 'ref': ref, 'key': 'node', 'version': 'v1'}
+
+    rows = [entry(i, f'refs/pull/{i}/merge') for i in range(1, 5)]
+    rows += [entry(5, 'refs/heads/master'), entry(6, 'refs/tags/v1'), entry(7, 'refs/pull/7/head')]
+    replies = {1: ['open'], 2: ['closed', 'closed'], 3: ['closed', 'open'], 4: ['closed']}
+    deleted = []
+
+    def read(cmd):
+        if '--jq' in cmd:
+            n = int(cmd[2].split('/')[-1])
+            return json.dumps({'number': n, 'state': replies[n].pop(0)})
+        if 'ref=' not in cmd[-1]:
+            return json.dumps([{'actions_caches': rows}])
+        from urllib.parse import parse_qs, urlsplit
+        ref = parse_qs(urlsplit(cmd[-1]).query)['ref'][0]
+        matches = [dict(row) for row in rows if row['ref'] == ref]
+        if matches[0]['id'] == 4:
+            matches[0]['version'] = 'changed'
+        return json.dumps([{'actions_caches': matches}])
+
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'fixture/repo')
+    monkeypatch.setattr(subprocess, 'check_output', read)
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, check: deleted.append(cmd))
+    exec(script, {})
+    assert deleted == [['gh', 'api', '--method', 'DELETE', 'repos/fixture/repo/actions/caches/2']]
