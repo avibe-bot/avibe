@@ -76,6 +76,11 @@ enum DirectPublicAddressPolicy {
         }
     }
 
+    /// 198.18.0.0/15, the benchmarking range fake-IP VPNs answer with.
+    static func isFakeIPRange(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 4 && bytes[0] == 198 && (bytes[1] == 18 || bytes[1] == 19)
+    }
+
     static func allowsIPv4(_ bytes: [UInt8]) -> Bool {
         guard bytes.count == 4 else {
             return false
@@ -118,10 +123,15 @@ enum DirectPublicAddressPolicy {
         // IPv4-mapped (::ffff:a.b.c.d) and the NAT64 well-known prefix
         // (64:ff9b::/96), which iOS synthesizes on IPv6-only networks.
         let prefix = Array(bytes[0..<12])
-        if prefix == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF]
-            || prefix == [0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0]
-        {
-            return allowsIPv4(Array(bytes[12..<16]))
+        let carried = Array(bytes[12..<16])
+        if prefix == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF] {
+            return allowsIPv4(carried)
+        }
+        if prefix == [0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0] {
+            // A translator drops this prefix around a non-global IPv4
+            // address (RFC 6052 section 3.1), so a fake-IP VPN's range is
+            // not allowed through it.
+            return allowsIPv4(carried) && !isFakeIPRange(carried)
         }
         // Global unicast only (2000::/3). This excludes the unspecified and
         // loopback addresses, unique-local (fc00::/7), link-local

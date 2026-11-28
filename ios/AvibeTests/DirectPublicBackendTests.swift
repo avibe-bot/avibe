@@ -64,8 +64,8 @@ final class DirectPublicBackendTests: XCTestCase {
             "2a00:1450:4001::1",
             "::ffff:104.16.132.229",
             "64:ff9b::104.16.132.229",
-            // A fake-IP VPN's address, as NAT64 carries it.
-            "64:ff9b::198.18.0.7",
+            // A fake-IP VPN's address, IPv4-mapped.
+            "::ffff:198.18.0.7",
         ]
         let refused = [
             "::",
@@ -81,6 +81,8 @@ final class DirectPublicBackendTests: XCTestCase {
             "::ffff:127.0.0.1",
             "64:ff9b::10.0.0.1",
             "64:ff9b::100.64.0.1",
+            // A translator drops a non-global address (RFC 6052 section 3.1).
+            "64:ff9b::198.18.0.7",
             "4000::1",
         ]
         for text in allowed {
