@@ -95,6 +95,23 @@ export function makeGate(distDir, log) {
           json(200, {mode: 'self_host', language: 'en', setup_completed: true, setup_state: {needs_setup: false}, platforms: {enabled: []}});
           return;
         }
+        // A chat the page can open on a gate-home-* host (gate-home-chat-h2):
+        // enough of a session for the chat page to mount and subscribe.
+        const TURN = {in_flight: false, foreground: 'idle', native_turn_started: false, pending_input_count: 0,
+          background_activities: [], pending_activity_output_count: 0, connection: 'connected'};
+        const chat = /^\/api\/sessions\/gate-session(\/[a-z-]+)?$/.exec(p);
+        if (chat && req.method === 'GET') {
+          if (!chat[1]) json(200, {id: 'gate-session', title: 'Gate'});
+          else if (chat[1] === '/turn-state') json(200, TURN);
+          else if (chat[1] === '/bootstrap') json(200, {
+            session: {id: 'gate-session', title: 'Gate'}, capabilities: {can_chat: true}, agents: [],
+            default_agent_name: null, config: {ui: {}}, messages: [], next_before_id: null, turn_state: TURN,
+            queued: [], draft: {text: ''},
+          });
+          else if (chat[1] === '/messages') json(200, {messages: [], next_before_id: null});
+          else json(200, {});
+          return;
+        }
         if (p === '/api/version') { json(200, {current: '3.2.9rc6', latest: '3.2.9rc6', has_update: false}); return; }
         if (req.method !== 'GET') { json(200, {ok: true}); return; }
         json(200, {});

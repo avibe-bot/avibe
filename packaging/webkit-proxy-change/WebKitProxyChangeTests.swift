@@ -13,6 +13,8 @@ private struct ProbeCase: Decodable {
     let action: String
     let listener: String?
     let allowFailover: Bool?
+    /// The page's route a gate cell opens; the root when absent.
+    let path: String?
     var host: String { "\(id).webkit-proxy.test" }
 }
 
@@ -636,7 +638,7 @@ final class WebKitProxyChangeTests: XCTestCase {
         case "gateReturn", "gateControl", "gateCap", "gateExpired", "gateRedirect":
             // The built page, through the route to the port, signed in.
             await browser.route("direct", allowFailover: fixture.allowFailover ?? true)
-            try await browser.open("/")
+            try await browser.open(fixture.path ?? "/")
             try await gateSettle(browser, "loaded")
             let loaded = try await control("/gate-summary?host=\(fixture.host)&since=0")
             await browser.record("before-background", loaded)
