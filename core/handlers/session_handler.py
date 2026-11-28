@@ -1412,7 +1412,7 @@ class SessionHandler(BaseHandler):
         launch_inputs = _ClaudeLaunchInputs(
             epoch=getattr(self.controller, "claude_runtime_epoch", 0),
             config=getattr(self.config, "claude", None),
-            hub_config=hub_snapshot() if callable(hub_snapshot) else None,
+            hub_config=await asyncio.to_thread(hub_snapshot) if callable(hub_snapshot) else None,
         )
         settings_key = self._get_settings_key(context)
         session_key = self._get_session_key(context)

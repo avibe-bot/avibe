@@ -61,26 +61,28 @@ def normalize_scope_message_types(show_message_types: Optional[list], platform: 
     return normalized
 
 
-def _route_agent_backend_and_model(agent_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def _route_agent_selection(agent_name: Optional[str]) -> tuple[Optional[str], Optional[str], object]:
+    from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY
     from core.vibe_agents import VibeAgentStore
     from modules.agents.catalog import is_agent_backend
 
     name = str(agent_name or "").strip()
     if not name:
-        return None, None
+        return None, None, None
     store = VibeAgentStore()
     try:
         agent = store.get(name)
         if agent is not None:
-            return agent.backend, agent.model
+            metadata = getattr(agent, "metadata", None)
+            return agent.backend, agent.model, metadata.get(PICK_METADATA_KEY) if isinstance(metadata, dict) else None
     except Exception:
         logger.debug("Failed to resolve Agent backend while normalizing routing payload", exc_info=True)
     finally:
         store.close()
-    return (name, None) if is_agent_backend(name) else (None, None)
+    return (name if is_agent_backend(name) else None), None, None
 
 
-def normalize_scope_routing(routing_payload: dict, *, saved_pick: object = None) -> dict:
+def normalize_scope_routing(routing_payload: dict, *, previous: Optional[RoutingSettings] = None) -> dict:
     """The route a scope stores for ``routing_payload``.
 
     Claude Code rejects an effort its model does not support, so a Claude
@@ -93,21 +95,27 @@ def normalize_scope_routing(routing_payload: dict, *, saved_pick: object = None)
     from vibe import backend_model_catalog
 
     routing = _parse_routing(routing_payload or {})
-    backend, agent_model = _route_agent_backend_and_model(routing.agent_name)
+    backend, agent_model, agent_pick = _route_agent_selection(routing.agent_name)
     if backend == "claude" and routing.reasoning_effort:
         model = routing.model or agent_model
         catalog_efforts = None
         agent_catalog = V2ModelHubConfigStore().load().agents["claude"] if is_model_hub_enabled() else None
         if agent_catalog is not None and agent_catalog.mode == "hub":
-            row = next((row for row in agent_catalog.models if row.id == model), None)
-            if row is None and model:
-                from core.handlers.model_hub.saved_pick import SavedHubPick
-                from core.handlers.model_hub.service import capture_explicit_native_pick
+            from core.handlers.model_hub.saved_pick import SavedHubPick
+            from core.handlers.model_hub.service import capture_explicit_native_pick
 
-                pick = SavedHubPick.from_payload(saved_pick)
-                if not pick or (pick.backend, pick.model.id) != (backend, model):
-                    pick = capture_explicit_native_pick(backend, model)
-                row = pick.model if pick else None
+            # Effort belongs to the selected model's owner, not a later public
+            # offer of the same ID, and not another scope or Agent's choice.
+            saved = agent_pick if not routing.model else None
+            if routing.model and previous and (routing.agent_name, routing.model) == (previous.agent_name, previous.model):
+                saved = previous._hub_pick
+            pick = SavedHubPick.from_payload(saved)
+            row = pick.model if pick and (pick.backend, pick.model.id) == (backend, model) else None
+            if row is None:
+                row = next((row for row in agent_catalog.models if row.id == model), None)
+            if row is None and model:
+                current = capture_explicit_native_pick(backend, model)
+                row = current.model if current else None
             if row is not None:
                 # Match the picker: a present empty list (or non-reasoning
                 # model) is authoritative, not a request for backend tiers.
@@ -196,9 +204,7 @@ def apply_scope_change(
             routing_patch, routing_patch.get("agent_name", stored_routing["agent_name"])
         )
         merged_routing = {**stored_routing, **routing_patch}
-        normalize_args = ( {"saved_pick": previous._hub_pick} if previous._hub_pick and
-                           merged_routing.get("agent_name") == stored_routing.get("agent_name") else {} )
-        normalized = normalize_scope_routing(merged_routing, **normalize_args)
+        normalized = normalize_scope_routing(merged_routing, previous=previous)
         routing_changes = {
             name: value
             for name, value in normalized.items()
@@ -234,6 +240,7 @@ def apply_scope_change(
         if routing_changes:
             merged = {**routing_to_dict(updated.routing), **routing_changes}
             updated.routing = normalize_routing_settings(RoutingSettings(**merged))
+            updated.routing._model_reselected = "model" in routing_patch
         if kind == "thread" and existing is None and updated.require_mention is None:
             # An inheriting topic's first override keeps the gate it showed.
             inherited = source.require_mention

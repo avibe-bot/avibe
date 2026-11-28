@@ -426,6 +426,16 @@ def test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable(
     service = _service(tmp_path, store, adapter, now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc))
     service.migration_home = native_home
     service.migration_guard = _idle_switch_guard
+    # A Direct Agent owns its selection in SQLite, not in the Hub catalog.
+    from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, SavedHubPick
+    from core.vibe_agents import VibeAgentStore
+
+    agent_db = tmp_path / "direct-agents.db"
+    agent_store = VibeAgentStore(agent_db)
+    agent_store.create(name="relay", backend="codex", model="relay-custom-1")
+    agent_store.create(name="unserved", backend="codex", model="no-serving-route")
+    selections["codex"].append(("unserved", "no-serving-route"))
+    service.native_agent_picks = agent_store
     service.named_agents_override = lambda backend: selections[backend]
     service.requested_model_override = lambda backend: dict(selections[backend]).get(backend)
 
@@ -449,13 +459,23 @@ def test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable(
             "pruned": ("openai/gpt-removed", "interrupted", "route_unconfigured"),
             "stranger": ("openai/not-served", "interrupted", "route_unconfigured"),
         }
-        # A fixed menu gains only what it lacked; its built-in rows are untouched.
-        codex_models = [model.to_payload() for model in store.load().agents["codex"].models]
-        assert codex_models[:-1] == codex_menu_before
-        assert codex_models[-1]["id"] == "relay-custom-1"
+        # Switching modes is not a menu edit. The named relay choice must not
+        # become a selectable model for every other Codex Agent.
+        assert [model.to_payload() for model in store.load().agents["codex"].models] == codex_menu_before
+        assert "relay-custom-1" not in {row["id"] for row in service.backend_catalog_models("codex")}
         assert {row["name"]: row["supply_status"] for row in codex["named_agents"]} == {
-            "codex": "ok", "relay": "ok",
+            "codex": "ok", "relay": "ok", "unserved": "interrupted",
         }
+        with_store = VibeAgentStore(agent_db, read_only=True)
+        try:
+            bound = SavedHubPick.from_payload(with_store.get("relay").metadata[PICK_METADATA_KEY])
+            refused = SavedHubPick.from_payload(with_store.get("unserved").metadata[PICK_METADATA_KEY])
+            assert with_store.get("relay").model == "relay-custom-1"
+            assert with_store.get("unserved").model == "no-serving-route"
+            assert bound and [entry.hop.source_id for entry in bound.hops] == [openai.id]
+            assert refused and not refused.hops
+        finally:
+            with_store.close()
 
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(
@@ -475,6 +495,17 @@ def test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable(
             )
             assert (status, body) == (200, b'{"ok":true}')
             assert adapter.invocations == [(openai.id, "gpt-5.6-sol", "opencode")]
+            with pytest.raises(ModelHubError) as refusal:
+                await router.resolve("codex", "no-serving-route", saved_pick=refused)
+            assert refusal.value.code == "saved_source_unavailable"
+            assert len(adapter.invocations) == 1
+            adapter.results.append(AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'))
+            relay_launch = await router.resolve("codex", "relay-custom-1", saved_pick=bound)
+            status, _ = await _post_turn(relay_launch, endpoint="responses", payload={
+                "model": relay_launch.runtime_model, "input": "hello", "stream": False,
+            })
+            assert status == 200
+            assert adapter.invocations[-1] == (openai.id, "relay-custom-1", "codex")
         finally:
             await gateway.close()
 
@@ -497,7 +528,10 @@ def test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable(
             selections["opencode"]
         )
 
-    asyncio.run(exercise())
+    try:
+        asyncio.run(exercise())
+    finally:
+        agent_store.close()
 
 
 def test_codex_backend_model_id_survives_until_gateway_resolution(

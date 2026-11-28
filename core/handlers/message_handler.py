@@ -464,10 +464,11 @@ class MessageHandler(BaseHandler):
             )
             # An Agent pin is execution intent only for a turn that inherits its model.
             # Never adopt route material from a Session/run's caller-supplied metadata.
+            from core.handlers.model_hub.offers import NATIVE_OFFER_BACKENDS
             from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, SavedHubPick
 
             inherited_pin = None
-            if (agent_name in ("claude", "codex") and not resolved_target.get("model")
+            if (agent_name in NATIVE_OFFER_BACKENDS and not resolved_target.get("model")
                     and not (isinstance(session_target, dict) and session_target.get("model"))
                     and "model" not in explicit_overrides):
                 if scope_model_override:

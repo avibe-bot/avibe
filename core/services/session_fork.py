@@ -384,6 +384,10 @@ def reserve_forked_session(
             target_title = _forked_session_title(source_title, title_lang)
 
             metadata = _load_metadata(row["metadata_json"])
+            if model is not None or target_backend != source_backend:
+                from core.handlers.model_hub.saved_pick import record_explicit_pick
+
+                record_explicit_pick(metadata, target_backend, target_model)
             metadata.pop("fork_opencode_message_id", None)
             metadata.pop("fork_opencode_fork_empty_history", None)
             metadata.pop("fork_opencode_boundary_from_active_run", None)

@@ -23,6 +23,10 @@ class ReasoningTierResolution:
     source: ReasoningEffortsSource
 
 
+def lists_reasoning(supported_parameters: Sequence[str] | None) -> bool:
+    return any(p.strip().lower() in _UPSTREAM_REASONING_PARAMETERS for p in supported_parameters or ())
+
+
 def resolve_reasoning_tiers(
     *,
     protocol: str,
@@ -46,10 +50,7 @@ def resolve_reasoning_tiers(
         bundled_catalog_wire_efforts_by_model() if catalog_efforts_by_model is None else catalog_efforts_by_model,
         model_id,
     )
-    if supported_parameters is not None and any(
-        parameter.strip().lower() in _UPSTREAM_REASONING_PARAMETERS
-        for parameter in supported_parameters
-    ):
+    if lists_reasoning(supported_parameters):
         defaults = PROTOCOL_REASONING_EFFORT_DEFAULTS.get(protocol)
         if defaults is not None:
             # A generic reasoning parameter says the upstream takes the protocol's levels; the model's own row

@@ -246,7 +246,7 @@ from .opaque_provenance import OpaqueProvenanceRegistry, filter_opaque_history
 from .fast_mode import FAST_SPEED, FastModeCatalog, FastTierObservations, load_fast_mode_catalog
 from .request import ModelHubRequest, without_opaque_history
 from .saved_pick import SavedHubPick
-from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
+from .reasoning_tiers import catalog_wire_efforts, lists_reasoning, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 from .resolver import (
     BackendName,
@@ -267,7 +267,8 @@ from .resolver import (
     validate_cache_ttl_override,
 )
 from .menu_order import MenuOrder
-from .offers import CompleteListing, ListingFile, listed_supplier_view
+from .offer_routes import OfferRoutePreferences
+from .offers import CompleteListing, ListingFile, NATIVE_OFFER_BACKENDS, OFFER_CANDIDATE_BACKENDS, listed_supplier_view
 from .revocations import CredentialRevocationJournal, PendingCredentialRevocation, RevocationOperation
 from .retry import (
     RECOVERY_ADMISSION_MARGIN_SECONDS,
@@ -578,6 +579,12 @@ class CredentialCleanupUnsettledError(ModelHubError):
 
 class EngineUnavailableError(RuntimeError):
     pass
+
+
+class NativeAgentPickStore(Protocol):
+    def bind_direct_hub_selections(self, backend: str, planned: dict[str, SavedHubPick]) -> None: ...
+
+    def named_hub_picks(self, backend: str) -> dict[str, SavedHubPick]: ...
 
 
 class ModelHubConfigStore(Protocol):
@@ -1655,6 +1662,7 @@ class ModelHubService:
         migration_journal: NativeTakeoverJournal | None = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+        native_agent_picks: NativeAgentPickStore | None = None,
         named_agents_override: Optional[
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
@@ -1736,6 +1744,7 @@ class ModelHubService:
         self._migration_item_ids: tuple[tuple[str, ...], bool] | None = None
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
+        self.native_agent_picks = native_agent_picks
         self.named_agents_override = named_agents_override
         # The built-in Agents' models for Vibey's starting supply; the
         # controller owns those Agent rows.
@@ -1794,7 +1803,9 @@ class ModelHubService:
         # Process-local schedule state: an unchanged listing persists nothing,
         # and a restart rediscovers stale Sources one tick after startup.
         self._menu_orders = {backend: MenuOrder(events.path.parent / f"hub_{backend}_menu_order.json")
-                             for backend in ("claude", "codex")}
+                             for backend in NATIVE_OFFER_BACKENDS}
+        self._offer_routes = {backend: OfferRoutePreferences(events.path.parent, backend)
+                              for backend in NATIVE_OFFER_BACKENDS}
         self._order_write_lock = asyncio.Lock()
         self._listing_file = ListingFile(events.path.parent / "hub_source_observations.json")
         self._pending_hub_listings = self._listing_file.load()
@@ -4069,15 +4080,12 @@ class ModelHubService:
                 old_credential_ref = source.credential_ref
                 if not self._source_matches_binding(source, binding):
                     raise ModelHubError("flow_not_found", status=404)
-                manual = [
-                    model
-                    for model in source.models
-                    if model.provenance == "manual"
-                ]
                 source.credential_ref = replacement_ref
                 self._mark_source_unverified(source)
-                discovered = await self._discover(source)
-                overrides = self._apply_discovered_models(source, manual, discovered)
+                # The engine has committed consent. Its listing is optional and belongs
+                # to the later discovery worker, never to credential materialization.
+                source.models = [model for model in source.models if model.provenance == "manual" or model.retired]
+                source.last_discovered_at = None
                 source.state = ModelHubSourceStateConfig(status="standby")
                 interrupted_pairs = self._would_interrupt(config)
                 if (
@@ -4089,17 +4097,16 @@ class ModelHubService:
                 await self._commit_synced(previous, config)
                 committed = True
                 self.quota.forget(source.id)
-                self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
                     flow_id,
                     binding,
                     interrupted_pairs,
                 )
             except asyncio.CancelledError:
-                committed = self._persisted_credential(
-                    self.store.load(),
-                    binding.source_id,
-                    replacement_ref,
+                committed = source is not None and source.credential_generation is not None and any(
+                    item.id == binding.source_id and item.credential_ref == replacement_ref
+                    and item.credential_generation == source.credential_generation
+                    for item in self.store.load().sources
                 )
                 if not committed:
                     try:
@@ -4699,7 +4706,10 @@ class ModelHubService:
                     Literal["anthropic", "openai_responses", "openai_chat", "google"],
                     observation.protocol,
                 )
+            verified_listing = None
             if observation is not None and observation.discovery is ObservationDiscovery.SUCCEEDED:
+                if observation.authenticated is True:
+                    verified_listing = list(observation.models)
                 self._apply_discovered_models(
                     source,
                     manual_models,
@@ -4740,6 +4750,8 @@ class ModelHubService:
                         pass
                     else:
                         source = candidate
+                        if source.verification_pending is None:
+                            verified_listing = discovered
 
             # AC-29 requires the canonical Source validator to run before any
             # permanent credential is provisioned. The placeholder is never saved.
@@ -4801,9 +4813,13 @@ class ModelHubService:
                         pass
                     else:
                         source = candidate
-                async with self._mutation_lock:
+                async with self._listing_writeback() as accept, self._mutation_lock:
                     await self._commit_new_source_locked(source)
                     persisted = True
+                    if verified_listing is not None:
+                        # Publish only what the authenticated list returned, not
+                        # manually entered IDs or inventory from a public endpoint.
+                        accept(source, next(self._listing_tickets), verified_listing)
                 return self._source_creation_result(source.to_payload())
             except asyncio.CancelledError:
                 persisted = self._persisted_credential(
@@ -5733,8 +5749,8 @@ class ModelHubService:
 
         def accept(source: ModelHubSourceConfig, ticket: int, rows: list[DiscoveredModel]) -> bool:
             nonlocal changed
-            if (not source.credential_ref or source.verification_pending or source.protocol == "search"
-                    or source.supply_channel != "hub"):
+            if (not source.credential_ref or (source.verification_pending and source.kind != "subscription")
+                    or source.protocol == "search" or source.supply_channel != "hub"):
                 return True  # Not evidence; existing inventory handling still applies.
             live = next((item for item in self.store.load().sources if item.id == source.id), None)
             digest = identity_digest(source)
@@ -5743,7 +5759,8 @@ class ModelHubService:
             ids = tuple(canonical_model_id(row.id) for row in rows)
             if any(mid is None or contains_credential_material(mid) for mid in ids) or len(set(ids)) != len(ids):
                 raise ModelHubError("discovery_failed", status=502)
-            receipt = CompleteListing(digest, cast(tuple[str, ...], ids), self.now().isoformat())
+            receipt = CompleteListing(digest, cast(tuple[str, ...], ids), self.now().isoformat(),
+                tuple(cast(str, mid) for mid, row in zip(ids, rows) if lists_reasoning(row.supported_parameters)))
             self._accepted_listing[source.id] = ticket
             self._pending_hub_listings = {**self._pending_hub_listings, source.id: receipt}
             changed = True
@@ -5777,7 +5794,8 @@ class ModelHubService:
             try:
                 ticket = next(self._listing_tickets)
                 model_ids = await self._discover(source)
-                accept(source, ticket, model_ids)
+                if model_ids is not None:
+                    accept(source, ticket, model_ids)
                 removed_hops, would_interrupt = await self._finalize_source_discovery(
                     previous,
                     config,
@@ -6253,7 +6271,7 @@ class ModelHubService:
     @classmethod
     def _listed_offer_rows(cls, config, backend, listings, describe, withdrawn_ids) -> list[OfferedModel]:
         agent = cls._agent(config, backend)
-        if agent.mode != "hub" or backend not in {"claude", "codex", "vibey"} or not listings:
+        if agent.mode != "hub" or backend not in OFFER_CANDIDATE_BACKENDS or not listings:
             return []
         supplied = listed_supplier_view(config, backend, listings)
         omitted = set(agent.removed_model_ids) | {row.id for row in agent.models}
@@ -6283,12 +6301,16 @@ class ModelHubService:
         if backend not in self._menu_orders or config.agents[backend].mode != "hub":
             return config
         agent = config.agents[backend]
-        additions = self._hub_offer_rows(config, backend)
+        preferences = self._offer_routes[backend]
+        additions = [] if preferences.damaged else self._hub_offer_rows(config, backend)
         order = self._menu_orders[backend]
         if not additions and not order.ids:
             return config
         models = order.apply([*agent.models, *additions])
-        return replace(config, agents={**config.agents, backend: replace(agent, models=models)})
+        # Rank and route preferences don't confer membership. A withdrawn
+        # offer remains absent even if it has a dormant explicit override.
+        routes = {**agent.routes, **{row.id: preferences.routes[row.id] for row in additions if row.id in preferences.routes}}
+        return replace(config, agents={**config.agents, backend: replace(agent, models=models, routes=routes)})
 
     async def read_hub_offer_candidates(self, backend: BackendName) -> list[dict]:
         def read() -> list[dict]:
@@ -6390,6 +6412,10 @@ class ModelHubService:
         return agent
 
     def preview_agent_chain(self, backend: str, model_id: object, payload: object) -> dict:
+        config = self.project_offer_menu(self._clone_config(self.store.load()), cast(BackendName, backend))
+        return self._preview_chain_in_view(config, backend, model_id, payload)
+
+    def _preview_chain_in_view(self, config, backend, model_id, payload, *, live_recovery=None) -> dict:
         if not isinstance(payload, dict) or set(payload) != {"manual_override"}:
             raise ModelHubError("mapping_target_unavailable", status=409)
         raw = payload["manual_override"]
@@ -6405,14 +6431,15 @@ class ModelHubService:
                     data={"reason": str(error)},
                 ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
-        config = self._clone_config(self.store.load())
         agent = self._validate_route_override(config, backend, model_id, route)
         route = normalized_model_hub_override(route)
+        routes = dict(agent.routes)
         if route is None:
-            agent.routes.pop(model_id, None)
+            routes.pop(model_id, None)
         else:
-            agent.routes[model_id] = route
-        return self._agent_chain(config, backend, model_id)
+            routes[model_id] = route
+        view = replace(config, agents={**config.agents, backend: replace(agent, routes=routes)})
+        return self._agent_chain(view, backend, model_id, live_recovery=live_recovery)
 
     async def delete_agent_chain(self, backend: str, model_id: object, payload: object = None) -> dict:
         if payload is None:
@@ -6431,17 +6458,31 @@ class ModelHubService:
         payload: dict,
     ) -> dict:
 
+        # Serialize explicit menu and route drafts through publication. Neither
+        # preference-file lock nor write is needed by login or renewal.
+        async with self._order_write_lock:
+            return await self._commit_agent_chain(backend, model_id, route, payload)
+
+    async def _commit_agent_chain(
+        self, backend: str, model_id: object, route: ModelHubRouteConfig | None, payload: dict,
+    ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
-            agent = self._validate_route_override(config, backend, model_id, route)
+            view = await asyncio.to_thread(self.project_offer_menu, previous, cast(BackendName, backend))
+            self._validate_route_override(view, backend, model_id, route)
+            agent = self._agent(config, backend)
+            offer_only = model_id not in self._agent_menu_model_ids(agent) and backend in self._offer_routes
             route = normalized_model_hub_override(route)
+            routes = dict(view.agents[backend].routes)
             if route is None:
-                agent.routes.pop(model_id, None)
+                routes.pop(model_id, None)
             else:
-                agent.routes[model_id] = route
-            removed_hops = self._removed_effective_hops(previous, config, backend=backend, model_id=model_id)
-            interrupted = self._introduced_interruptions(previous, config)
+                routes[model_id] = route
+            # Calculate the guard and response with the same offers used for validation.
+            edited = replace(view, agents={**view.agents, backend: replace(view.agents[backend], routes=routes)})
+            removed_hops = self._removed_effective_hops(view, edited, backend=backend, model_id=model_id)
+            interrupted = self._introduced_interruptions(view, edited)
             if interrupted or (route is None and removed_hops):
                 self._require_guard_plan(
                     force=payload.get("force") is True,
@@ -6451,12 +6492,25 @@ class ModelHubService:
                     would_interrupt=interrupted,
                     error="source_last_supplier" if interrupted else "source_in_route_chain",
                 )
-            await self._commit_synced(previous, config)
-            return {
-                "chain": self._agent_chain(config, backend, model_id),
-                "removed_hops": removed_hops,
-                "interrupted": interrupted,
-            }
+            if not offer_only:
+                if route is None:
+                    agent.routes.pop(model_id, None)
+                else:
+                    agent.routes[model_id] = route
+                await self._commit_synced(previous, config)
+        if offer_only:
+            # Old binaries reject a route without a stored catalog row. Keep
+            # their routing document untouched; this writes only an explicit
+            # preference and is never a dependency of credential renewal.
+            try:
+                await run_owned_in_thread(self._offer_routes[backend].set, model_id, route)
+            except OSError:
+                raise ModelHubError("backend_model_store_busy", status=503) from None
+        return {
+            "chain": self._agent_chain(edited, backend, model_id),
+            "removed_hops": removed_hops,
+            "interrupted": interrupted,
+        }
 
     @staticmethod
     def _catalog_model_payload(model: ModelHubBackendModelConfig) -> dict:
@@ -6634,13 +6688,17 @@ class ModelHubService:
             else None
         )
         named_agents = []
+        picks = self.native_agent_picks.named_hub_picks(backend) if (
+            agent.mode == "hub" and backend in NATIVE_OFFER_BACKENDS and self.native_agent_picks is not None
+        ) else {}
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
                 requested = self._menu_model_for_selection(
                     agent, str(pinned_model or "").strip()
                 )
+                pick = picks.get(name)
                 named_resolution = resolve_model_hub_turn(
-                    config,
+                    pick.execution_view(config, backend, requested) if pick and requested else config,
                     backend,
                     requested,
                     now=now,
@@ -6832,7 +6890,7 @@ class ModelHubService:
         self, config: ModelHubConfig, backend: BackendName, receipts: Mapping[str, CompleteListing],
     ) -> ModelHubConfig:
         """Supply for Add/its optimistic guard. Never change the execution config."""
-        if config.agents[backend].mode != "hub" or backend not in {"vibey", "claude", "codex"}:
+        if config.agents[backend].mode != "hub" or backend not in OFFER_CANDIDATE_BACKENDS:
             return config
         confirmed = {s.id: s for s in listed_supplier_view(config, backend, receipts).sources}
         sources = []
@@ -6841,8 +6899,10 @@ class ModelHubService:
                 # Pre-feature rows remain manually addable but cannot generate hints.
                 sources.append(source)
                 continue
-            listed = {row.id for row in confirmed[source.id].models} if source.id in confirmed else set()
-            sources.append(replace(source, models=[row for row in source.models if row.id in listed or row.provenance == "manual"]))
+            listed_rows = confirmed[source.id].models if source.id in confirmed else ()
+            listed_ids = {row.id for row in listed_rows}
+            manual = [row for row in source.models if row.provenance == "manual" and row.id not in listed_ids]
+            sources.append(replace(source, models=[*listed_rows, *manual]))
         return replace(config, sources=sources)
 
     def agent_model_candidates(self, backend: str) -> dict:
@@ -6962,7 +7022,7 @@ class ModelHubService:
         in_list = []
         for model in menu_models:
             suppliers, source_label, source_efforts = self._candidate_suppliers(
-                config,
+                hint_suppliers if model["id"] in offers else config,
                 agent_backend,
                 model["id"],
             )
@@ -7082,7 +7142,7 @@ class ModelHubService:
         selection remains unsupplied until discovery or an explicit manual hop.
         """
 
-        if backend in ("claude", "codex") or self.named_agents_override is None:
+        if backend in NATIVE_OFFER_BACKENDS or self.named_agents_override is None:
             # Native Hub menus follow Source observations, not an Agent's private pin.
             return
         agent = config.agents[backend]
@@ -7651,13 +7711,13 @@ class ModelHubService:
                 not_on[effort] = list(dict.fromkeys(refusing))
         return {"omitted": omitted, "not_on": not_on}
 
-    def _effort_capable_hop_may_recover(
+    async def _effort_capable_hop_may_recover(
         self, backend: str, model_id: str, supply_channel: Any, request: Any
     ) -> bool:
         """Whether a temporarily blocked hop of this route does not refuse the request's effort."""
 
         resolution = self._invocation_resolution(
-            self.store.load(), cast(BackendName, backend), model_id, supply_channel, request=request,
+            await self._invocation_config(backend, request), cast(BackendName, backend), model_id, supply_channel, request=request,
         )
         return any(
             hop.source is not None
@@ -8371,6 +8431,35 @@ class ModelHubService:
 
         return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
+    def _bind_direct_agent_choices(self, config: ModelHubConfig, backend: BackendName) -> None:
+        """Capture a legacy private pin on an explicit switch, never on a launch or refresh."""
+        if self.native_agent_picks is None or self.named_agents_override is None:
+            return
+        agent = config.agents[backend]
+        menu_ids = {row.id for row in agent.models}
+        planned = {}
+        # A retained subscription inventory may refer to the previous grant.
+        # Its current-generation listing, not the stored handle, proves supply.
+        listed = listed_supplier_view(config, backend, self._complete_hub_listings)
+        subscription_ids = {(s.id, m.id) for s in listed.sources if s.kind == "subscription" for m in s.models}
+        for name, mid in self.named_agents_override(backend):
+            if not mid or mid in menu_ids:
+                continue  # An existing configured route retains its normal semantics.
+            candidate = self._provider_candidate(config, backend, mid, None)
+            row = candidate[0] if candidate else ModelHubBackendModelConfig(id=mid)
+            view = replace(config, agents={**config.agents, backend: replace(agent, models=[*agent.models, row])})
+            route = resolve_model_hub_turn(view, backend, mid, now=self.now())
+            hops = tuple(ModelHubRouteHopConfig(item.source_id, item.model_id) for item in route.candidate_hops
+                         if item.source_id and item.model_id and item.source and item.source.supply_channel == "hub"
+                         and item.source.credential_ref and item.source_id in config.effective_source_order(backend)
+                         and config.source_eligible_for_backend(item.source, backend)
+                         and (not item.source.verification_pending or item.source.kind == "subscription")
+                         and (item.source.kind != "subscription" or (item.source_id, item.model_id) in subscription_ids)
+                         and (item.inventory_member or mid in agent.routes)
+                         and candidate and mid not in agent.removed_model_ids)
+            planned[name] = SavedHubPick.from_offer(config, backend, OfferedModel(**row.to_payload(), listed_hops=hops))
+        self.native_agent_picks.bind_direct_hub_selections(backend, planned)
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")
@@ -8399,7 +8488,10 @@ class ModelHubService:
                         config = self._clone_config(previous)
                         self._agent(config, backend).mode = mode
                         if mode == "hub":
-                            self._carry_agent_selections(config, name)
+                            if name in NATIVE_OFFER_BACKENDS:
+                                await run_owned_in_thread(self._bind_direct_agent_choices, config, name)
+                            else:
+                                self._carry_agent_selections(config, name)
                         await self._commit_synced(previous, config)
                     except (TakeoverStateError, OSError):
                         raise ModelHubError("mode_switch_blocked", status=409) from None
@@ -8845,6 +8937,18 @@ class ModelHubService:
         confirmed_remove_hops: object = None,
         confirmed_interruptions: object = None,
     ) -> dict:
+        # Serialize catalog drafts, not credential changes. In particular, a
+        # stalled preference write must never own the renewal lock.
+        async with self._order_write_lock:
+            return await self._set_agent_models(
+                backend, baseline, models, expected_suppliers, renames, force,
+                confirmed_remove_hops, confirmed_interruptions,
+            )
+
+    async def _set_agent_models(
+        self, backend, baseline, models, expected_suppliers, renames, force,
+        confirmed_remove_hops, confirmed_interruptions,
+    ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
@@ -8957,6 +9061,15 @@ class ModelHubService:
                     status=409,
                     data={"changed": changed_suppliers},
                 )
+            # Add is explicit consent to the displayed suppliers. Bind that exact
+            # ordered set; reconstructing it from the routing union can prefer an
+            # older, higher-priority Source that never offered this model.
+            if agent_backend == "vibey":
+                for mid, suppliers in projections.items():
+                    if suppliers and mid not in current_by_id and desired_by_id[mid].origin == "provider":
+                        agent.routes[mid] = ModelHubRouteConfig(hops=tuple(
+                            ModelHubRouteHopConfig(item["source_id"], item["model_id"]) for item in suppliers
+                        ))
             merged_by_id = dict(current_by_id)
 
             removed_hops: list[dict] = []
@@ -8966,7 +9079,7 @@ class ModelHubService:
                 if model.id not in desired_by_id and model.id in current_by_id
             ]
             removed_model_id_set = set(removed_model_ids)
-            if agent.mode == "hub" and backend in {"claude", "codex"}:
+            if agent.mode == "hub" and backend in NATIVE_OFFER_BACKENDS:
                 # The baseline can contain a read-time provider offer which has
                 # no stored menu row. Deleting it suppresses future offers even
                 # if the Source withdrew it while the editor was open. It does
@@ -9094,6 +9207,13 @@ class ModelHubService:
                 would_interrupt=interrupted,
                 error="backend_model_in_route",
             )
+            menu_order = self._menu_orders.get(backend) if agent.mode == "hub" else None
+            save_positions = menu_order is not None and (
+                bool(set(moves).intersection(menu_order.ids))
+                or (order_changed and (bool(menu_order.ids) or any(mid not in current_by_id for mid in baseline_by_id)))
+            )
+            if save_positions and menu_order.damaged:
+                raise ModelHubError("backend_model_store_busy", status=503)
             if moves:
                 # Validate the entire prospective document and recovery gate before the SQLite commit.
                 # A failed file replacement leaves the old catalog retryable: the same SQL is a no-op.
@@ -9117,6 +9237,21 @@ class ModelHubService:
                     self._permitted_takeover(canonical)
                     rename_selections(backend, moves, opencode_menu_ids=prior_menu_ids)
 
+        # Rank is a preference, not membership. Persist it first: if this
+        # fails the original identity and selections still exist. If the later
+        # catalog commit fails the same baseline can be retried; saving these
+        # ranks again is idempotent (including a temporarily absent row).
+        if save_positions:
+            try:
+                await run_owned_in_thread(menu_order.save, desired_order, moves)
+            except OSError:
+                raise ModelHubError("backend_model_store_busy", status=503) from None
+        async with self._mutation_lock:
+            # A Source mutation may have completed during disk I/O. Never
+            # overwrite it with the snapshot against which the guard ran.
+            if self.store.load().to_payload() != previous.to_payload():
+                raise ModelHubError("backend_model_conflict", status=409)
+            if moves:
                 try:
                     await run_owned_in_thread(move_selections)
                 except SelectionChanged:
@@ -9125,21 +9260,7 @@ class ModelHubService:
                     raise ModelHubError("backend_model_store_busy", status=503) from None
             # SQLite selections now refer to the new catalog. Engine sync failure
             # must not roll the file back over them; reconcile on next demand.
-            menu_order = self._menu_orders.get(backend) if agent.mode == "hub" and order_changed else None
-            save_positions = menu_order is not None and (menu_order.ids or any(
-                mid not in current_by_id for mid in baseline_by_id
-            ))
-            if save_positions and menu_order.damaged:
-                raise ModelHubError("backend_model_store_busy", status=503)
             await self._commit_synced(previous, config, rollback_on_sync_failure=not moves)
-        if save_positions:
-            # File publication cannot own a routing/renewal lock. Only an explicit
-            # reorder reaches this file; confirmation follows the atomic replacement.
-            async with self._order_write_lock:
-                try:
-                    await run_owned_in_thread(menu_order.save, desired_order)
-                except OSError:
-                    raise ModelHubError("backend_model_store_busy", status=503) from None
         await self._refresh_backend_catalog(cast(BackendName, backend))
         committed = self.store.load()
         result = {"agent": self._agent_payload(committed, self._agent(committed, backend))}
@@ -9725,13 +9846,29 @@ class ModelHubService:
     def agent_chain(self, backend: str, model_id: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable", status=409)
-        config = self.store.load()
+        config = self.project_offer_menu(self.store.load(), cast(BackendName, backend))
         return self._agent_chain(config, backend, model_id, live_recovery=self.recovery.annotations(config))
+
+    async def read_chain_view(self, backend: str, model_id: object = None, *, preview: object = ...,
+                              bulk: bool = False) -> dict | list[dict]:
+        """RPC read: build the disk-backed menu off-loop, sample live state on its owner."""
+        if backend not in MODEL_HUB_BACKENDS or (not bulk and (not isinstance(model_id, str) or not model_id)):
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        view = await asyncio.to_thread(lambda: self.project_offer_menu(self.store.load(), cast(BackendName, backend)))
+        live = self.recovery.annotations(view)
+        if bulk:
+            return await asyncio.to_thread(self._agent_chains_in_view, view, backend, live)
+        if preview is not ...:
+            return await asyncio.to_thread(self._preview_chain_in_view, view, backend, model_id, preview, live_recovery=live)
+        return await asyncio.to_thread(self._agent_chain, view, backend, model_id, live_recovery=live)
 
     def agent_chains(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
-        config = self.store.load()
+        config = self.project_offer_menu(self.store.load(), cast(BackendName, backend))
+        return self._agent_chains_in_view(config, backend, self.recovery.annotations(config))
+
+    def _agent_chains_in_view(self, config, backend, live_recovery) -> list[dict]:
         agent = self._agent(config, backend)
         if agent.mode == "direct":
             raise self._direct_mode_error()
@@ -9741,7 +9878,6 @@ class ModelHubService:
             config,
             cast(BackendName, backend),
         )
-        live_recovery = self.recovery.annotations(config)
         hidden = self._hidden_retired_model_ids(agent) - {requested_model}
         return [
             self._agent_chain(
@@ -11193,6 +11329,7 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         config: ModelHubConfig | None = None,
+        saved_pick: SavedHubPick | None = None,
     ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
         """Inspect the complete effective chain used by the next turn.
 
@@ -11201,6 +11338,8 @@ class ModelHubService:
         """
 
         config = config if config is not None else self.store.load()
+        if saved_pick is not None:
+            config = saved_pick.execution_view(config, backend, model_id)
         resolution = resolve_model_hub_turn(
             config,
             backend,
@@ -11590,6 +11729,19 @@ class ModelHubService:
             now=self.now(),
         )
 
+    async def _invocation_config(self, backend: BackendName, request: Mapping[str, Any] | None) -> ModelHubConfig:
+        """Read the request's supply snapshot off-loop. Live recovery stays on its owning loop."""
+        def load():
+            config = self.store.load()
+            if backend not in NATIVE_OFFER_BACKENDS:
+                return config
+            if config.agents[backend].mode != "hub":
+                # An already admitted Hub turn can outlive a switch to Direct.
+                config = replace(config, agents={**config.agents, backend: replace(config.agents[backend], mode="hub")})
+            return self.project_offer_menu(config, backend)
+
+        return await asyncio.to_thread(load)
+
     def _invocation_resolution(
         self,
         config: ModelHubConfig,
@@ -11605,7 +11757,6 @@ class ModelHubService:
             # Direct, so they never get here.
             config = self._clone_config(config)
             config.agents[backend].mode = "hub"
-        config = self.project_offer_menu(config, backend)
         pick = request.saved_pick if isinstance(request, ModelHubRequest) else None
         if isinstance(pick, SavedHubPick):
             config = pick.execution_view(config, backend, model_id)
@@ -11661,7 +11812,7 @@ class ModelHubService:
                     on_admitted(generation, candidate.inventory_member)
 
             try:
-                config = self.store.load()
+                config = await self._invocation_config(backend, request)
                 resolution = self._invocation_resolution(
                     config, backend, requested_model_id, supply_channel, request=request,
                 )
@@ -12132,7 +12283,7 @@ class ModelHubService:
             else:
                 engine_prepared = True
         async with self._mutation_lock:
-            config = self.store.load()
+            config = await self._invocation_config(backend, request)
             resolution = self._invocation_resolution(
                 config, cast(BackendName, backend), model_id, supply_channel, request=request,
             )
@@ -12144,10 +12295,10 @@ class ModelHubService:
             raise _pin_unavailable()
         if not candidate_hops:
             projection_config, projection_resolution = config, resolution
-            if supply_channel is not None:
+            saved_pick = request.saved_pick if isinstance(request, ModelHubRequest) else None
+            if supply_channel is not None or saved_pick is not None:
                 projection_config, projection_resolution = self._inspect_terminal_chain(
-                    backend=cast(BackendName, backend),
-                    model_id=model_id,
+                    backend=cast(BackendName, backend), model_id=model_id, config=config, saved_pick=saved_pick,
                 )
             # A request that attempted in an earlier walk exhausted those attempts.
             attempted = recovery_request is not None and recovery_request.attempt_count > 0
@@ -12167,7 +12318,7 @@ class ModelHubService:
                 raise AssertionError("no-candidate outcome must carry supply facts")
             expired = recovery_request is not None and recovery_request.expired
             raise ModelHubError(
-                RECOVERY_EXHAUSTED_CODE if expired else "mapping_target_unavailable",
+                RECOVERY_EXHAUSTED_CODE if expired else turn_outcome.refusal_code,
                 status=409,
                 supply_state=facts.supply_state,
                 data=_recovery_cause(recovery_request.reason) if expired else None,
@@ -12192,7 +12343,7 @@ class ModelHubService:
                 if recovery_request is not None and recovery_request.expired:
                     window_closed = not non_retryable_failure
                     break
-                config = self.store.load()
+                config = await self._invocation_config(backend, request)
                 resolution = self._invocation_resolution(
                     config, cast(BackendName, backend), model_id, supply_channel, request=request,
                 )
@@ -12572,7 +12723,7 @@ class ModelHubService:
         if (
             unsupported_reason == "effort_unsupported"
             and failed_source is None
-            and self._effort_capable_hop_may_recover(backend, model_id, supply_channel, request)
+            and await self._effort_capable_hop_may_recover(backend, model_id, supply_channel, request)
         ):
             # A hop that does not refuse this effort is only blocked for now:
             # the request waits for it like any other, rather than ending here.
@@ -12596,6 +12747,8 @@ class ModelHubService:
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),
             model_id=model_id,
+            config=await self._invocation_config(backend, request),
+            saved_pick=request.saved_pick if isinstance(request, ModelHubRequest) else None,
         )
         # A request that admitted nothing in any walk (another waiter held the
         # half-open slot, or the window closed first) found every hop blocked;
@@ -12615,7 +12768,7 @@ class ModelHubService:
         if final_facts is None:
             raise AssertionError("exhausted outcome must carry supply facts")
         raise ModelHubError(
-            RECOVERY_EXHAUSTED_CODE if window_closed else "mapping_target_unavailable",
+            RECOVERY_EXHAUSTED_CODE if window_closed else turn_outcome.refusal_code,
             status=503,
             supply_state=final_facts.supply_state,
             data=(
@@ -12683,8 +12836,8 @@ class ModelHubService:
                     pending.start()
                     if pending.expired:
                         raise self._recovery_exhausted(exc, pending.reason) from exc
-                    config = self.store.load()
                     request = kwargs.get("request")
+                    config = await self._invocation_config(kwargs["backend"], request)
                     resolution = self._invocation_resolution(
                         config, kwargs["backend"], kwargs["model_id"], supply_channel, request=request,
                     )
@@ -12752,7 +12905,7 @@ def _recovery_cause(reason: str | None) -> dict[str, str] | None:
 
 def capture_explicit_native_pick(backend: str, model_id: str | None) -> SavedHubPick | None:
     """Snapshot an offered route at the choice writer, without a controller or network call."""
-    if not model_id or backend not in ("codex", "claude"):
+    if not model_id or backend not in NATIVE_OFFER_BACKENDS:
         return None
     config = V2ModelHubConfigStore().load()
     if config.agents[backend].mode != "hub":
@@ -12766,7 +12919,15 @@ def capture_explicit_native_pick(backend: str, model_id: str | None) -> SavedHub
         lambda ids: models_dev_metadata_matches(ids, dict(_cached_models_dev_catalog())),
         lambda key: ModelHubService._withdrawn_ids(key, lambda b: backend_builtin_models(b, schedule_refresh=False)),
     )
-    return next((SavedHubPick.from_offer(config, backend, row) for row in rows if row.id == model_id), None)
+    offer = next((row for row in rows if row.id == model_id), None)
+    if offer is None:
+        return None
+    preferences = OfferRoutePreferences(paths.get_state_dir(), backend)
+    if preferences.damaged:
+        # The explicit route is unreadable. Never convert that into consent to
+        # use the default suppliers for a same-named offer.
+        return SavedHubPick(backend, ModelHubBackendModelConfig.from_payload(offer.to_payload()), ())
+    return SavedHubPick.from_offer(config, backend, offer, preferences.routes.get(model_id))
 
 
 def create_default_service(
@@ -12775,6 +12936,7 @@ def create_default_service(
     native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
     requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
     selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+    native_agent_picks: NativeAgentPickStore | None = None,
     named_agents_override: Optional[
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
@@ -12841,6 +13003,7 @@ def create_default_service(
         migration_project_roots=migration_project_roots,
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
+        native_agent_picks=native_agent_picks,
         named_agents_override=named_agents_override,
         builtin_agent_models_override=builtin_agent_models_override,
         cli_present_override=cli_present_override,

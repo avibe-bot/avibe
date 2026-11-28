@@ -1258,6 +1258,7 @@
       "waiting": "This request could not complete: {source} is temporarily unavailable for model {model}, and no backup is usable. Automatic recovery has ended. You can retry later or choose another model.",
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
+      "saved_source_unavailable": "Model {model} is no longer supplied: its provider is unavailable or has been replaced. Choose another model to continue.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
       "last_upstream_failure": "Last provider error ({source}, HTTP {status}): {detail}",
       "last_upstream_failure_without_status": "Last provider error ({source}): {detail}",

@@ -135,6 +135,9 @@ def _infer_user_platform(user_id: str) -> str:
 class RoutingSettings:
     # Server-owned execution intent. Not a settings field, API input, or serialized routing key.
     _hub_pick: ClassVar[Optional[dict]] = None
+    # A present model in a narrow PATCH is an explicit choice even when the ID is unchanged.
+    # Consume this once at save; it is never serialized or loaded from a client.
+    _model_reselected: ClassVar[bool] = False
     agent_name: Optional[str] = None
     # Scope-level overrides applied on top of the selected Vibe Agent.
     model: Optional[str] = None

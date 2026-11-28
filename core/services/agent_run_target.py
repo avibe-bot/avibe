@@ -17,6 +17,7 @@ from typing import Any, Mapping, Optional
 
 from sqlalchemy import Engine, select, update
 
+from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, SavedHubPick
 from core.message_context import (
     build_context_session_key,
     build_thread_session_anchor,
@@ -91,6 +92,7 @@ class ResolvedAgentTarget:
     agent_variant: str
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    saved_pick: Optional[SavedHubPick] = None
 
 
 def resolve_agent_run_target(
@@ -307,7 +309,8 @@ def resolve_agent_run_target(
             model=agent_target.model,
             reasoning_effort=agent_target.reasoning_effort,
             workdir=resolved_new_workdir,
-            metadata={"created_via": "agent_run_target", "source": source, "legacy_scope_key": session_key},
+            metadata={"created_via": "agent_run_target", "source": source, "legacy_scope_key": session_key,
+                      **({PICK_METADATA_KEY: agent_target.saved_pick.to_payload()} if agent_target.saved_pick else {})},
         )
         if new_session_id is None:
             # NO usable session: the keyed get-or-create resolved onto an existing row
@@ -511,6 +514,7 @@ def _resolve_agent_target(
         agent_name=None,
         agent_backend=backend,
         agent_variant=backend,
+        saved_pick=_inherited_pick(backend, scope_row, None),
         model=_optional_str(scope_row.get("model")) if scope_row else None,
         reasoning_effort=_optional_str(scope_row.get("reasoning_effort")) if scope_row else None,
     )
@@ -540,9 +544,23 @@ def _agent_target_from_vibe_agent(agent: Any, *, scope_row: Optional[dict[str, A
         agent_name=_optional_str(getattr(agent, "name", None)),
         agent_backend=backend,
         agent_variant=_agent_variant_for_backend(backend, scope_row),
+        saved_pick=_inherited_pick(backend, scope_row, agent),
         model=scope_model or _optional_str(getattr(agent, "model", None)),
         reasoning_effort=scope_effort or _optional_str(getattr(agent, "reasoning_effort", None)),
     )
+
+
+def _inherited_pick(backend: str, scope_row, agent) -> Optional[SavedHubPick]:
+    # Use precisely the owner of the winning model, even when both IDs match.
+    # Never consult the public offer or copy request metadata into this new row.
+    model = _optional_str(scope_row.get("model")) if scope_row else None
+    if model:
+        fields = _scope_settings_payload(scope_row)
+    else:
+        model = _optional_str(getattr(agent, "model", None))
+        fields = getattr(agent, "metadata", None)
+    pick = SavedHubPick.from_payload(fields.get(PICK_METADATA_KEY)) if isinstance(fields, dict) else None
+    return pick if pick and (pick.backend, pick.model.id) == (backend, model) else None
 
 
 def _supported_backend(value: Any) -> Optional[str]:
@@ -572,7 +590,7 @@ def _scope_variant_applies(backend: str, scope_row: Optional[dict[str, Any]]) ->
     return _optional_str(scope_row.get("agent_backend")) == backend
 
 
-def _scope_routing_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _scope_settings_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not scope_row:
         return {}
     raw = scope_row.get("settings_json")
@@ -582,7 +600,11 @@ def _scope_routing_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any
         payload = json.loads(str(raw))
     except (TypeError, ValueError):
         return {}
-    routing = payload.get("routing") if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _scope_routing_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any]:
+    routing = _scope_settings_payload(scope_row).get("routing")
     return routing if isinstance(routing, dict) else {}
 
 

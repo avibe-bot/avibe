@@ -1258,6 +1258,7 @@
       "waiting": "本次请求未完成：{source} 暂时无法提供模型 {model}，且没有可用的备用供应商。自动恢复已结束，你可以稍后重试或切换模型。",
       "waiting_without_retry": "本次请求未完成，自动恢复已结束。你可以重试模型 {model} 或切换模型。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
+      "saved_source_unavailable": "模型 {model} 已不再提供：它的供应商不可用或已被替换。请选择其他模型后继续。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
       "last_upstream_failure": "供应商最后一次报错（{source}，HTTP {status}）：{detail}",
       "last_upstream_failure_without_status": "供应商最后一次报错（{source}）：{detail}",

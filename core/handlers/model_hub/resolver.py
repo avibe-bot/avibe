@@ -39,6 +39,10 @@ class OfferedModel(ModelHubBackendModelConfig):
     listed_hops: tuple[ModelHubRouteHopConfig, ...] = ()
 
 
+class SavedSelectionModel(OfferedModel):
+    """A single turn's saved choice; an empty chain means its bound Sources are gone."""
+
+
 @dataclass(frozen=True)
 class EffectiveModelRoute:
     manual_override: ModelHubRouteConfig | None
@@ -451,6 +455,15 @@ def inspect_exact_hop(
         model.id == hop.model_id and not model.retired
         for model in source.models
     )
+    # Routing rows may deliberately retain A until a removal is confirmed.
+    # For this projected choice the generation-scoped complete listing can
+    # independently attest B. Never extend this to another Source or target,
+    # a manual remapping, or an explicitly retired model.
+    if not inventory_member and not source_model_retired(source, hop.model_id):
+        agent = config.agents[backend]
+        row = next((m for m in agent.models if m.id == menu_model), None)
+        inventory_member = (isinstance(row, OfferedModel) and hop in row.listed_hops
+                            and normalized_model_hub_override(agent.routes.get(menu_model)) is None)
     channel_eligible = supply_channel is None or source.supply_channel == supply_channel
     model_supported = inventory_member or (
         source_supports_passthrough(source) and not source_model_retired(source, hop.model_id)

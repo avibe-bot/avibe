@@ -104,6 +104,49 @@ async def test_retry_after_config_write_failure(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("combined", [False, True], ids=["rename-in-place", "retry-reorder-and-rename"])
+async def test_native_rename_preserves_explicit_order_and_is_retryable(tmp_path, monkeypatch, combined):
+    from core.handlers.model_hub.menu_order import MenuOrder
+
+    ensure_sqlite_state()
+    service, store, _ = _service(tmp_path)
+    backend, old, new, other = "claude", "ranked-old", "ranked-new", "ranked-other"
+    agent = store.config.agents[backend]
+    agent.mode = "hub"
+    agent.models = [ModelHubBackendModelConfig(id=old), ModelHubBackendModelConfig(id=other)]
+    baseline = [m.to_payload() for m in agent.models]
+    order = service._menu_orders[backend]
+    # A temporarily withdrawn implicit row keeps its slot across both edits.
+    order.save([old, "withdrawn", other])
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as c:
+        _add_agent(c, "ranked-agent", old)
+    desired = [{**baseline[0], "id": new}, baseline[1]]
+    if combined:
+        desired.reverse()
+        with monkeypatch.context() as patch:
+            def unavailable(*_args, **_kwargs):
+                raise OSError("order disk full")
+            patch.setattr("core.handlers.model_hub.menu_order.write_state_document", unavailable)
+            with pytest.raises(ModelHubError, match="backend_model_store_busy"):
+                await service.set_agent_models(backend, baseline, desired, renames={old: new})
+        assert [r.to_payload() for r in store.load().agents[backend].models] == baseline
+        assert MenuOrder(order.path).ids == (old, "withdrawn", other)
+        with engine.connect() as c:
+            assert c.scalar(select(agents.c.model).where(agents.c.id == "ranked-agent")) == old
+        # Reopen both stores: the retry must not depend on a process-local flag.
+        snapshot = store.load()
+        service, store, _ = _service(tmp_path)
+        store.config = snapshot
+    # Same request, including the original baseline and rename, after a failed save.
+    await service.set_agent_models(backend, baseline, desired, renames={old: new})
+    with engine.connect() as c:
+        assert c.scalar(select(agents.c.model).where(agents.c.id == "ranked-agent")) == new
+    assert MenuOrder(order.path).ids == ((other, "withdrawn", new) if combined else (new, "withdrawn", other))
+    assert {row.id for row in store.load().agents[backend].models} == {new, other}
+
+
+@pytest.mark.asyncio
 async def test_automatic_rename_does_not_freeze_hops_or_require_removal_confirmation(tmp_path):
     ensure_sqlite_state()
     service, store, _ = _service(tmp_path)

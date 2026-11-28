@@ -119,11 +119,7 @@ async def dispatch_model_hub_rpc(
             await _refresh_agent_presence(service)
         return await asyncio.to_thread(service.list_agents)
     if operation == "get_agent_sources":
-        backend = payload.get("backend")
-        return await asyncio.to_thread(
-            service.get_agent_sources,
-            backend,
-        )
+        return await service.read_agent_sources(payload.get("backend"))
     if operation == "hub_offer_candidates":
         return await service.read_hub_offer_candidates(payload.get("backend"))
     if operation == "agent_model_candidates":
@@ -184,8 +180,8 @@ async def dispatch_model_hub_rpc(
             payload.get("backend"), payload.get("model_id"), payload.get("chain"),
         )
     if operation == "preview_agent_chain":
-        return service.preview_agent_chain(
-            payload.get("backend"), payload.get("model_id"), payload.get("chain"),
+        return await service.read_chain_view(
+            payload.get("backend"), payload.get("model_id"), preview=payload.get("chain"),
         )
     if operation == "add_custom_model":
         return await service.add_custom_model(payload.get("source_id"), payload.get("model"))
@@ -239,9 +235,9 @@ async def dispatch_model_hub_rpc(
     if operation == "clear_source_evidence":
         return await service.clear_source_evidence(payload.get("source_id"), payload.get("target"))
     if operation == "get_agent_chain":
-        return service.agent_chain(payload.get("backend"), payload.get("model_id"))
+        return await service.read_chain_view(payload.get("backend"), payload.get("model_id"))
     if operation == "get_agent_chains":
-        return service.agent_chains(payload.get("backend"))
+        return await service.read_chain_view(payload.get("backend"), bulk=True)
     if operation == "get_opencode_public_models":
         return service.opencode_public_models()
     if operation == "probe_agent":

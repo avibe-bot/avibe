@@ -6697,7 +6697,9 @@ def save_settings(payload: dict, *, user_context: Any = None) -> dict:
                         channel_payload.get("show_message_types"), platform
                     ),
                     custom_cwd=channel_payload.get("custom_cwd"),
-                    routing=_parse_routing(scope_settings.normalize_scope_routing(channel_payload.get("routing") or {})),
+                    routing=_parse_routing(scope_settings.normalize_scope_routing(
+                        channel_payload.get("routing") or {}, previous=existing.routing if existing else None,
+                    )),
                     require_mention=channel_payload.get("require_mention"),
                     require_bind=channel_payload.get("require_bind", existing.require_bind if existing else None),
                     _agent_name_at_load=channel_payload.get(
@@ -6734,7 +6736,7 @@ def save_thread_settings(payload: dict, *, user_context: Any = None) -> dict:
             base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
         routing_payload = settings_payload.get("routing")
         routing = (
-            _parse_routing(scope_settings.normalize_scope_routing(routing_payload))
+            _parse_routing(scope_settings.normalize_scope_routing(routing_payload, previous=base.routing))
             if isinstance(routing_payload, dict)
             else base.routing
         )
@@ -16326,7 +16328,9 @@ def save_users(payload: dict, *, user_context: Any = None) -> dict:
                 enabled=up.get("enabled", existing.enabled if existing else True),
                 show_message_types=scope_settings.normalize_scope_message_types(up.get("show_message_types"), platform),
                 custom_cwd=up.get("custom_cwd"),
-                routing=_parse_routing(scope_settings.normalize_scope_routing(up.get("routing") or {})),
+                routing=_parse_routing(scope_settings.normalize_scope_routing(
+                    up.get("routing") or {}, previous=existing.routing if existing else None,
+                )),
                 dm_chat_id=existing.dm_chat_id if existing else "",
                 pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
                 _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),

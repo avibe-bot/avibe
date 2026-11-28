@@ -321,6 +321,8 @@ class Controller:
         self.vibe_agent_store.ensure_builtin_default_agents(
             self._enabled_agent_backends(),
         )
+        if self.model_hub_service is not None:
+            self.model_hub_service.native_agent_picks = self.vibe_agent_store
 
         # Setup callbacks
         self._setup_callbacks()

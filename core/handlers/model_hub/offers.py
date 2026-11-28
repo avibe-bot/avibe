@@ -9,11 +9,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from config.v2_config import ModelHubConfig
+from config.v2_config import ModelHubConfig, ModelHubModelConfig
+from .reasoning_tiers import resolve_reasoning_tiers
 from .capability_evidence import identity_digest
 from .events import contains_credential_material
 from .identifiers import canonical_model_id
 from .state_file import write_state_document
+
+
+# These native pickers expose a single provider family. Vibey consumes the same
+# evidence for its Add candidates, but never auto-equips a model.
+NATIVE_OFFER_BACKENDS = ("claude", "codex")
+OFFER_CANDIDATE_BACKENDS = (*NATIVE_OFFER_BACKENDS, "vibey")
 
 
 @dataclass(frozen=True)
@@ -21,6 +28,7 @@ class CompleteListing:
     identity: str
     model_ids: tuple[str, ...]
     observed_at: str
+    reasoning_ids: tuple[str, ...] = ()
 
 
 class ListingFile:
@@ -49,7 +57,10 @@ class ListingFile:
                         and not contains_credential_material(mid) for mid in ids) or len(set(ids)) != len(ids):
                     raise ValueError
                 datetime.fromisoformat(at)
-                result[sid] = CompleteListing(digest, tuple(ids), at)
+                reasoning = row.get("reasoning_ids", [])
+                if not isinstance(reasoning, list) or not set(reasoning).issubset(ids):
+                    raise ValueError
+                result[sid] = CompleteListing(digest, tuple(ids), at, tuple(reasoning))
             return result
         except FileNotFoundError:
             return {}
@@ -71,10 +82,25 @@ def listed_supplier_view(config: ModelHubConfig, backend: str, listings: Mapping
     for source in config.sources:
         receipt = listings.get(source.id)
         if (source.id not in assigned or source.supply_channel != "hub" or source.protocol == "search"
-                or not source.credential_ref or source.verification_pending or source.state.status == "needs_action"
+                or not source.credential_ref or (source.verification_pending and source.kind != "subscription")
+                or source.state.status == "needs_action"
                 or not config.source_eligible_for_backend(source, backend)
                 or receipt is None or identity_digest(source) != receipt.identity):
             continue
-        ids = set(receipt.model_ids)
-        sources.append(replace(source, models=[row for row in source.models if not row.retired and row.id in ids]))
+        stored = {row.id: row for row in source.models}
+        reasoning_ids = set(receipt.reasoning_ids)
+        rows = []
+        for mid in receipt.model_ids:
+            row = stored.get(mid)
+            if row is not None and row.retired:
+                continue
+            if row is None:
+                # Inventory and routing edits are independent. A guard may have
+                # retained the old routing rows after a complete new observation.
+                tiers = resolve_reasoning_tiers(protocol=source.protocol, model_id=mid,
+                    supported_parameters=("reasoning",) if mid in reasoning_ids else None)
+                row = ModelHubModelConfig(id=mid, provenance="discovered", discovered_at=receipt.observed_at,
+                    reasoning_efforts=list(tiers.efforts), reasoning_efforts_source=tiers.source)
+            rows.append(row)
+        sources.append(replace(source, models=rows))
     return replace(config, sources=sources)

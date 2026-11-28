@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from config.v2_config import normalized_model_hub_override
+from core.handlers.model_hub.offers import NATIVE_OFFER_BACKENDS
 
 # Lowest to highest. An effort the list drops moves to the nearest one below it, else above.
 _EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
@@ -65,7 +66,7 @@ def retired_route_succession(
     agent = agents.get(backend) if isinstance(agents, Mapping) else None
     if agent is None or agent.mode != "hub" or agent.menu_kind != "fixed":
         return None
-    if backend in {"claude", "codex"}:
+    if backend in NATIVE_OFFER_BACKENDS:
         # Their Hub menus follow the assigned Sources. Absence (including a
         # missing observation after restart) is not permission to rewrite a
         # saved model or effort. Dispatch checks its current binding instead.

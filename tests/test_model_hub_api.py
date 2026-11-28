@@ -3775,13 +3775,16 @@ def test_builtin_reconcile_records_generation_and_applies_a_changed_snapshot(
     assert applies == [("codex",), ("codex",)]
 
 
+@pytest.mark.parametrize("mode", ["direct", "hub"])
 def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
     monkeypatch,
     tmp_path,
+    mode,
 ):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
     service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].mode = mode
     existing = store.config.agents["codex"].models[0].id
     snapshot = {
         "codex": {
@@ -3819,9 +3822,8 @@ def test_candidates_read_reconciles_builtins_but_other_reads_do_not(
             {"backend": "codex"},
         )
     )
-    assert "gpt-cli-refresh" in {
-        model.id for model in store.config.agents["codex"].models
-    }
+    persisted = {model.id for model in store.config.agents["codex"].models}
+    assert ("gpt-cli-refresh" in persisted) == (mode == "direct")
 
 
 def test_builtin_reconcile_loads_legacy_baseline_before_reading_snapshot(
@@ -8301,7 +8303,7 @@ def test_hub_reauth_replaces_pending_flow_unknown_to_restarted_adapter(
     assert restarted_adapter.oauth_start_calls == [(source.id, "anthropic")]
 
 
-def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
+def test_hub_reauth_discards_old_inventory_without_listing_the_reused_handle(
     tmp_path,
 ):
     service, store, adapter = _service(tmp_path)
@@ -8353,10 +8355,9 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
 
     assert result["recovered"] is True
     assert result["source"]["state"]["status"] == "standby"
-    assert {model["id"] for model in result["source"]["models"]} == {
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-    }
+    assert result["source"]["models"] == []
+    assert result["source"]["credential_generation"] != source.credential_generation
+    assert service._complete_hub_listings == {}
     assert adapter.revoked == []
     assert service.revocations.list() == []
 
@@ -8400,31 +8401,12 @@ def test_completed_hub_reauth_blocks_recovery_before_discovery(tmp_path):
 
 def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
     async def run_race():
-        class BlockingDiscoveryAdapter(FakeAdapter):
-            def __init__(self):
-                super().__init__()
-                self.discovery_calls = 0
-                self.discovery_started = asyncio.Event()
-                self.release_discovery = asyncio.Event()
-
-            async def discover_models(
-                self,
-                vendor,
-                protocol,
-                base_url,
-                credential_ref,
-                *,
-                start_engine=True,
-            ):
-                self.discovery_calls += 1
-                if self.discovery_calls > 1:
-                    raise ModelDiscoveryError("duplicate materialization")
-                self.discovery_started.set()
-                await self.release_discovery.wait()
-                return (DiscoveredModel(id="claude-opus-4-6"),)
+        class NoRenewalDiscoveryAdapter(FakeAdapter):
+            async def discover_models(self, *_args, **_kwargs):
+                pytest.fail("renewal must not invoke optional discovery")
 
         store = MemoryStore()
-        adapter = BlockingDiscoveryAdapter()
+        adapter = NoRenewalDiscoveryAdapter()
         service = ModelHubService(
             store=store,
             adapter=adapter,
@@ -8463,17 +8445,33 @@ def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
             }
         )
 
+        # Race the durable credential write, not an inventory read the renewal
+        # no longer performs. Both polls must observe a single generation.
+        writing, release = asyncio.Event(), asyncio.Event()
+        commit = service._commit_synced
+        generations = []
+
+        async def held_commit(previous, config, **kwargs):
+            generations.append(config.sources[0].credential_generation)
+            writing.set()
+            await asyncio.wait_for(release.wait(), 3)
+            await commit(previous, config, **kwargs)
+
+        service._commit_synced = held_commit
         first = asyncio.create_task(service.oauth_status(flow["flow_id"]))
-        await adapter.discovery_started.wait()
-        second = asyncio.create_task(service.oauth_status(flow["flow_id"]))
-        await asyncio.sleep(0)
-        adapter.release_discovery.set()
-        results = await asyncio.gather(first, second)
-        return results, service, store, adapter, flow["flow_id"]
+        try:
+            await asyncio.wait_for(writing.wait(), 3)
+            second = asyncio.create_task(service.oauth_status(flow["flow_id"]))
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        results = await asyncio.wait_for(asyncio.gather(first, second), 3)
+        return results, service, store, generations, flow["flow_id"]
 
-    results, service, store, adapter, flow_id = asyncio.run(run_race())
+    results, service, store, generations, flow_id = asyncio.run(run_race())
 
-    assert adapter.discovery_calls == 1
+    assert generations == [store.config.sources[0].credential_generation]
+    assert generations[0] is not None
     assert results[0] == results[1]
     assert store.config.sources[0].state.status == "standby"
     binding = service.oauth_flows.binding(flow_id)
@@ -9267,15 +9265,15 @@ def test_hub_reauth_returns_terminal_tail_when_registry_completion_fails(
     assert result["flow"]["state"] == "success"
     assert result["source"]["state"]["status"] == "standby"
     assert result["recovered"] is False
-    assert result["interrupted_pairs"] == []
+    # Registry failure does not undo consent. Without a listing for the new
+    # grant, the old subscription model is a real supply gap, not a recovery.
+    assert result["interrupted_pairs"] == [{"backend": "claude", "model_id": "claude-opus-4-6", "agents": []}]
+    assert store.config.sources[0].credential_generation is not None
+    assert service._complete_hub_listings == {}
     assert completion_calls == (2 if registry_failure == "missing" else 1)
 
 
-@pytest.mark.parametrize("failure", ["discovery", "sync"])
-def test_failed_same_handle_hub_reauth_requires_user_action(
-    tmp_path,
-    failure,
-):
+def test_failed_same_handle_hub_reauth_sync_requires_user_action(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_huboauth01",
@@ -9305,17 +9303,11 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
         }
     )
 
-    async def fail_discovery(vendor, protocol, base_url, credential_ref, *, start_engine=True):
-        raise ModelDiscoveryError("safe discovery failure")
-
-    if failure == "discovery":
-        adapter.discover_models = fail_discovery
-    else:
-        adapter.fail_sync = True
+    adapter.fail_sync = True
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.oauth_status(flow["flow_id"]))
 
-    assert exc_info.value.code == ("discovery_failed" if failure == "discovery" else "engine_down")
+    assert exc_info.value.code == "engine_down"
     persisted = store.config.sources[0]
     assert persisted.credential_ref == "cred_hub_reused"
     # The material behind the reused ref may be the new grant's, so the Source leaves the earlier grant's identity.
@@ -9459,14 +9451,13 @@ def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
         separators=(",", ":"),
     )
 
-    async def fail_discovery(vendor, protocol, base_url, credential_ref, *, start_engine=True):
-        raise ModelDiscoveryError("safe discovery failure")
-
-    adapter.discover_models = fail_discovery
+    # Optional discovery cannot fail a renewal. Inject a failure at the
+    # actual commit boundary to retain the replacement-custody rollback test.
+    adapter.fail_sync = True
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.oauth_status(flow["flow_id"]))
 
-    assert exc_info.value.code == "discovery_failed"
+    assert exc_info.value.code == "engine_down"
     assert (
         json.dumps(
             store.config.to_payload(),
@@ -10113,10 +10104,9 @@ def test_cancel_materializes_terminal_successful_hub_reauth(tmp_path):
 
     persisted = store.config.sources[0]
     assert persisted.state.status == "standby"
-    assert {model.id for model in persisted.models} == {
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-    }
+    assert persisted.models == []
+    assert persisted.credential_generation is not None and persisted.verification_pending == persisted.credential_generation
+    assert service._complete_hub_listings == {}
     binding = service.oauth_flows.binding(flow["flow_id"])
     assert binding is not None
     assert binding.completed is True

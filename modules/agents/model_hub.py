@@ -46,6 +46,7 @@ from core.handlers.model_hub.provenance import (
     render_turn_outcome_copy,
     supply_interruption_reason,
 )
+from core.handlers.model_hub.offers import NATIVE_OFFER_BACKENDS
 from core.handlers.model_hub.saved_pick import SavedHubPick
 from core.handlers.model_hub.resolver import (
     BackendName,
@@ -145,6 +146,9 @@ class ModelHubLaunch:
     source_identity: Optional[str] = None
     # Vibey only: where the target model's list price steps up with its context, ascending (C-6, C-9 section 1).
     context_price_steps: tuple[int, ...] = ()
+    # Only a saved Codex launch needs a catalog distinct from the public snapshot.
+    # Pass model metadata only; the process catalog does not need grants or routes.
+    private_catalog_rows: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, compare=False)
 
     def to_hop_resolution(self) -> dict[str, Any]:
         """Project C-6 from the same launch that owns routing and credentials."""
@@ -363,7 +367,7 @@ async def resolve_model_hub_launch(
             turn_lookup = getattr(manager, "model_hub_turn_id_for_task", None)
             turn_id = turn_lookup() if callable(turn_lookup) else None
         snapshot = {"config": config} if config is not None else {}
-        if backend in ("claude", "codex") and context is not None:
+        if backend in NATIVE_OFFER_BACKENDS and context is not None:
             from core.agent_session_context import resolve_context_agent_session_target
             from core.handlers.model_hub.saved_pick import read_session_pick
 
@@ -1165,8 +1169,8 @@ class ModelHubRuntimeRouter:
         process_scope: Optional[str],
         turn_id: Optional[str],
         listed_only: bool = False,
+        view: ModelHubConfig | None = None,
     ) -> ModelHubError:
-        view = None
         if listed_only:
             # A backend that addresses only listed rows cannot take a manual
             # Route retained for an id its list does not hold.
@@ -1220,7 +1224,7 @@ class ModelHubRuntimeRouter:
                 )
                 self._last_supply_state[supply_key] = current_state
         return ModelHubError(
-            "mapping_target_unavailable",
+            turn_outcome.refusal_code,
             status=409,
             supply_state=supply_state,
             blockers=exact_hop_blockers(projection_resolution),
@@ -1290,7 +1294,7 @@ class ModelHubRuntimeRouter:
         change cannot split them.
         """
         config = self.service.store.load()
-        for backend in ("claude", "codex"):
+        for backend in NATIVE_OFFER_BACKENDS:
             config = self.service.project_offer_menu(config, backend)
         return config
 
@@ -1374,7 +1378,7 @@ class ModelHubRuntimeRouter:
         requested_model = str(requested_model or "").strip()
         if backend not in MODEL_HUB_BACKENDS:
             return self._direct_launch(backend, requested_model)
-        config = config if config is not None else self.snapshot()
+        config = config if config is not None else await asyncio.to_thread(self.snapshot)
         if saved_pick is not None:
             if saved_pick.backend != backend or saved_pick.model.id != requested_model or config.agents[backend].mode != "hub":
                 saved_pick = None
@@ -1401,6 +1405,7 @@ class ModelHubRuntimeRouter:
                 requested_model=requested_model,
                 process_scope=process_scope,
                 turn_id=turn_id,
+                view=config if saved_pick is not None else None,
             )
 
         target_model = resolution.target_model
@@ -1502,6 +1507,8 @@ class ModelHubRuntimeRouter:
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
                 gateway_request_metadata=request_metadata,
+                private_catalog_rows=(tuple(row.to_payload() for row in config.agents[backend].models)
+                                      if backend == "codex" and saved_pick is not None else None),
                 hosted_tools=hosted_tools,
             )
         self._emit_transition(launch, config)

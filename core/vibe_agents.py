@@ -38,7 +38,7 @@ from storage.models import (
     scopes,
     state_meta,
 )
-from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, record_explicit_pick
+from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, SavedHubPick, record_explicit_pick
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
 from storage.settings_revision import (
     RUNTIME_SETTINGS_SCOPE_TYPES,
@@ -1234,6 +1234,34 @@ class VibeAgentStore:
 
             publish_bots_changed(str(record["handle"]))
         return agent
+
+    def bind_direct_hub_selections(self, backend: str, planned: dict[str, SavedHubPick]) -> None:
+        """Attach only route intent to the unchanged live Agent row, never change its choice."""
+        if not planned:
+            return
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            rows = conn.execute(select(agents).where(
+                agents.c.backend == backend, agents.c.archived_at.is_(None), agents.c.enabled == 1,
+                agents.c.name.in_(planned),
+            )).mappings().all()
+            for row in rows:
+                agent = self._from_row(row)
+                pick = planned[agent.name]
+                if agent.model != pick.model.id:
+                    continue  # The user changed the selection while the switch was being planned.
+                previous = SavedHubPick.from_payload(agent.metadata.get(PICK_METADATA_KEY))
+                if previous is not None and previous.hops:
+                    continue  # A prior explicit pick already owns its binding.
+                conn.execute(agents.update().where(agents.c.id == agent.id).values(
+                    metadata_json=_json_dumps({**agent.metadata, PICK_METADATA_KEY: pick.to_payload()}),
+                    updated_at=_utc_now_iso(),
+                ))
+
+    def named_hub_picks(self, backend: str) -> dict[str, SavedHubPick]:
+        return {agent.name: pick for agent in self.list_agents(include_disabled=False)
+                if agent.backend == backend and (pick := SavedHubPick.from_payload(agent.metadata.get(PICK_METADATA_KEY)))
+                and pick.backend == backend and pick.model.id == agent.model}
 
     def set_enabled(self, name: str, enabled: bool, *, user_context: Any = None) -> VibeAgent:
         return self.update(name, enabled=enabled, user_context=user_context)

@@ -661,12 +661,11 @@ class CodexAgent(BaseAgent):
             self._bind_runtime_agent_session_id(request)
             router = getattr(self.controller, "model_hub_runtime", None)
             hub_snapshot = getattr(router, "snapshot", None)
-            # The turn's whole configuration is one load, taken here before
-            # anything awaits: its Hub launch, catalog, spec, and process all
-            # derive from it, so a concurrent save or renewal cannot split them.
+            # Capture one Hub snapshot off-loop for this turn's launch, catalog,
+            # spec and process; none of those consumers reload it independently.
             inputs = self._launch_inputs(
                 request.working_path,
-                hub_config=hub_snapshot() if callable(hub_snapshot) else None,
+                hub_config=await asyncio.to_thread(hub_snapshot) if callable(hub_snapshot) else None,
             )
             if router is not None:
                 from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
@@ -1573,6 +1572,7 @@ class CodexAgent(BaseAgent):
         config: Any = None,
         *,
         inputs: _LaunchInputs | None = None,
+        private_rows: tuple[dict[str, Any], ...] | None = None,
     ) -> CodexHubCatalog:
         """Bind Hub metadata to this Agent's exact configured Codex binary.
 
@@ -1592,7 +1592,9 @@ class CodexAgent(BaseAgent):
             model_hub_service = getattr(self.controller, "model_hub_service", None)
             store = getattr(model_hub_service, "store", None)
             config = store.load() if store is not None else None
-        if config is not None:
+        if private_rows is not None:
+            configured_models = list(private_rows)
+        elif config is not None:
             configured_models = [model.to_payload() for model in config.agents["codex"].models]
         key = (
             json.dumps(binary_identity, sort_keys=True),
@@ -2217,7 +2219,8 @@ class CodexAgent(BaseAgent):
         if launch is not None and launch.channel == "hub":
             from modules.agents.model_hub import build_codex_hub_launch
 
-            catalog = (await self.prepare_model_hub_runtime(inputs.hub_config, inputs=inputs)).retain()
+            catalog_options = {"private_rows": launch.private_catalog_rows} if launch.private_catalog_rows is not None else {}
+            catalog = (await self.prepare_model_hub_runtime(inputs.hub_config, inputs=inputs, **catalog_options)).retain()
             try:
                 args, hub_env = build_codex_hub_launch(
                     [],

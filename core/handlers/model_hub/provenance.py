@@ -43,7 +43,7 @@ from .events import (
     event_reason_label,
 )
 from .hosted_turn import TurnHostedTools
-from .resolver import BackendName, ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
+from .resolver import BackendName, ModelHubTurnResolution, SavedSelectionModel, parse_model_hub_timestamp, source_eligible_for_backend
 from .state_file import write_state_document
 
 
@@ -293,6 +293,12 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         connection_failure_key="modelHub.launch.last_connection_failure",
         passthrough_model_key="modelHub.launch.passthrough_model_unlisted",
     ),
+    "turn.no_candidate.saved_source_unavailable": TurnOutcomeRenderingRule(
+        outcome="no_candidate",
+        discriminator="saved_source_unavailable",
+        copy_keys=(("interrupted", "modelHub.launch.saved_source_unavailable"),),
+        holds_input=True,
+    ),
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
         outcome="no_candidate",
         discriminator="route_unconfigured",
@@ -342,6 +348,9 @@ class TurnOutcomeProjectionInput:
     last_upstream_failure: TurnUpstreamFailure | None = None
     # Display-only inventory context; never a verdict about why upstream failed.
     passthrough_model: str | None = None
+    @property
+    def refusal_code(self) -> str:
+        return "saved_source_unavailable" if self.discriminator == "saved_source_unavailable" else "mapping_target_unavailable"
 
 
 def turn_outcome_failing_source_id(projection: TurnOutcomeProjectionInput) -> str | None:
@@ -527,9 +536,10 @@ def no_candidate_decision(
     if not resolution.route_unconfigured:
         return "turn.no_candidate.blocked"
     requested = resolution.requested_model
-    if requested and all(
-        model.id != requested for model in config.agents[resolution.backend].models
-    ):
+    model = next((row for row in config.agents[resolution.backend].models if row.id == requested), None)
+    if isinstance(model, SavedSelectionModel) and not model.listed_hops:
+        return "turn.no_candidate.saved_source_unavailable"
+    if requested and model is None:
         return "turn.no_candidate.unlisted"
     return "turn.no_candidate.unconfigured"
 

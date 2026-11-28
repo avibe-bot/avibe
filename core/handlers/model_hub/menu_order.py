@@ -31,13 +31,18 @@ class MenuOrder:
         rank = {mid: index for index, mid in enumerate(self.ids)}
         return sorted(rows, key=lambda row: rank.get(row.id, len(rank))) if rank else rows
 
-    def save(self, desired: list[str]) -> None:
+    def save(self, desired: list[str], renames: dict[str, str] | None = None) -> None:
         if self.damaged:
             raise OSError("unreadable menu order")
         # Keep positions for temporarily absent offers without displaying them.
         shown = set(desired)
         reordered = iter(desired)
-        result = [next(reordered) if mid in shown else mid for mid in self.ids]
+        # The renamed row takes its own slot, not that of a previously withdrawn
+        # row that happened to use the destination ID. Leave unrelated slots alone.
+        moves = renames or {}
+        destinations = {new for old, new in moves.items() if old in self.ids}
+        prior = [moves.get(mid, mid) for mid in self.ids if mid not in destinations]
+        result = [next(reordered) if mid in shown else mid for mid in prior]
         result.extend(reordered)
         if tuple(result) != self.ids:
             write_state_document(self.path, result)

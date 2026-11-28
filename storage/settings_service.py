@@ -719,14 +719,16 @@ def _scope_pick_fields(conn: Connection, previous, route: RoutingSettings) -> di
     from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, record_explicit_pick
 
     before = previous.routing if previous else None
-    route._hub_pick = None if before is None else before._hub_pick
-    if before is None or (before.agent_name, before.model) != (route.agent_name, route.model):
-        fields = {}
+    same_choice = before is not None and (before.agent_name, before.model) == (route.agent_name, route.model)
+    route._hub_pick = before._hub_pick if same_choice else None
+    if not same_choice or route._model_reselected:
+        fields = {PICK_METADATA_KEY: route._hub_pick} if route._hub_pick else {}
         if route.agent_name and route.model:
             backend = conn.execute(select(agents.c.backend).where(agents.c.name == route.agent_name)).scalar_one_or_none()
             if backend:
                 record_explicit_pick(fields, backend, route.model)
         route._hub_pick = fields.get(PICK_METADATA_KEY)
+    route._model_reselected = False
     return {PICK_METADATA_KEY: route._hub_pick} if route._hub_pick else {}
 
 
