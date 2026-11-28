@@ -61,6 +61,14 @@ final class DirectWebViewRegistry {
     }
 }
 
+/// The production bridge parses `health.connect` into these options
+/// (HealthSyncCoordinator.swift); the fixture never connects Health.
+struct HealthConnectionOptions {
+    var supportedMetrics: [String] = []
+    var requestedMetrics: [String] = []
+    var expansion = false
+}
+
 enum NativePushError: Error, Equatable {
     case unavailable
     case permissionDenied
