@@ -94,24 +94,54 @@ def _viewer_context(subject: str = "viewer-1") -> AuthorizationContext:
 def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
     text_body = (
         "好，已经起了一个后台 Agent（#sesw34zgzgcvp），同时看看 #<ses6jr7c5h2q6> 和 @<bot:product>。\n"
+        "- parent\n"
+        "    - child sees #<sesnested0001> and #sesnested0002\n"
+        "1. step\n"
+        "    ordered continuation #<sesordered001>\n"
+        "\n"
+        "    loose continuation #sesloose00001\n"
+        "\n"
+        "Para line\n"
+        "    lazy continuation #<seslazy000001>\n"
+        "\n"
+        "Use ``` to open a fence. Then #<sesafterbt001>.\n"
+        "\n"
         "Code span `#<sescode00001>` and `#sescode00002` stay untouched.\n"
         "```\n#<sesfence0001>\n#sesfence0002\n```\n"
+        "````markdown\n```\n#<sesnestedf01>\n```\n#<sesnestedf02>\n````\n"
         "~~~\n#sestilde0001\n~~~\n"
+        "\n"
         "    #<sesindent001>\n"
         "\t#sesindent002\n"
+        "\n"
         "URL fragment https://example.com/page#sesurl000001, [see #seslabel0001](https://example.com), "
         "[link](#seslink00001), and <https://example.com/#sesauto00001> stay untouched.\n"
         "```ts\n#sesstreaming1\n"
     )
     sids, bots = extract_mention_candidates(text_body, include_bare_sessions=True)
-    assert sids == ["sesw34zgzgcvp", "ses6jr7c5h2q6"]
+    assert sids == [
+        "sesw34zgzgcvp",
+        "ses6jr7c5h2q6",
+        "sesnested0001",
+        "sesnested0002",
+        "sesordered001",
+        "sesloose00001",
+        "seslazy000001",
+        "sesafterbt001",
+    ]
     assert bots == ["product"]
 
     # Without bare mode (e.g. non-agent messages), bare #ses... is ignored.
     sids_bracket_only, bots_bracket_only = extract_mention_candidates(
         text_body, include_bare_sessions=False
     )
-    assert sids_bracket_only == ["ses6jr7c5h2q6"]
+    assert sids_bracket_only == [
+        "ses6jr7c5h2q6",
+        "sesnested0001",
+        "sesordered001",
+        "seslazy000001",
+        "sesafterbt001",
+    ]
     assert bots_bracket_only == ["product"]
 
 

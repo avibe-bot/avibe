@@ -143,9 +143,10 @@ describe('linkifyMentions', () => {
     expect(text).toContain('`#sesw34zgzgcvp`');
   });
 
-  it('in agentReply mode, skips URL fragments, markdown links, indented code lines, and unclosed fences', () => {
+  it('in agentReply mode, skips URL fragments, markdown links, real indented code blocks, and line-start unclosed fences', () => {
     const input =
       'See https://example.com/#sesw34zgzgcvp, [see #sesw34zgzgcvp](https://example.com), '
+      + '[notes for #<sesw34zgzgcvp>](https://example.com), '
       + '[doc](#sesw34zgzgcvp), and #sesw34zgzgcvp.\n\n'
       + '    #<sesw34zgzgcvp>\n    #<sesmissing99>\n\t#sesw34zgzgcvp\n\n'
       + '```ts\n#sesw34zgzgcvp\n#<sesmissing99>';
@@ -157,13 +158,64 @@ describe('linkifyMentions', () => {
 
     const replaced = verifyEdits(input, text, edits);
     expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '#\\<sesw34zgzgcvp>'],
       ['#sesw34zgzgcvp', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
     ]);
     expect(text).toContain('https://example.com/#sesw34zgzgcvp');
     expect(text).toContain('[see #sesw34zgzgcvp](https://example.com)');
+    expect(text).toContain('[notes for #\\<sesw34zgzgcvp>](https://example.com)');
     expect(text).toContain('[doc](#sesw34zgzgcvp)');
     expect(text).toContain('    #<sesw34zgzgcvp>\n    #<sesmissing99>\n\t#sesw34zgzgcvp');
     expect(text).toContain('```ts\n#sesw34zgzgcvp\n#<sesmissing99>');
+  });
+
+  it('in agentReply mode, matches closing fence length so 4-backtick fences protect inner 3-backtick examples', () => {
+    const input =
+      '````markdown\n```\n#<sesw34zgzgcvp>\n```\n#<sesw34zgzgcvp>\n#<sesmissing99>\n````\n\nAfter #<sesw34zgzgcvp>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('````markdown\n```\n#<sesw34zgzgcvp>\n```\n#<sesw34zgzgcvp>\n#<sesmissing99>\n````');
+  });
+
+  it('in agentReply mode, still resolves nested 4-space bullets, list/paragraph continuations, and prose after mid-sentence triple backticks', () => {
+    const input =
+      '- parent\n'
+      + '    - child sees #<sesw34zgzgcvp> and #ses6jr7c5h2q6\n'
+      + '1. step\n'
+      + '    ordered continuation #<sesw34zgzgcvp>\n'
+      + '\n'
+      + '    loose list continuation #ses6jr7c5h2q6\n'
+      + '\n'
+      + 'Para line\n'
+      + '    lazy continuation #<sesw34zgzgcvp>\n'
+      + '\n'
+      + 'Use ``` to open a fence. Then #<ses6jr7c5h2q6>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true },
+        { kind: 'session', session_id: 'ses6jr7c5h2q6', title: 'Bridge', openable: true },
+      ],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#ses6jr7c5h2q6', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#ses6jr7c5h2q6', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<ses6jr7c5h2q6>', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+    ]);
   });
 
   it('escapes angle brackets and backticks in resolved titles so autolinks cannot nest', () => {

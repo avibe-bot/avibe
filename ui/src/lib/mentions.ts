@@ -112,14 +112,26 @@ export type LinkifyMentionsOptions = {
 };
 
 const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
+const LIST_ITEM_LINE_RE = /^ {0,3}(?:[-*+]|\d+[.)])[ \t]/;
+const LIST_MARKER_RE = /^(?:[-*+]|\d+[.)])[ \t]/;
+const FENCE_START_RE = /^\n? {0,3}(?:```|~~~)/;
+const INLINE_CODE_SPAN_RE = /(`+)[^`\n]+?\1/g;
 
-// Segments skipped verbatim during mention rewriting: fenced code blocks
-// (closed or still-open while streaming), inline code spans, autolinks
-// (`<https://...>`), full Markdown links (`[label](dest)` — so mentions inside
-// an existing link label never create nested links), and bare link destinations
-// (`](dest)` — fallback when a link label itself contains nested brackets).
+// Segments skipped during mention rewriting:
+// 1. Line-start fenced code blocks (closed at a line-start closing fence, or
+//    still open at end-of-text while streaming).
+// 2. Closed mid-line fenced blocks (for backwards compatibility with inline
+//    fences that have an explicit closing fence).
+// 3. Inline code spans.
+// 4. Autolinks (`<https://...>`).
+// 5. Full Markdown inline links (`[label](dest)` — so mentions inside an
+//    existing link label never create nested links; in agentReply mode,
+//    bracketed `<…>` markers inside the label are still backslash-escaped so
+//    CommonMark does not swallow them as raw HTML).
+// 6. Bare link destinations (`](dest)` fallback when a label contains nested
+//    brackets).
 const SKIP_SEGMENT_RE =
-  /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|(`+)[^`\n]+?\1|<https?:\/\/[^>\s]+>|\[[^\]\n]*\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
+  /(?:^|\n) {0,3}(`{3,})[^`\n]*(?:\n[\s\S]*?(?:\n {0,3}\1`*[ \t]*(?=\n|$)|$)|$)|(?:^|\n) {0,3}(~{3,})[^\n]*(?:\n[\s\S]*?(?:\n {0,3}\2~*[ \t]*(?=\n|$)|$)|$)|(`{3,})(?:(?!\n\n)[\s\S])*?\3|(~{3,})(?:(?!\n\n)[\s\S])*?\4|(`+)[^`\n]+?\5|<https?:\/\/[^>\s]+>|(?<linkLabel>\[[^\]\n]*\])(?<linkDest>\((?:[^()\s]|(?:\([^()\s]*\)))*\))|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
 
 /**
  * Rewrite `@<…>` / `#<…>` (and, in Agent replies, resolved bare `#ses...`)
@@ -228,6 +240,27 @@ export function linkifyMentions(
     );
 
   const rewriteLine = agentReply ? rewriteAgent : rewriteLegacy;
+
+  const isBlankPhysicalLine = (lineStart: number): boolean => {
+    const nl = text.indexOf('\n', lineStart);
+    const lineEnd = nl < 0 ? text.length : nl;
+    for (let i = lineStart; i < lineEnd; i += 1) {
+      const ch = text[i];
+      if (ch !== ' ' && ch !== '\t' && ch !== '\r') return false;
+    }
+    return true;
+  };
+
+  // CommonMark indented-code block state tracked across the full text:
+  // an indented line (4+ spaces or tab) is code ONLY when it continues an
+  // indented code block or follows a blank line / start of text whose last
+  // non-blank line was NOT a list item or list continuation, and its own
+  // content does not start with a list marker.
+  let afterBlank = true;
+  let inIndentedCode = false;
+  let lastNonBlankWasList = false;
+  let currentLineIsCode = false;
+
   const rewrite = (segment: string, base: number): string => {
     let at = base;
     return segment
@@ -236,14 +269,70 @@ export function linkifyMentions(
         const lineAt = at;
         at += line.length + 1;
         const atLineStart = index > 0 || base === 0 || text[base - 1] === '\n';
-        if (atLineStart && INDENTED_CODE_LINE_RE.test(line)) return line;
+        if (atLineStart) {
+          if (isBlankPhysicalLine(lineAt)) {
+            afterBlank = true;
+            currentLineIsCode = false;
+            return line;
+          }
+          if (INDENTED_CODE_LINE_RE.test(line)) {
+            if (LIST_MARKER_RE.test(line.trimStart())) {
+              inIndentedCode = false;
+              afterBlank = false;
+              lastNonBlankWasList = true;
+              currentLineIsCode = false;
+            } else if (inIndentedCode || (afterBlank && !lastNonBlankWasList)) {
+              inIndentedCode = true;
+              afterBlank = false;
+              currentLineIsCode = true;
+              return line;
+            } else {
+              inIndentedCode = false;
+              afterBlank = false;
+              currentLineIsCode = false;
+            }
+          } else {
+            inIndentedCode = false;
+            afterBlank = false;
+            lastNonBlankWasList = LIST_ITEM_LINE_RE.test(line);
+            currentLineIsCode = false;
+          }
+        } else if (currentLineIsCode) {
+          return line;
+        }
         return rewriteLine(line, lineAt);
       })
       .join('\n');
   };
 
-  // Partition on code blocks/spans, autolinks, and link destinations; rewrite
-  // only the surrounding prose so markers in code and URLs stay literal.
+  // Escape bracketed `<…>` markers inside a skipped Markdown link label in
+  // agentReply mode so CommonMark does not swallow `<ses...>` as raw inline
+  // HTML while keeping the outer link intact and leaving code spans untouched.
+  const escapeLinkLabel = (label: string, base: number): string => {
+    const escapeSegment = (seg: string, segBase: number): string =>
+      seg.replace(MENTION_MARKER_RE, (full: string, trigger: string, inner: string, at: number) => {
+        const escaped = `${trigger}\\<${inner}>`;
+        edits.push({ start: segBase + at, end: segBase + at + full.length, inserted: escaped.length });
+        return escaped;
+      });
+    let out = '';
+    let cursor = 0;
+    INLINE_CODE_SPAN_RE.lastIndex = 0;
+    for (let cm = INLINE_CODE_SPAN_RE.exec(label); cm; cm = INLINE_CODE_SPAN_RE.exec(label)) {
+      if (cm.index > cursor) {
+        out += escapeSegment(label.slice(cursor, cm.index), base + cursor);
+      }
+      out += cm[0];
+      cursor = cm.index + cm[0].length;
+    }
+    if (cursor < label.length) {
+      out += escapeSegment(label.slice(cursor), base + cursor);
+    }
+    return out;
+  };
+
+  // Partition on code blocks/spans, autolinks, and links; rewrite only the
+  // surrounding prose so markers in code and URLs stay literal.
   let result = '';
   let last = 0;
   SKIP_SEGMENT_RE.lastIndex = 0;
@@ -251,8 +340,23 @@ export function linkifyMentions(
     if (m.index > last) {
       result += rewrite(text.slice(last, m.index), last);
     }
-    result += m[0];
-    last = m.index + m[0].length;
+    const seg = m[0];
+    const linkLabel = m.groups?.linkLabel;
+    const linkDest = m.groups?.linkDest;
+    if (agentReply && linkLabel !== undefined && linkDest !== undefined && !currentLineIsCode) {
+      result += escapeLinkLabel(linkLabel, m.index) + linkDest;
+    } else {
+      result += seg;
+    }
+    // Update block state when a skipped segment begins at a line start or is a
+    // fenced code block.
+    if (FENCE_START_RE.test(seg) || m.index === 0 || text[m.index - 1] === '\n') {
+      inIndentedCode = false;
+      afterBlank = false;
+      lastNonBlankWasList = false;
+      currentLineIsCode = false;
+    }
+    last = m.index + seg.length;
   }
   if (last < text.length) {
     result += rewrite(text.slice(last), last);

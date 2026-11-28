@@ -51,7 +51,13 @@ export const SessionMentionChip: React.FC<SessionMentionChipProps> = ({
     labelText = trimmedProp || t('workbench.untitledSession');
   }
 
-  const displayNode = labelText !== null ? t('workbench.sessionMentionName', { title: labelText }) : fallback;
+  const translated = labelText !== null
+    ? t('workbench.sessionMentionName', { title: labelText })
+    : null;
+  const displayNode =
+    translated && translated !== 'workbench.sessionMentionName'
+      ? translated
+      : fallback;
   const tooltip = labelText ?? undefined;
 
   const chipClassName = cn(

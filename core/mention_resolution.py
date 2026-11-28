@@ -43,19 +43,34 @@ logger = logging.getLogger(__name__)
 # below SQLite's bind-parameter limit.
 _SQL_IN_CHUNK_SIZE = 400
 
-# Matches fenced code blocks (closed or still-open while streaming), inline code
-# spans (matching backtick run lengths, no newline inside), autolinks
-# (`<https://...>`), full Markdown inline links (`[label](dest)` — so mentions
-# inside an existing link label never create nested links), and bare link
-# destinations (`](dest)` fallback when a label contains nested brackets).
-# Everything matched here is passed through verbatim.
+# Matches:
+# 1. Line-start fenced code blocks (closed at a line-start closing fence, or
+#    still open at end-of-text while streaming).
+# 2. Closed mid-line fenced blocks (for backwards compatibility with inline
+#    fences that have an explicit closing fence).
+# 3. Inline code spans (matching backtick run lengths, no newline inside).
+# 4. Autolinks (`<https://...>`).
+# 5. Full Markdown inline links (`[label](dest)` — so mentions inside an
+#    existing link label never create nested links).
+# 6. Bare link destinations (`](dest)` fallback when a label contains nested
+#    brackets).
 _SKIP_SEGMENT_RE = re.compile(
-    r"(?P<fence>```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$))"
+    r"(?P<line_fence>"
+    r"(?:^|\n) {0,3}(?P<lf_bt>`{3,})[^`\n]*(?:\n[\s\S]*?(?:\n {0,3}(?P=lf_bt)`*[ \t]*(?=\n|$)|$)|$)"
+    r"|(?:^|\n) {0,3}(?P<lf_tilde>~{3,})[^\n]*(?:\n[\s\S]*?(?:\n {0,3}(?P=lf_tilde)~*[ \t]*(?=\n|$)|$)|$)"
+    r")"
+    r"|(?P<fence>"
+    r"(?P<f_bt>`{3,})(?:(?!\n\n)[\s\S])*?(?P=f_bt)"
+    r"|(?P<f_tilde>~{3,})(?:(?!\n\n)[\s\S])*?(?P=f_tilde)"
+    r")"
     r"|(?P<code_span>(?P<bt>`+)[^`\n]+?(?P=bt))"
     r"|(?P<autolink><https?://[^>\s]+>)"
     r"|(?P<md_link>\[[^\]\n]*\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))"
     r"|(?P<link_dest>\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))",
 )
+
+_LIST_ITEM_LINE_RE = re.compile(r"^ {0,3}(?:[-*+]|\d+[.)])[ \t]")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]")
 
 # Bracketed Session (`#<session-id>`) and Bot (`@<bot:handle>`) markers.
 _BRACKETED_MENTION_RE = re.compile(r"(?P<trigger>[#@])<(?P<inner>[^>\n]+)>")
@@ -159,19 +174,57 @@ def _has_runtime_management_access(context: AuthorizationContext) -> bool:
 def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
     """Yield ``(start, end, is_prose)`` partitioning *text* around code/URLs.
 
-    Skips fenced code blocks, inline code spans, autolinks, Markdown link
-    destinations, and CommonMark indented code lines (4+ leading spaces or a
-    leading tab at an actual line start).
+    Skips fenced code blocks, inline code spans, autolinks, Markdown links, and
+    CommonMark indented code blocks (4+ spaces or a leading tab following a
+    blank line or start of text whose preceding non-blank line is not a list
+    item/continuation, and whose content does not start with a list marker).
     """
 
+    def _is_blank_physical_line(line_start: int) -> bool:
+        nl = text.find("\n", line_start)
+        line_end = len(text) if nl < 0 else nl
+        return not text[line_start:line_end].strip(" \t\r")
+
+    after_blank = True
+    in_indented_code = False
+    last_non_blank_was_list = False
+    current_line_is_code = False
+
     def _split_indented_lines(seg_start: int, seg_end: int) -> Iterable[tuple[int, int, bool]]:
+        nonlocal after_blank, in_indented_code, last_non_blank_was_list, current_line_is_code
         cursor = seg_start
         while cursor < seg_end:
             nl = text.find("\n", cursor, seg_end)
             line_end = seg_end if nl < 0 else nl + 1
             at_line_start = cursor == 0 or text[cursor - 1] == "\n"
-            is_indented = at_line_start and text.startswith(("    ", "\t"), cursor, line_end)
-            yield cursor, line_end, not is_indented
+            if at_line_start:
+                if _is_blank_physical_line(cursor):
+                    after_blank = True
+                    current_line_is_code = False
+                    yield cursor, line_end, True
+                    cursor = line_end
+                    continue
+                line = text[cursor:line_end]
+                if line.startswith(("    ", "\t")):
+                    if _LIST_MARKER_RE.match(line.lstrip(" \t")):
+                        in_indented_code = False
+                        after_blank = False
+                        last_non_blank_was_list = True
+                        current_line_is_code = False
+                    elif in_indented_code or (after_blank and not last_non_blank_was_list):
+                        in_indented_code = True
+                        after_blank = False
+                        current_line_is_code = True
+                    else:
+                        in_indented_code = False
+                        after_blank = False
+                        current_line_is_code = False
+                else:
+                    in_indented_code = False
+                    after_blank = False
+                    last_non_blank_was_list = bool(_LIST_ITEM_LINE_RE.match(line))
+                    current_line_is_code = False
+            yield cursor, line_end, not current_line_is_code
             cursor = line_end
 
     pos = 0
@@ -179,6 +232,16 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
         if match.start() > pos:
             yield from _split_indented_lines(pos, match.start())
         yield match.start(), match.end(), False
+        if (
+            match.group("line_fence") is not None
+            or match.group("fence") is not None
+            or match.start() == 0
+            or text[match.start() - 1] == "\n"
+        ):
+            in_indented_code = False
+            after_blank = False
+            last_non_blank_was_list = False
+            current_line_is_code = False
         pos = match.end()
     if pos < len(text):
         yield from _split_indented_lines(pos, len(text))

@@ -164,6 +164,29 @@ describe('Agent reply Session & Bot mentions in Markdown', () => {
     expect(regularLink?.textContent).toBe('#Server Title');
   });
 
+  it('renders nested 4-space bullet mentions as chips and preserves bracketed markers inside outer link labels', () => {
+    const references: MentionReference[] = [
+      { kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true },
+    ];
+    const content =
+      '- parent\n'
+      + '    - child sees #<sesw34zgzgcvp> and #<sesmissing99>\n\n'
+      + 'Read [notes for #<sesw34zgzgcvp>](https://example.com).';
+    const { container } = render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Markdown content={content} references={references} agentMentions />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    const chip = container.querySelector('a[data-session-mention="sesw34zgzgcvp"]');
+    expect(chip?.textContent).toBe('#Auth Fix');
+    expect(container.textContent).toContain('#<sesmissing99>');
+    const outerLink = container.querySelector('a[href="https://example.com"]');
+    expect(outerLink?.textContent).toBe('notes for #<sesw34zgzgcvp>');
+  });
+
   it('renders a non-interactive span when interactive={false}', () => {
     const references: MentionReference[] = [
       { kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true },
