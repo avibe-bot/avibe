@@ -89,6 +89,12 @@ export function makeGate(distDir, log) {
       if (p.startsWith('/api/')) {
         if (state !== 'current') { json(401, {ok: false, error: 'remote_access_login_required'}); return; }
         if (p === '/api/csrf-token') { json(200, {csrf_token: 'gate'}); return; }
+        // A host named gate-home-* is an instance whose setup is done, so the
+        // page shows an ordinary route and not the setup wizard.
+        if (p === '/api/config' && details.host.startsWith('gate-home-')) {
+          json(200, {mode: 'self_host', language: 'en', setup_completed: true, setup_state: {needs_setup: false}, platforms: {enabled: []}});
+          return;
+        }
         if (p === '/api/version') { json(200, {current: '3.2.9rc6', latest: '3.2.9rc6', has_update: false}); return; }
         if (req.method !== 'GET') { json(200, {ok: true}); return; }
         json(200, {});

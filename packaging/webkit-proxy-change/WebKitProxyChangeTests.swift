@@ -684,6 +684,14 @@ final class WebKitProxyChangeTests: XCTestCase {
                 try await Task.sleep(for: .seconds(8))
                 let gate5 = try await control("/gate-summary?host=\(fixture.host)&since=\(mark)")
                 await browser.record("after-return", gate5)
+                if fixture.action == "gateExpired" || fixture.action == "gateRedirect" {
+                    // Run 46133326060: no sign-in within these 8 s. Whether one
+                    // comes later, by a read the page makes by itself.
+                    _ = try? await browser.observe("page-at-8s", expression: "window.__gate ? window.__gate.snapshot() : ({ok:true, href:location.pathname + location.search, title:document.title, signIn:Boolean(document.getElementById('gate-sign-in'))})")
+                    try await Task.sleep(for: .seconds(22))
+                    let gate8 = try await control("/gate-summary?host=\(fixture.host)&since=\(mark)")
+                    await browser.record("after-30s", gate8)
+                }
                 _ = try? await browser.observe("page-after", expression: "window.__gate ? window.__gate.snapshot() : ({ok:true, href:location.pathname + location.search, title:document.title, text:(document.body?.innerText ?? '').slice(0, 200), signIn:Boolean(document.getElementById('gate-sign-in'))})")
             } catch { failure = error }
             // Opened again whatever happened above: the next cell needs it.

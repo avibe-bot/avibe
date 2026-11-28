@@ -143,7 +143,11 @@ API availability, compilation, or this harness's synthetic tests.
 
 Not a WebKit measurement: a check of a release candidate's own page in real
 WebKit, for the two things the page changed after the return cells below.
-`late-cases.json` on this branch holds these six cells and nothing else.
+`late-cases.json` on this branch holds these six cells and, since run
+46133326060, two more on a host named `gate-home-*`, whose `/api/config` says
+setup is done, so the page shows an ordinary route instead of the setup wizard
+(`gate-home-return-h2`, `gate-home-expired-h2`). The expired and redirect cells
+also look once more 30 s after the return.
 
 What is real: the built Web UI of `RC_REF` (the workflow builds it), a
 WKWebView on the simulator, the store's route to the proxy's port with
