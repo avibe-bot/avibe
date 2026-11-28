@@ -18,6 +18,34 @@ describe('page connections', () => {
     expect(socket.addEventListener).not.toHaveBeenCalled();
   });
 
+  it('says what keeps the page busy, the longest-lived first', async () => {
+    let finish: (response: Response) => void = () => {};
+    window.fetch = vi.fn(() => new Promise<Response>((resolve) => { finish = resolve; })) as typeof window.fetch;
+    const connections = await import('./pageConnections');
+    connections.installPageFetchCounting();
+    expect(connections.pageConnectionsHeldBy()).toBeNull();
+
+    const pending = window.fetch('/api/inbox');
+    await Promise.resolve();
+    expect(connections.pageConnectionsHeldBy()).toBe('request');
+    const socket = { readyState: 1, addEventListener: vi.fn() } as unknown as WebSocket;
+    connections.trackPageSocket(socket);
+    expect(connections.pageConnectionsHeldBy()).toBe('socket');
+    const frame = document.createElement('iframe');
+    frame.setAttribute('src', '/show/s1/');
+    document.body.appendChild(frame);
+    expect(connections.pageConnectionsHeldBy()).toBe('frame');
+
+    frame.remove();
+    expect(connections.pageConnectionsHeldBy()).toBe('socket');
+    (socket as { readyState: number }).readyState = 3;
+    expect(connections.pageConnectionsHeldBy()).toBe('request');
+    finish(new Response(null, { status: 204 }));
+    await pending;
+    expect(connections.pageConnectionsHeldBy()).toBeNull();
+    expect(connections.pageConnectionsQuiet()).toBe(true);
+  });
+
   it('forgets a socket when it closes', async () => {
     window.fetch = vi.fn(async () => new Response(null, { status: 204 })) as typeof window.fetch;
     const connections = await import('./pageConnections');

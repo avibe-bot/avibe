@@ -1,6 +1,7 @@
 import { isRetiredAddressResponse, noteRetiredAddressResponse } from './addressRetired';
 import { reportRemoteAuthorizationState } from './remoteAuth';
 import { inputTerminalHint } from './inputSource';
+import { PAGE_REPORT_HEADER, takePageReport } from './pageReport';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
@@ -213,6 +214,17 @@ export async function withApiDeadline<T>(
   }
 }
 
+/** A read of this page's own `/api/session`, given as a path or a URL. */
+function isOwnSessionRead(input: RequestInfo | URL): boolean {
+  if (typeof window === 'undefined' || input instanceof Request) return false;
+  try {
+    const url = new URL(String(input), window.location.href);
+    return url.origin === window.location.origin && url.pathname === '/api/session';
+  } catch {
+    return false;
+  }
+}
+
 export async function apiFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -236,6 +248,19 @@ export async function apiFetch(
   if (MUTATING_METHODS.has(method)) {
     csrfToken = await ensureCsrfToken(init.signal ?? undefined);
     headers.set(CSRF_HEADER_NAME, csrfToken);
+  }
+
+  // Why the page has not moved onto the App's direct path (lib/pageReport)
+  // rides the page's own session read and no other request. With it that
+  // read is same-origin by contract: the instance always answers it itself,
+  // and a redirect to another origin, which never gave this page an answer
+  // it could use, is now an error instead of carrying the header along.
+  if (method === 'GET' && nextInit.mode === undefined && isOwnSessionRead(input)) {
+    const report = takePageReport();
+    if (report !== null) {
+      headers.set(PAGE_REPORT_HEADER, report);
+      nextInit.mode = 'same-origin';
+    }
   }
 
   nextInit.headers = headers;
