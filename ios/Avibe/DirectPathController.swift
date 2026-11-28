@@ -1672,7 +1672,20 @@ final class DirectPathController {
     /// Decides one accepted CONNECT (section 6). `nil` refuses it.
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
         let host = authority.host
-        guard routeOwner.allowedHosts.contains(host) else { return nil }
+        guard routeOwner.allowedHosts.contains(host) else {
+            // A parent domain of a routed host (avibe.bot, for an instance
+            // under it): WebKit sends it here though no route lists it. It
+            // is not the instance: it goes straight to that host through the
+            // public opener under every choice, never over the direct path,
+            // and is in no count of the instance's connections.
+            guard DirectAuthority.isParentDomain(host, ofAny: routeOwner.allowedHosts) else { return nil }
+            let publicBackend = publicBackend
+            return DirectConnectPlan(
+                scope: scope, generation: pathGeneration, openDirect: nil,
+                openPublic: { try await publicBackend.open(authority) },
+                isCurrent: { true }, directFailed: {}
+            )
+        }
         if awaitingFirstConnect.remove(host) != nil {
             // WebKit brought a connection of this host to the listener: from
             // here on its documents hear what the transport prefers.
