@@ -656,21 +656,25 @@ final class WebKitProxyChangeTests: XCTestCase {
                 guard closed["ok"] as? Bool == true else { throw ProbeError("the port was not closed: \(closed)") }
                 try await Task.sleep(for: .seconds(2))
                 if fixture.action == "gateExpired" {
-                    await browser.record("session", try await control("/gate-session?host=\(fixture.host)&state=missing"))
+                    let gate1 = try await control("/gate-session?host=\(fixture.host)&state=missing")
+                    await browser.record("session", gate1)
                 } else if fixture.action == "gateRedirect" {
-                    await browser.record("session", try await control("/gate-session?host=\(fixture.host)&state=redirect"))
+                    let gate2 = try await control("/gate-session?host=\(fixture.host)&state=redirect")
+                    await browser.record("session", gate2)
                 }
                 let mark = (try await control("/gate-mark"))["count"] as? Int ?? 0
                 // The return.
                 let shown = await browser.setVisible(true)
                 await browser.record("shown", shown)
                 try await Task.sleep(for: .milliseconds(400))
-                await browser.record("after-400ms", try await control("/gate-summary?host=\(fixture.host)&since=\(mark)"))
+                let gate3 = try await control("/gate-summary?host=\(fixture.host)&since=\(mark)")
+                await browser.record("after-400ms", gate3)
                 if fixture.action == "gateCap" {
                     // No answer from the bridge: the page's own cap ends the
                     // hold, with the port still closed.
                     try await Task.sleep(for: .milliseconds(1_100))
-                    await browser.record("after-cap", try await control("/gate-summary?host=\(fixture.host)&since=\(mark)"))
+                    let gate4 = try await control("/gate-summary?host=\(fixture.host)&since=\(mark)")
+                    await browser.record("after-cap", gate4)
                 }
                 let opened = try await control("/proxy-listener?state=open&host=\(fixture.host)")
                 await browser.record("listener-open", opened)
@@ -678,7 +682,8 @@ final class WebKitProxyChangeTests: XCTestCase {
                 // The port is open: now the bridge answers.
                 _ = try await browser.observe("bridge-answers", expression: "window.__gate.hold(false)")
                 try await Task.sleep(for: .seconds(8))
-                await browser.record("after-return", try await control("/gate-summary?host=\(fixture.host)&since=\(mark)"))
+                let gate5 = try await control("/gate-summary?host=\(fixture.host)&since=\(mark)")
+                await browser.record("after-return", gate5)
                 _ = try? await browser.observe("page-after", expression: "window.__gate ? window.__gate.snapshot() : ({ok:true, href:location.pathname + location.search, title:document.title, text:(document.body?.innerText ?? '').slice(0, 200), signIn:Boolean(document.getElementById('gate-sign-in'))})")
             } catch { failure = error }
             // Opened again whatever happened above: the next cell needs it.
@@ -687,11 +692,13 @@ final class WebKitProxyChangeTests: XCTestCase {
             if let failure { throw failure }
         case "gateMissing":
             // No session from the first read on.
-            await browser.record("session", try await control("/gate-session?host=\(fixture.host)&state=missing"))
+            let gate6 = try await control("/gate-session?host=\(fixture.host)&state=missing")
+            await browser.record("session", gate6)
             await browser.route("direct", allowFailover: fixture.allowFailover ?? true)
             try await browser.open("/")
             try await Task.sleep(for: .seconds(8))
-            await browser.record("after-load", try await control("/gate-summary?host=\(fixture.host)&since=0"))
+            let gate7 = try await control("/gate-summary?host=\(fixture.host)&since=0")
+            await browser.record("after-load", gate7)
             _ = try? await browser.observe("page-after", expression: "window.__gate ? window.__gate.snapshot() : ({ok:true, href:location.pathname + location.search, title:document.title, text:(document.body?.innerText ?? '').slice(0, 200), signIn:Boolean(document.getElementById('gate-sign-in'))})")
         default: throw ProbeError("unknown action")
         }
