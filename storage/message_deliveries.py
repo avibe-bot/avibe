@@ -24,7 +24,8 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, CursorResult
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.sql.selectable import TextualSelect
 
 from core.agent_input import HARNESS_SOURCE_FIELDS, is_voice_input
@@ -419,48 +420,40 @@ def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
 
 
 _FIFO_INDEX = "ix_message_deliveries_session_order"
-# The released DDL of the partial FIFO index, compared without whitespace or
-# identifier quotes (model DDL and migration 0044 differ only in spacing).
-_FIFO_INDEX_DDL = (
-    f"CREATE INDEX {_FIFO_INDEX} ON message_deliveries (session_id, submitted_at, id) "
-    f"WHERE {DELIVERY_SESSION_ORDER_PREDICATE}"
-)
 
 
-def _ddl_shape(sql: str) -> str:
-    return "".join(sql.replace('"', "").replace("`", "").split()).lower()
-
-
-def _fifo_index_hint(conn: Connection) -> str:
-    """Pin the FIFO index only when this snapshot has exactly the released one.
-
-    A compatible newer schema may drop or redefine it under the same name;
-    INDEXED BY would then fail. Such a layout gets the exact unhinted query.
-    """
-    sql = conn.exec_driver_sql(
-        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ? AND tbl_name = 'message_deliveries'",
-        (_FIFO_INDEX,),
-    ).scalar()
-    return f" INDEXED BY {_FIFO_INDEX}" if sql and _ddl_shape(sql) == _ddl_shape(_FIFO_INDEX_DDL) else ""
-
-
-def _ordering_rows(conn: Connection, session_id: str, *, include_claimable: bool = True) -> TextualSelect:
-    # Pin the partial FIFO index: it streams live rows in submit order, so a
-    # negative probe stops without a sort. Unpinned, a planner (for example with
-    # statistics) can prefer ix_message_deliveries_session_state for the IN terms
-    # and then sort the whole live set. The WHERE repeats the index predicate,
-    # which INDEXED BY needs for a partial index.
+def _ordering_sql(*, include_claimable: bool, pinned: bool) -> TextualSelect:
     states = ", ".join(f"'{state}'" for state in FENCE_STATES)
     wanted = f"state IN ({states})"
     if include_claimable:
         claimable = ", ".join(f"'{state}'" for state in CLAIMABLE_QUEUE_STATES)
         wanted += f" OR (priority = 'p3' AND state IN ({claimable}))"
     columns = ", ".join(column.name for column in message_deliveries.c)
+    hint = f" INDEXED BY {_FIFO_INDEX}" if pinned else ""
     return text(
-        f"SELECT {columns} FROM message_deliveries{_fifo_index_hint(conn)} "
+        f"SELECT {columns} FROM message_deliveries{hint} "
         f"WHERE session_id = :session_id AND ({DELIVERY_SESSION_ORDER_PREDICATE}) AND ({wanted}) "
         "ORDER BY submitted_at, id"
-    ).bindparams(session_id=session_id).columns(*message_deliveries.c)
+    ).columns(*message_deliveries.c)
+
+
+def _ordering_rows(conn: Connection, session_id: str, *, include_claimable: bool = True) -> CursorResult[Any]:
+    """Live rows in FIFO order, streamed from the partial FIFO index.
+
+    Pinned because a planner (for example with statistics) can otherwise prefer
+    ix_message_deliveries_session_state for the IN terms and sort the whole live
+    set. The WHERE repeats the index predicate, which INDEXED BY needs for a
+    partial index. A compatible newer schema may drop or redefine the index; SQLite
+    then refuses the pinned statement while preparing it, before reading any row,
+    and the same query runs unpinned. A missing index costs a sort, never a wrong row.
+    """
+    params = {"session_id": session_id}
+    try:
+        return conn.execute(_ordering_sql(include_claimable=include_claimable, pinned=True), params)
+    except OperationalError as error:
+        if "no such index" not in str(error) and "no query solution" not in str(error):
+            raise
+    return conn.execute(_ordering_sql(include_claimable=include_claimable, pinned=False), params)
 
 
 def ordering_head(
@@ -472,7 +465,7 @@ def ordering_head(
     """Oldest runnable queued row or unresolved ordering fence."""
     # The index streams live work in FIFO order. Skip parked inputs, but never
     # skip a fence. Close the cursor even when returning the first row.
-    with conn.execute(_ordering_rows(conn, session_id, include_claimable=include_claimable)) as rows:
+    with _ordering_rows(conn, session_id, include_claimable=include_claimable) as rows:
         for candidate in rows.mappings():
             row = dict(candidate)
             if row["state"] != "queued" or can_start_carried_batch(conn, session_id, [row]):
@@ -488,7 +481,7 @@ def claimable_fifo_head(conn: Connection, session_id: str) -> dict[str, Any] | N
 def claimable_fifo_prefix(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     """Queued prefix before the first unresolved ordering fence."""
 
-    with conn.execute(_ordering_rows(conn, session_id)) as rows:
+    with _ordering_rows(conn, session_id) as rows:
         prefix: list[dict[str, Any]] = []
         for row in rows.mappings():
             current = dict(row)
