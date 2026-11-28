@@ -654,7 +654,8 @@ class AgentAuthService:
     def _bump_antigravity_auth_epoch() -> None:
         try:
             from vibe.api import bump_antigravity_auth_epoch
-        except ImportError:
+        except ImportError as err:
+            logger.warning("Failed to import bump_antigravity_auth_epoch: %s", err)
             return
         bump_antigravity_auth_epoch()
 

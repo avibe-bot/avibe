@@ -14,6 +14,7 @@ import logging
 import os
 import stat
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -1014,22 +1015,23 @@ async def test_antigravity_no_post_completion_cache_and_epoch_bump_forces_fresh_
     after = await api.get_antigravity_auth_async()
     assert (after["authenticated"], after["active_auth_mode"]) == (True, "oauth-personal")
 
-    # Auth mutations bump the in-flight epoch.
+    # Auth mutations persist a fresh generation marker.
     monkeypatch.setattr(api, "restart_backend", lambda *_a, **_kw: {"ok": True})
-    epoch_0 = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
+    gen_0 = api._read_antigravity_auth_generation()
     assert api.save_antigravity_auth({"auth_mode": "gemini-api-key", "api_key": "AIza-epoch-test"})["ok"] is True
-    epoch_1 = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
-    assert epoch_1 > epoch_0
+    gen_1 = api._read_antigravity_auth_generation()
+    assert gen_1 and gen_1 != gen_0
     assert api.remove_backend_api_key("antigravity")["ok"] is True
-    epoch_2 = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
-    assert epoch_2 > epoch_1
+    gen_2 = api._read_antigravity_auth_generation()
+    assert gen_2 and gen_2 != gen_1
     service = _make_auth_service()
     await service._persist_backend_auth_mode("antigravity", "oauth-personal")
-    epoch_3 = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
-    assert epoch_3 > epoch_2
+    gen_3 = api._read_antigravity_auth_generation()
+    assert gen_3 and gen_3 != gen_2
     assert (await service.remove_web_auth("antigravity"))["ok"] is True
-    epoch_4 = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
-    assert epoch_4 > epoch_3
+    gen_4 = api._read_antigravity_auth_generation()
+    assert gen_4 and gen_4 != gen_3
+    assert len({gen_1, gen_2, gen_3, gen_4}) == 4
 
     # Part 2: bumping epoch while a slow probe is in flight forces a concurrent caller to run fresh.
     first_started = asyncio.Event()
@@ -1118,7 +1120,6 @@ async def test_antigravity_cross_process_generation_marker_splits_inflight_probe
     # Start a slow passive-auth probe in the UI process before IM login finishes.
     ui_slow_task = asyncio.create_task(api.get_antigravity_auth_async())
     await first_started.wait()
-    pre_login_epoch = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
     pre_login_generation = api._read_antigravity_auth_generation()
 
     # Simulate IM login completing in the separate controller process while keeping
@@ -1129,10 +1130,6 @@ async def test_antigravity_cross_process_generation_marker_splits_inflight_probe
     assert post_login_generation
     assert post_login_generation != pre_login_generation
 
-    # Reset the local in-memory epoch to simulate the UI process never observing
-    # the controller process's in-memory counter increment.
-    monkeypatch.setattr(api, "_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH", pre_login_epoch)
-
     fresh = await api.get_antigravity_auth_async()
     assert (fresh["authenticated"], fresh["active_auth_mode"]) == (True, "oauth-personal")
     assert probe_calls == 2
@@ -1141,3 +1138,17 @@ async def test_antigravity_cross_process_generation_marker_splits_inflight_probe
     stale = await ui_slow_task
     assert (stale["authenticated"], stale["active_auth_mode"]) == (False, "none")
     assert not api._ANTIGRAVITY_AUTH_INFLIGHT
+
+
+def test_bump_antigravity_auth_epoch_logs_warning_on_import_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ImportError while importing vibe.api logs a warning instead of failing silently or raising."""
+    monkeypatch.setitem(sys.modules, "vibe.api", None)
+    with caplog.at_level(logging.WARNING, logger=auth_mod.logger.name):
+        AgentAuthService._bump_antigravity_auth_epoch()
+    assert any(
+        record.levelno == logging.WARNING
+        and "Failed to import bump_antigravity_auth_epoch" in record.getMessage()
+        for record in caplog.records
+    )

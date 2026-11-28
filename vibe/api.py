@@ -7059,8 +7059,6 @@ class _InflightDictEntry:
 
 _DETECT_CLI_INFLIGHT: dict[tuple[Any, ...], _InflightDictEntry] = {}
 _ANTIGRAVITY_AUTH_INFLIGHT: dict[tuple[Any, ...], _InflightDictEntry] = {}
-_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH = 0
-_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH_LOCK = threading.Lock()
 
 
 def _antigravity_auth_generation_path() -> Path:
@@ -7076,10 +7074,7 @@ def _read_antigravity_auth_generation() -> str:
 
 def bump_antigravity_auth_epoch() -> None:
     """Invalidate in-flight Antigravity passive auth probes after auth cutovers."""
-    global _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
-    with _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH_LOCK:
-        _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH += 1
-        generation = f"{_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH}:{uuid.uuid4().hex}"
+    generation = uuid.uuid4().hex
     path = _antigravity_auth_generation_path()
     tmp_path: Optional[str] = None
     try:
@@ -14573,8 +14568,7 @@ async def get_antigravity_auth_async() -> dict:
     default_cli = default_cli_for_backend("antigravity") or "agy"
 
     adc = await asyncio.to_thread(detect_antigravity_adc)
-    shared_generation = await asyncio.to_thread(_read_antigravity_auth_generation)
-    epoch = _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
+    generation = await asyncio.to_thread(_read_antigravity_auth_generation)
     key = (
         configured_cli or default_cli,
         auth_mode,
@@ -14584,8 +14578,7 @@ async def get_antigravity_auth_async() -> dict:
         gcp_location,
         bool(adc["present"]),
         str(adc["path"] or ""),
-        epoch,
-        shared_generation,
+        generation,
     )
 
     async def _probe() -> dict:
