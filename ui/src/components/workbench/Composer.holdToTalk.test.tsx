@@ -202,7 +202,7 @@ describe('the gesture', () => {
     renderComposer();
     await asrAvailable();
     const gesture = hookMock.options!.gesture as (pointerType: string) => object;
-    expect(gesture('mouse')).toEqual({ holdMs: 350, ringDelayMs: 100, slopPx: 6, cancel: 'leave', cancelPx: 16, uncancelPx: 0, micAfterMs: 150 });
+    expect(gesture('mouse')).toEqual({ holdMs: 350, ringDelayMs: 100, slopPx: 6, cancel: 'leave', cancelPx: 16, uncancelPx: 0 });
     expect(gesture('touch')).toEqual({});
     expect(hookMock.options!.onSystemInterrupt).toBe('interrupt');
   });
