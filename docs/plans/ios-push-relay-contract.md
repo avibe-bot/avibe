@@ -1107,8 +1107,8 @@ without an endpoint fails closed rather than choosing from endpoint history. A
 `revoked: false` result is shown as cleanup pending, while a bridge transport
 failure is shown as an unconfirmed cleanup failure; neither result permits
 automatic re-subscription. Each later reconcile replays a pending cleanup's
-unfinished parts, so one native recovery has finished shows as off without a
-Retry; a failed one waits for the person's Retry. A later explicit enable clears the opt-out and
+unfinished parts, so a cleanup that native recovery has finished shows as off
+without a Retry; a failed one waits for the person's Retry. A later explicit enable clears the opt-out and
 re-enters the existing registration flow.
 
 ### 9.6 Logout and account switch

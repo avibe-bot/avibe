@@ -3912,7 +3912,10 @@ final class AppModel: ObservableObject {
                 return
             }
             guard !self.holdsInstanceOpens else {
-                self.pendingInstanceOpen = .pushTap(tap)
+                // An open held meanwhile is newer: it stays the one that waits.
+                if self.pendingInstanceOpen == nil {
+                    self.pendingInstanceOpen = .pushTap(tap)
+                }
                 return
             }
             self.openTappedInstance(tap)
