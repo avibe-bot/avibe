@@ -816,6 +816,81 @@ async def test_failed_order_body_cleans_up_then_retries_same_key_under_live_perm
         assert list(env.backend.orders) == [fp]
 
 
+def test_settled_server_failures_retry_after_backoff_not_the_weekly_budget(setup):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed', certificate_pem=None, public_key_fingerprint=fp,
+                                        failure_origin='server')
+    for delay in (60, 120, 240):
+        env.client = DirectCertificateClient()  # The start receipt survives restart.
+        deadline = queued.next_poll_at + delay
+        if delay == 120:
+            deadline += 7200  # A server floor can exceed the ordinary backoff.
+            env.backend.advance_response['retry_at'] = datetime.fromtimestamp(deadline, timezone.utc).isoformat()
+        else:
+            env.backend.advance_response.pop('retry_at', None)
+        failure = due(env, queued)
+        assert failure.status == 'failed' and failure.next_poll_at == deadline
+        assert certificates._HostOrders.load(HOST).starts == []
+        env.clock.now = deadline - 1
+        count = len(env.backend.calls)
+        env.client = DirectCertificateClient()
+        env.client.poll(allowed=True, retry=True)
+        assert len(env.backend.calls) == count
+        env.clock.now = deadline
+        queued = env.client.poll(allowed=True)
+        assert queued.status == 'queued' and env.backend.calls[-1][1] == 'certificates/orders'
+
+
+@pytest.mark.parametrize('origin', [None, 'provider', 'client', True])
+def test_unknown_attribution_charges_start_and_server_fault_cannot_refund_it(setup, origin):
+    env = setup
+    first = env.clock.now
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed', certificate_pem=None,
+                                        public_key_fingerprint=fp, failure_origin=origin)
+    opaque = due(env, queued)
+    assert opaque.next_poll_at == env.clock.now + 6 * 3600
+    env.clock.now = opaque.next_poll_at
+    retry = env.client.poll(allowed=True, retry=True)
+    env.backend.advance_response['failure_origin'] = 'server'
+    assert due(env, retry).status == 'failed'
+    budget = certificates._HostOrders.load(HOST)
+    assert budget.starts == [first] and budget.failure_at is not None
+
+
+def test_server_marker_on_cleanup_pending_does_not_refund_or_replace_order(setup):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed_cleanup_pending', public_key_fingerprint=fp,
+                                        certificate_pem=None, failure_origin='server')
+    cleaning = due(env, queued)
+    assert cleaning.status == 'failed_cleanup_pending'
+    assert len(certificates._HostOrders.load(HOST).starts) == 1
+    env.clock.now = cleaning.next_poll_at
+    env.backend.advance_response.update(status='failed', retry_at='not-a-timestamp')
+    opaque = env.client.poll(allowed=True, retry=True)
+    assert env.backend.calls[-1][1].endswith('/advance')
+    assert opaque.status == 'failed' and opaque.next_poll_at == env.clock.now + 6 * 3600
+    assert len(certificates._HostOrders.load(HOST).starts) == 1
+
+
+def test_server_fault_restores_displaced_start_without_erasing_prior_history(setup):
+    env = setup
+    history = [env.clock.now - t for t in (300, 200, 100)]
+    certificates._HostOrders(history, None).save(HOST)
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    assert certificates._HostOrders.load(HOST).starts == [*history[1:], env.clock.now]
+    env.backend.advance_response = dict(status='failed', certificate_pem=None, public_key_fingerprint=fp,
+                                        failure_origin='server')
+    assert due(env, queued).status == 'failed'
+    assert certificates._HostOrders.load(HOST).starts == history
+
+
 def test_permanent_opaque_failure_budget_survives_restart_and_repair_with_same_hostname(setup):
     env = setup
     gap, week = 6 * 3600, 7 * 86400

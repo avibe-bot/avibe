@@ -88,6 +88,13 @@ a rotation; these are one-shot commands, not settings.
   fences order POSTs, while a separate current-leaf lower bound fences only
   current GETs; neither can starve the other. Transport and credential backoff
   fences every request. Local retry backoff grows from one minute to one hour.
+- A validated, settled `failed` order may explicitly say `failure_origin: "server"`.
+  Only then does the client release that order's own start reservation (if known);
+  earlier starts, including unknown writes, remain charged. Replacement orders
+  back off for one minute, doubling to one hour, and wait until a valid server
+  `retry_at` when later. Cleanup still advances the same order. A missing or
+  unknown origin, a malformed retry floor, or a lost reply is not a server-fault
+  exemption. Older persisted failures are not retroactively reclassified.
 - A conflict resumes the supplied order if its key is still held (an active-key
   conflict abandons the pending local rotation). Otherwise it cancels the
   supplied order once, then retries admission at the backend's deadline while

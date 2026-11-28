@@ -125,6 +125,10 @@ class _State:
     active_csr_pem: str | None = None
     conflict_order_id: str | None = None
     cancelled_order_id: str | None = None
+    # Only carried forward by a validated start reply (never an adopted order).
+    # A bounded pre-charge snapshot also restores the oldest displaced slot.
+    start_charge: list[float] | None = None  # Previous starts followed by this admission's timestamp.
+    server_failures: int = 0
 
 
 @dataclass
@@ -307,6 +311,11 @@ def _load() -> _State | None:
                 or type(state.blocked) is not bool or type(state.failures) is not int or not 0 <= state.failures <= 8
                 or any(not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0
                        for value in (state.next_poll_at, state.order_not_before, state.next_current_at, state.current_not_before, state.request_not_before))
+                or type(state.server_failures) is not int or not 0 <= state.server_failures <= 8
+                or (state.start_charge is not None and (
+                    not isinstance(state.start_charge, list) or not 1 <= len(state.start_charge) <= _ORDER_LIMIT + 1
+                    or any(type(t) not in (int, float) or not math.isfinite(t) or t < 0 for t in state.start_charge)
+                    or state.start_charge[:-1] != sorted(state.start_charge[:-1])))
                 or not isinstance(state.request_id, str)
                 or (state.order_id is not None and not _ORDER_ID.fullmatch(state.order_id))
                 or (state.last_error_code is not None and state.last_error_code not in _ERROR_CODES)
@@ -546,7 +555,7 @@ class DirectCertificateClient:
                 # Fresh permission clears only the denial latch. It cannot
                 # bypass either endpoint's deadline or an outstanding backoff.
                 command = True
-            if retry and state.status == 'failed' and state.last_error_code == 'order_failed':
+            if retry and state.status == 'failed' and state.last_error_code == 'order_failed' and not state.server_failures:
                 # Upgrade from an already-settled legacy order. Arm the budget
                 # once, not on every read of the same failure.
                 budget = _HostOrders.load(state.hostname)
@@ -555,6 +564,7 @@ class DirectCertificateClient:
                 state.order_not_before = max(state.order_not_before, budget.deadline())
             if retry and state.status in _TERMINAL_FAILURE - {'failed_cleanup_pending'}:
                 state.status, state.order_id = "new", None
+                state.start_charge = None
                 command = True
             if rotate_key and state.active_fingerprint == state.public_key_fingerprint and state.status in _ISSUED:
                 _new_key(state)
@@ -584,6 +594,9 @@ class DirectCertificateClient:
                     _save(state)
                     return _result(state, now)
                 method, suffix = "POST", "certificates/orders"
+                # A conflict may adopt a different order, and a lost start must
+                # remain charged. Associate a receipt only on a validated reply.
+                state.start_charge = None
                 payload = {"csr_pem": state.csr_pem, "purpose": state.purpose}
             # Persist intent and a bounded lease before HTTP: lost replies and
             # simultaneous clients cannot cause an immediate retry after restart.
@@ -605,6 +618,7 @@ class DirectCertificateClient:
             refusal = _caller_authorization_error(V2Config.load(), expected_pairing_fingerprint, permission_deadline)
             if refusal is not None:
                 return refusal
+            reservation = None
             if suffix == 'certificates/orders':
                 # Charge only fresh starts, at final HTTP admission. A lost
                 # response consumes its slot; a concurrent or obsolete worker
@@ -618,7 +632,8 @@ class DirectCertificateClient:
                     live.order_not_before = max(live.order_not_before, budget.deadline())
                     _save(live)
                     return _result(live, admitted_at)
-                budget.starts = sorted([*budget.starts, admitted_at])[-_ORDER_LIMIT:]
+                reservation = [*budget.starts, admitted_at]
+                budget.starts = sorted(reservation)[-_ORDER_LIMIT:]
                 budget.save(live.hostname)
 
         response, error, http_status = None, None, 0
@@ -679,7 +694,7 @@ class DirectCertificateClient:
                         state.failures = 0
                         state.request_not_before = 0.0
                     else:
-                        changed = self._accept(state, response, suffix == "certificates/current", now)
+                        changed = self._accept(state, response, fetch_current, now, reservation=reservation)
                 except Exception:
                     state.last_error_code = "invalid_response"
             _save(state)
@@ -717,6 +732,8 @@ class DirectCertificateClient:
                     if fingerprint != state.public_key_fingerprint and state.active_csr_pem:
                         state.public_key_fingerprint = fingerprint
                         state.csr_pem = state.active_csr_pem
+                    if state.order_id != order_id:
+                        state.start_charge = None  # Adopting another order cannot transfer a receipt.
                     state.order_id, state.status = order_id, "pending"
                     state.conflict_order_id = None
                 elif order_id != state.cancelled_order_id:
@@ -745,7 +762,8 @@ class DirectCertificateClient:
                 pass
 
     @staticmethod
-    def _accept(state: _State, response: object, current: bool, now: float) -> bool:
+    def _accept(state: _State, response: object, current: bool, now: float, *,
+                reservation: list[float] | None = None) -> bool:
         if not isinstance(response, dict):
             raise ValueError("invalid response")
         if current:
@@ -774,6 +792,18 @@ class DirectCertificateClient:
             raise ValueError("wrong public key metadata")
         # A recognizable completed order must not become another start-order
         # attempt merely because its leaf was invalid. Retry via current instead.
+        server_fault = (not current and status == 'failed' and pem is None
+                        and response.get('failure_origin') == 'server')
+        retry_at = 0.0
+        if not current and status == 'failed' and response.get('retry_at') is not None:
+            try:
+                retry_at = _timestamp(response['retry_at'])
+            except (TypeError, ValueError, OverflowError):
+                # Still a settled order. An unusable floor must not turn it
+                # into an immediate start or advance; keep opaque accounting.
+                server_fault = False
+        if reservation is not None:
+            state.start_charge = reservation
         state.status, state.order_id = status, order_id
         changed = False
         if pem is not None:
@@ -810,9 +840,21 @@ class DirectCertificateClient:
                 return changed
         if not current and status == 'failed':
             budget = _HostOrders.load(state.hostname)
-            budget.record_failure(state.hostname, now)
-            state.order_not_before = max(state.order_not_before, budget.deadline())
+            if server_fault:
+                charge = state.start_charge
+                if charge and budget.starts == sorted(charge)[-_ORDER_LIMIT:]:
+                    budget.starts = charge[:-1]
+                    budget.save(state.hostname)
+                state.server_failures = min(8, state.server_failures + 1)
+                state.order_not_before = max(state.order_not_before,
+                                             now + min(_MAX_BACKOFF, 60 * 2 ** (state.server_failures - 1)))
+            else:
+                state.server_failures = 0
+                budget.record_failure(state.hostname, now)
+            state.start_charge = None
+            state.order_not_before = max(state.order_not_before, retry_at, budget.deadline())
         elif changed and pem is not None:
+            state.server_failures = 0
             # Recovery succeeded. Ordinary renewal/rotation isn't a failed-order
             # retry. Retain the recent reservations for any subsequent failure.
             budget = _HostOrders.load(state.hostname)
