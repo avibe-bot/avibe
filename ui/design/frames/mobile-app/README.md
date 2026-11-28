@@ -26,11 +26,10 @@ Acceptance invariants:
 - Every state has a clear next action; busy/cooldown states prevent duplicate
   actions and retain the email/code. Timers in the frames are static fixtures.
 - Email is always complete: never masked, ellipsized, clipped or truncated in
-  recipient/account text. Long text wraps. The account frame renders the actual
-  `MoreAccountSection` and uses a design-only descendant style to replace its
-  truncation with wrapping; implementation must expose the same wrapping policy.
-  An editable email field retains native email-input editing behavior; any long
-  value must also be shown as complete wrapped text during implementation.
+  recipient/account text. Long text wraps. The account frames render the shipped
+  `AccountPage` (`Account` in `ui/src/mobile/MobileOnboarding.tsx`), which wraps
+  full email text with `break-all`. An editable email field retains native
+  email-input editing behavior.
 - OTP is six equal squares in a continuous row, uniform `gap-2`, with no dash or
   grouping. One accessible input underlies the decorative display.
 - Current instance is marked only when switching. Offline recovery derives its
@@ -74,7 +73,7 @@ page only starts them. The owner picked layout B at 13:12:
 
 ## Frame inventory
 
-Prefix IDs with `mobile-app/`; append `-zh` or `-en` to approved states. Existing
+Prefix IDs with `mobile-app/`; append `-zh` or `-en` to localized states. Existing
 flow IDs remain stable; `welcome/intro` and `welcome/code-partial` complete the A
 flow, and `account/long-email` verifies the account wrapping policy.
 
@@ -128,8 +127,8 @@ headers keep their separate compact 48px chrome.
 All spacing, type, radius, semantic colors, shadows, gradients and motion values
 come from `ui/src/index.css` or existing component variants. No new tokens. The
 round/surface/gradient layers are static, with no animated filter or backdrop.
-Typography retains Avibe's installed product font. Draft bilingual kit copy moves
-to the product's locale catalogs when implemented.
+Typography retains Avibe's installed product font. All shipped frames read their
+localized copy from `ui/src/i18n/{en,zh}.json` via `copyFor(...)`.
 
 ## Interaction and accessibility handoff
 
@@ -147,8 +146,9 @@ to the product's locale catalogs when implemented.
   digits, focus the underlying field when any cell is tapped, expose a visible
   focus state on the current cell without an outer ring around all six cells, keep
   the cells and Verify action reachable above the keyboard accessory bar, and
-  announce busy/error/success changes. The static fixture input does not implement
-  those behaviors. No screen-reader or iOS autofill claim is made.
+  announce busy/error/success changes. The shipped `OtpCells` input implements
+  typing, paste/autofill normalization, tap-to-focus, and focus state; static
+  screenshots verify layout only and make no live screen-reader or iOS autofill claim.
 - Change email is centered with the recipient text. It returns to editable email
   entry, clears the code, error and resend timer. Busy actions cannot duplicate.
 - Initial send success enters blank code entry with resend available. Resending
@@ -162,10 +162,10 @@ to the product's locale catalogs when implemented.
   skeleton, and a failed load gives retry in that region.
 - No instances: desktop first, CLI second. Commands preserve the repository's
   install + `vibe remote` flow. Pair the same account, return and refresh.
-- Account retains actual MoreAccountSection/sign-out. The full-width switch or
-  choose-instance action is **owner-approved**.
-  Delete account leads to avibe.bot to review consequences and confirm; final
-  maintained destination and native credential cleanup belong to implementation.
+- Account uses the shipped `AccountPage` (`Account` in `MobileOnboarding.tsx`)
+  with its own sign-out section and full-width switch or choose-instance action
+  (**owner-approved**). Delete account leads to avibe.bot via `app.openPage`
+  from the `Account and data` page (`account/data`, `switcher/account-data`).
 - Instance failure is a packaged shell-page proposal; its stable `native/*` ID
   does not require a Swift/Kotlin renderer. Retry/switch remain native-integrated.
 - Child-window back navigates history, Done closes, Open in Safari hands off on
@@ -231,7 +231,7 @@ The page uses the same A composition (`CloudScreen`, `Brand`, `Primary`,
 | --- | --- |
 | `two-factor` | `passkey`, `passkey-waiting`, `passkey-failed`, `totp`, `totp-partial`, `totp-verifying`, `totp-invalid`, `totp-rate-limited`, `totp-network`, `totp-only`, `recovery`, `recovery-invalid`, `setup-required`, `totp-small` (375 × 667, long email) |
 
-**28 approved frames / 56 theme captures** (14 states × zh/en × light/dark).
+**28 shipped frames / 56 theme captures** (14 states × zh/en × light/dark).
 
 The page offers a passkey first when the account has one. The authenticator
 code and a recovery code are alternatives, and "Sign in with a different
@@ -263,7 +263,7 @@ tokens or assets.
 | --- | --- |
 | `password` | `email` (both ways offered), `email-invalid` (Send verification code), `switched-empty` (password mode, no email typed yet), `default` (password mode, the typed email carried over), `filled`, `shown`, `signing-in`, `password-email-invalid` (Sign in with an invalid email), `invalid`, `unconfirmed`, `rate-limited`, `network`, `forgot`, `weak`, `small` (375 × 667, long email + error), `keyboard` (375 × 407) |
 
-**32 approved frames / 64 theme captures** (16 states × zh/en × light/dark).
+**32 shipped frames / 64 theme captures** (16 states × zh/en × light/dark).
 `password/email` and `password/email-invalid` supersede the email entry of
 `welcome/default` and `welcome/email-invalid`.
 
@@ -423,4 +423,5 @@ variants A/B, desktop consistency and build notes:
 `docs/plans/2026-11-13-ios-instance-pages.md`. The frames `switcher/*` (23
 states × zh/en, light and dark) draw the shipped pages; the kit
 `ui/design/kit/mobile-instance-sheet.tsx` keeps only what the web cannot render:
-the native sheet, the gestures, and the native failure screen.
+the native sheet, the gestures, the native failure screens (`RuntimeFailed` and
+`NativeInstanceError`), and the native child-window top bar (`NativeWindowTopBar`).

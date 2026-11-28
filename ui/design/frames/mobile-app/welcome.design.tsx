@@ -52,7 +52,7 @@ const designFrames = frames([
   ...bilingual('default', '登录 / 注册 · 输入邮箱', emailStep()),
   ...bilingual('email-invalid', '邮箱格式错误', emailStep({ email: 'max@', errorKey: 'mobileApp.email.invalid' })),
   ...bilingual('sending', '发送验证码中', emailStep({ email: account.email, busy: 'send', locked: true })),
-  ...bilingual('email-rate-limited', '发送 · 请求过于频繁', emailStep({ email: account.email, errorKey: 'mobileApp.code.rateLimited' })),
+  ...bilingual('email-rate-limited', '发送 · 请求过于频繁', emailStep({ email: account.email, cooldown: 15, errorKey: 'mobileApp.code.rateLimited' })),
   ...bilingual('email-network-error', '发送 · 网络错误', emailStep({ email: account.email, errorKey: 'mobileApp.errors.network' })),
   ...bilingual('code-sent', '验证码已发送 · 可修改邮箱', codeStep()),
   ...bilingual('code-partial', '验证码 · 输入中', codeStep({ code: '12' })),
@@ -64,7 +64,7 @@ const designFrames = frames([
   ...bilingual('code-invalid', '验证码错误 · 沿用合并提示', codeStep({ code: '123455', errorKey: 'mobileApp.code.invalid' })),
   ...bilingual('code-expired', '验证码过期 · 沿用合并提示', codeStep({ code: '123456', errorKey: 'mobileApp.code.invalid' })),
   ...bilingual('rate-limited', '重发 · 请求过于频繁', codeStep({ cooldown: 15, providerCooldownActive: true, errorKey: 'mobileApp.code.rateLimited' })),
-  ...bilingual('network-error', '验证 · 网络错误保留输入', codeStep({ code: '123456', errorKey: 'mobileApp.errors.network' })),
+  ...bilingual('network-error', '验证 · 网络错误', codeStep({ errorKey: 'mobileApp.errors.network' })),
   // Google, GitHub and Apple on Welcome (owner, 2026-11-18: layout B). Email stays the primary
   // action; the other accounts follow avibe.bot's 「或」 as one row of marks.
   ...bilingual('providers-row', '欢迎 · 邮箱为主，Google / GitHub / Apple 为一行图标', () => <WelcomeScreen locked={false} providers={allProviders} onContinue={noop} onProvider={noop} />),

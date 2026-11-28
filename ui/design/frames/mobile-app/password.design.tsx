@@ -38,8 +38,8 @@ const passwordStep = (props: EmailProps = {}) => emailStep({ mode: 'password', p
 const states: { name: string; title: string; render: () => ReactNode; size?: [number, number]; click?: FrameSpec['click'] }[] = [
   { name: 'email', title: '输入邮箱 · 验证码为主，密码为辅', render: emailStep() },
   { name: 'email-invalid', title: '发送验证码 · 邮箱格式错误', render: emailStep({ email: 'max@', errorKey: 'mobileApp.email.invalid' }) },
-  { name: 'switched-empty', title: '切换到密码登录 · 没填邮箱也能切换', render: passwordStep({ email: '', password: '' }) },
-  { name: 'default', title: '切换到密码登录 · 已填的邮箱带过来', render: passwordStep({ password: '' }) },
+  { name: 'switched-empty', title: '切换到密码登录 · 没填邮箱也能切换', render: passwordStep({ email: '', password: '' }), click: ['#mobile-login-email'] },
+  { name: 'default', title: '切换到密码登录 · 已填的邮箱带过来', render: passwordStep({ password: '' }), click: ['#mobile-login-password'] },
   { name: 'filled', title: '邮箱 + 密码 · 可登录', render: passwordStep() },
   { name: 'shown', title: '密码 · 显示明文', render: passwordStep({ shown: true }) },
   { name: 'signing-in', title: '登录中', render: passwordStep({ busy: 'signIn', locked: true }) },
