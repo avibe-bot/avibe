@@ -252,6 +252,41 @@ def test_provision_request_does_not_store_derived_delivery_as_reply_anchor(vault
     assert json.loads(stored["requester"])["turn_id"] == "turn_active"
 
 
+def test_provision_request_expiry_retires_card_and_arms_callback(vault, monkeypatch):
+    start = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        instant = start
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.instant.astimezone(tz)
+
+    monkeypatch.setattr(vs, "datetime", Clock)
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "WANTED", requester={"session_id": "ses_active"})
+        deadline = start + timedelta(days=7)
+        assert req["expires_at"] == deadline.isoformat()
+        Clock.instant = deadline - timedelta(microseconds=1)
+        assert [r["id"] for r in vs.list_requests(conn)] == [req["id"]]
+        Clock.instant = deadline
+        assert vs.list_requests(conn) == []
+        assert vs.get_request(conn, req["id"])["status"] == "expired"
+        (terminal,) = vs.list_pending_request_callbacks(conn)
+        callback = vs.resolve_request_callback(terminal)
+        assert callback.session_id == "ses_active" and "Re-request" in callback.message
+
+
+def test_direct_secret_create_does_not_fulfill_overdue_provision(vault):
+    with vault.begin() as conn:
+        overdue = vs.create_provision_request(conn, "WANTED")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == overdue["id"]).values(
+            expires_at="2000-01-01T00:00:00+00:00",
+        ))
+        vs.create_secret(conn, name="WANTED", sealed=_sealed())
+        assert vs.get_request(conn, overdue["id"])["status"] == "expired"
+
+
 def test_provision_request_rejects_case_only_duplicate_pending_request(vault):
     with vault.begin() as conn:
         pending = vs.create_provision_request(conn, "openAiKey")

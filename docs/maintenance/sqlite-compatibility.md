@@ -54,6 +54,10 @@ unverified or pre-protocol predecessor keep conservative upgrade snapshots.
   since the snapshot.** Prefer forward repair. Already-released binaries cannot
   be retrofitted: users must not invoke their raw SQLite APIs to bypass startup.
 
+## Vault provision request cleanup
+
+Provision requests have a seven-day deadline and expire when their Session is archived. At upgrade, the importer silently expires pending provision requests with no deadline or an already-archived owner. Expiry and the `migrations.vault_provision_expiry.v1` receipt commit together. A missing receipt disqualifies the read-only readiness shortcut and no-copy path. No schema or epoch changes: older binaries can read the existing `expired` / `skipped` states and still write their original row shape. Downgrade does not reopen retired requests.
+
 ## Pre-mutation capacity admission
 
 A pending copy-backed upgrade first uses read-only SQLite admission, before

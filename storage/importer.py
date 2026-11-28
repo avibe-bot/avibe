@@ -57,6 +57,7 @@ from storage.settings_service import SQLiteSettingsService, upsert_scope
 
 JSON_IMPORT_MARKER = "json_import_completed_at"
 BACKGROUND_IMPORT_MARKER = "background_json_import_completed_at"
+PROVISION_EXPIRY_MARKER = "migrations.vault_provision_expiry.v1"
 logger = logging.getLogger(__name__)
 
 
@@ -122,7 +123,8 @@ def _valid_import_receipts(values: tuple) -> bool:
                 return False
         marker = json.loads(values[2])
         return (
-            isinstance(marker, dict)
+            values[3] == "true"
+            and isinstance(marker, dict)
             and type(marker.get("schema_version")) is int
             and (marker.get("state"), marker["schema_version"])
             in {("completed", 3), ("sealed_unattributed", 2)}
@@ -138,8 +140,9 @@ def completed_sqlite_imports(conn: sqlite3.Connection) -> bool:
     row = conn.execute(
         "SELECT (SELECT value_json FROM state_meta WHERE key = ?), "
         "(SELECT value_json FROM state_meta WHERE key = ?), "
+        "(SELECT value_json FROM state_meta WHERE key = ?), "
         "(SELECT value_json FROM state_meta WHERE key = ?)",
-        (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY),
+        (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY, PROVISION_EXPIRY_MARKER),
     ).fetchone()
     return _valid_import_receipts(row)
 
@@ -163,21 +166,22 @@ def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
+                "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?) "
                 "FROM alembic_version LIMIT 2",
                 (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
-                 COMPATIBILITY_EPOCH_KEY, "storage.epoch3_backup_skipped"),
+                 PROVISION_EXPIRY_MARKER, COMPATIBILITY_EPOCH_KEY, "storage.epoch3_backup_skipped"),
             ).fetchall()
         expected_revision = _installed_schema_revision()
         if expected_revision is None or len(rows) != 1 or rows[0][0] != expected_revision:
             return False
-        epoch = parse_compatibility_epoch(rows[0][4])
+        epoch = parse_compatibility_epoch(rows[0][5])
         require_supported_compatibility_epoch(epoch)
         if epoch != _installed_schema_epoch():
             return False
         if expected_revision == "20261114_0089":
-            _epoch3_omission_recorded(rows[0][5])
-        return _valid_import_receipts(rows[0][1:4])
+            _epoch3_omission_recorded(rows[0][6])
+        return _valid_import_receipts(rows[0][1:5])
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
 
@@ -266,6 +270,7 @@ def repair_sqlite_state(
         try:
             backup_path: Path | None = None
             with engine.begin() as conn:
+                _retire_legacy_provisions_once(conn)
                 if _has_import_marker(conn):
                     imported_background = False
                     background_counts: dict[str, int] = {}
@@ -432,6 +437,20 @@ def _set_background_import_marker(conn: Connection) -> None:
             updated_at=now,
         )
     )
+
+
+def _retire_legacy_provisions_once(conn: Connection) -> None:
+    receipt = state_meta.c.key == PROVISION_EXPIRY_MARKER
+    if conn.execute(select(state_meta.c.value_json).where(receipt)).scalar_one_or_none() == "true":
+        return
+    from storage.vault_service import retire_legacy_provision_requests
+
+    # Called under the migration file lock, after schema upgrade; the receipt and
+    # all transitions commit together. Older binaries understand the terminal rows.
+    conn.execute(state_meta.insert().prefix_with("OR REPLACE").values(
+        key=PROVISION_EXPIRY_MARKER, value_json="true", updated_at=_utc_now_iso(),
+    ))
+    retire_legacy_provision_requests(conn)
 
 
 def _run_sqlite_data_migrations(conn: Connection) -> dict[str, int]:

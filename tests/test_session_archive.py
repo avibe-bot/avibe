@@ -167,6 +167,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             requester={"session_id": sid},
             delivery={"session_id": sid, "command": "python other.py"},
         )
+        provision_req = vs.create_provision_request(conn, "MISSING", requester={"session_id": sid})
         sign_req = vs.create_sign_request(
             conn,
             "ARCHIVE_SIGNING_KEY",
@@ -244,7 +245,8 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             for row in conn.execute(
                 select(vault_requests.c.id, vault_requests.c.status).where(
                     vault_requests.c.id.in_(
-                        [req["id"], pending_req["id"], pending_uncovered_req["id"], sign_req["id"], other_req["id"]]
+                        [req["id"], pending_req["id"], pending_uncovered_req["id"], sign_req["id"],
+                         provision_req["id"], other_req["id"]]
                     )
                 )
             ).mappings()
@@ -252,6 +254,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         assert request_statuses[req["id"]] == "approved"
         assert request_statuses[pending_req["id"]] == "approved"
         assert request_statuses[pending_uncovered_req["id"]] == "expired"
+        assert request_statuses[provision_req["id"]] == "expired"
         assert request_statuses[sign_req["id"]] == "expired"
         assert request_statuses[other_req["id"]] == "pending"
 

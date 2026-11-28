@@ -72,6 +72,7 @@ DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS = 120
 # registration proof alive for the whole setup flow without changing fresh-UV authorization windows.
 FIRST_SETUP_REGISTRATION_TTL_SECONDS = 30 * 60
 DEFAULT_REQUEST_TTL_SECONDS = 30 * 60
+DEFAULT_PROVISION_REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60
 AUTH_FACTOR_REGISTRATION_AUTHZ_OPERATION = "authorize_webauthn_factor_registration"
 GRANT_PURPOSES = {"run", "fetch", "inject"}
 SUPPORTED_SIGNATURE_SCHEMES = {
@@ -577,6 +578,7 @@ def _find_secret_name_case_insensitive(conn: Connection, name: str) -> str | Non
 
 
 def _find_pending_provision_name_case_insensitive(conn: Connection, name: str) -> str | None:
+    _expire_pending_requests(conn, provision_name=name)
     return conn.execute(
         select(vault_requests.c.secret_name)
         .where(
@@ -601,7 +603,6 @@ def _preflight_secret_create_name(
         raise SecretNameCaseConflictError(name, existing_name)
     provision_row: dict[str, Any] | None = None
     if provision_request_id:
-        _expire_pending_requests(conn)
         provision_row = _load_request_row(conn, provision_request_id)
         if provision_row.get("request_type") != "provision":
             raise InvalidRequestError("secret create must complete a provision request")
@@ -2077,13 +2078,18 @@ def _load_request_for_transition(
     return row
 
 
-def _expire_pending_requests(conn: Connection) -> None:
+def _expire_pending_requests(conn: Connection, *, provision_name: str | None = None) -> None:
     # Expiry only needs metadata. In particular, never bring a NEW proof corpus
     # into Python through the formerly full-row refresh after each transition.
     query = select(
         vault_requests.c.id, vault_requests.c.request_type, vault_requests.c.secret_name,
         vault_requests.c.status, vault_requests.c.expires_at,
     ).where(vault_requests.c.status == "pending")
+    if provision_name is not None:
+        query = query.where(
+            vault_requests.c.request_type == "provision",
+            func.lower(vault_requests.c.secret_name) == _secret_name_case_key(provision_name),
+        )
     for batch in conn.execute(query).mappings().partitions(128):
         for row in batch:
             expiry = _parse_iso_datetime(row["expires_at"])
@@ -4035,6 +4041,7 @@ def fulfill_pending_provision_requests_for_secret(
     *,
     decided_at: str | None = None,
 ) -> int:
+    _expire_pending_requests(conn, provision_name=name)
     result = conn.execute(
         vault_requests.update()
         .where(
@@ -5550,7 +5557,9 @@ def create_provision_request(
     if not vault_crypto.is_valid_secret_name(name):
         raise InvalidSecretNameError(name)
     request_id = _id("vrq")
-    now = _now()
+    created = datetime.now(timezone.utc)
+    now = created.isoformat()
+    expires_at = (created + timedelta(seconds=DEFAULT_PROVISION_REQUEST_TTL_SECONDS)).isoformat()
     existing_name = _find_secret_name_case_insensitive(conn, name)
     if existing_name is not None and existing_name != name:
         raise SecretNameCaseConflictError(name, existing_name)
@@ -5587,6 +5596,7 @@ def create_provision_request(
                 status=status,
                 message_id=resolved_message_id,
                 created_at=now,
+                expires_at=expires_at,
                 decided_at=now if already else None,
             )
         )
@@ -5601,6 +5611,7 @@ def create_provision_request(
         "secret_name": name,
         "status": status,
         "created_at": now,
+        "expires_at": expires_at,
         "card": card,
     }
 
@@ -7093,13 +7104,28 @@ def _expire_pending_requests_for_secret(
     return _expire_pending_request_rows(conn, rows, reason=reason, delivery_extra={"changed_secret": secret_name})
 
 
+def retire_legacy_provision_requests(conn: Connection) -> None:
+    """Upgrade cleanup, not a timeout: never resume the owners of these requests."""
+    pending = conn.execute(select(vault_requests).where(
+        vault_requests.c.request_type == "provision", vault_requests.c.status == "pending",
+    )).mappings().all()
+    for row in pending:
+        if row["expires_at"] is not None:
+            owner = _request_session_id(dict(row))
+            if not owner or conn.execute(select(agent_sessions.c.status).where(
+                agent_sessions.c.id == owner,
+            )).scalar_one_or_none() != "archived":
+                continue
+        _expire_pending_request_rows(conn, [dict(row)], reason="request-expired-upgrade", callback_status="skipped")
+
+
 def expire_session_requests(conn: Connection, session_id: str, *, reason: str = "request-expired-session-archived") -> int:
     rows = [
         dict(row)
         for row in conn.execute(
             select(vault_requests).where(
                 vault_requests.c.status == "pending",
-                vault_requests.c.request_type.in_(("access", "sign", "delete")),
+                vault_requests.c.request_type.in_(("access", "sign", "delete", "provision")),
             )
         ).mappings()
         if _request_session_id(dict(row)) == session_id
