@@ -683,9 +683,9 @@ final class WebViewController: UIViewController {
     /// from the instance's answer. Past it, it is given up for this launch.
     private var staleReplacementDeadline: ContinuousClock.Instant?
     /// How long after the instance answered a held replacement may still be
-    /// made (Product, 11-29: 15 s). A replacement made later would come in
-    /// the middle of use.
-    private let staleReplacementWindow: Duration
+    /// made (Product, 11-29). A replacement made later would come in the
+    /// middle of use.
+    static let staleReplacementWindow: Duration = .seconds(15)
     /// The live navigation replacing a stale cached page. Until it commits,
     /// the cached page stays on screen; a failure leaves it as it was.
     private var staleReplacementNavigation: WKNavigation?
@@ -968,7 +968,6 @@ final class WebViewController: UIViewController {
         startURL: @escaping () -> URL? = { nil },
         cachedPageConnected: @escaping () -> Void = {},
         cachedPageKeepsShell: @escaping () -> Void = {},
-        staleReplacementWindow: Duration = .seconds(15),
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -1012,7 +1011,6 @@ final class WebViewController: UIViewController {
         self.startURL = startURL
         self.cachedPageConnected = cachedPageConnected
         self.cachedPageKeepsShell = cachedPageKeepsShell
-        self.staleReplacementWindow = staleReplacementWindow
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1446,7 +1444,7 @@ final class WebViewController: UIViewController {
                 guard !Self.replacedStaleBuilds.contains(build) else { return }
                 Self.replacedStaleBuilds.insert(build)
                 self.hasPendingStaleReplacement = true
-                self.staleReplacementDeadline = ContinuousClock.now.advanced(by: self.staleReplacementWindow)
+                self.staleReplacementDeadline = ContinuousClock.now.advanced(by: Self.staleReplacementWindow)
                 self.replaceStaleCachedPage()
             }
         }
@@ -2062,6 +2060,9 @@ final class WebViewController: UIViewController {
         // works; it is only an older build). Not tried again in this launch.
         if navigation != nil, navigation === staleReplacementNavigation {
             staleReplacementNavigation = nil
+            // The cached page stays: its account fallback comes back as
+            // after any load of it.
+            scheduleAccountFallbackIfNeeded()
             return
         }
         // A live navigation from an uncovered cached page that failed before

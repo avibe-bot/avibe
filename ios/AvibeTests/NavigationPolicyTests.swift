@@ -5304,7 +5304,7 @@ extension NavigationPolicyTests {
     }
 
     /// A replacement held by the gate past its window (15 s from the
-    /// instance's answer; short here) is given up: when the gate opens, the
+    /// instance's answer) is given up: when the gate opens, the
     /// cached page stays and nothing more is loaded. Only the window differs
     /// from `testAStaleCachedPageIsReplacedOnceThroughTheLoadGate`, where the
     /// same opening replaces the page.
@@ -5344,7 +5344,6 @@ extension NavigationPolicyTests {
                 if event.stage == .finished, event.fromCache { gate = .held }
             },
             pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }, remove: { removed += 1 }),
-            staleReplacementWindow: .milliseconds(300),
             didStartLoading: {},
             didFinishLoading: {},
             didFailLoading: {}
@@ -5354,7 +5353,7 @@ extension NavigationPolicyTests {
         try await waitUntil { removed == 1 }
         // Past the window, the gate opens: nothing is replaced.
         let clock = ContinuousClock()
-        let past = clock.now.advanced(by: .milliseconds(600))
+        let past = clock.now.advanced(by: WebViewController.staleReplacementWindow + .milliseconds(500))
         while clock.now < past {
             try await Task.sleep(for: .milliseconds(50))
         }
