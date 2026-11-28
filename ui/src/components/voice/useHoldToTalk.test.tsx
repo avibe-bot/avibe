@@ -242,6 +242,8 @@ beforeEach(() => {
 });
 afterEach(async () => {
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+  // A Desktop take keeps the Mac's answer for later pages: none of it reaches the next test.
+  window.localStorage.removeItem('avibe.voice.desktopMicOpened');
   cleanup();
   // A frame, and the App's answer: an unmounted surface is taken back from the App (lib/nativeVoiceHold).
   await vi.advanceTimersByTimeAsync(20);
@@ -731,6 +733,71 @@ describe('useHoldToTalk', () => {
       await elapse(170);
       await flush();
       expect(opened()).toBe(2);
+    });
+
+    // Owner, 2026-11-28: after a start, the first hold opened the microphone only at the hold
+    // (350 ms, then about 350 ms more for a cold device) and lost its first words.
+    it('on Desktop, opens it during a page\'s first press where a take opened it before', async () => {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+      const key = 'avibe.voice.desktopMicOpened';
+      try {
+        openStream();
+        const el = await mouse();
+        // This page has opened nothing yet (as after a start): it forgets any earlier take's.
+        await forgetMicrophone(el);
+        expect(window.localStorage.getItem(key)).toBeNull();
+        // An earlier launch opened it: the Mac's answer is kept.
+        window.localStorage.setItem(key, '1');
+        down(el, 500, 'mouse');
+        await elapse(150);
+        await flush();
+        expect(opened()).toBe(1);
+        await elapse(200);
+        await flush();
+        // The hold takes the stream the press opened, and opens nothing more.
+        expect(pipeline.takes.at(-1)!.input.stream).toBeDefined();
+        expect(opened()).toBe(1);
+        fireEvent.keyDown(window, { key: 'Escape' });
+        await flush();
+
+        // Refused (withdrawn in System Settings): forgotten, for later pages too.
+        vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValueOnce(new DOMException('Blocked', 'NotAllowedError'));
+        down(el, 500, 'mouse');
+        await elapse(150);
+        await flush();
+        expect(opened()).toBe(2);
+        up(el);
+        await flush();
+        expect(window.localStorage.getItem(key)).toBeNull();
+        down(el, 500, 'mouse');
+        await elapse(170);
+        await flush();
+        expect(opened()).toBe(2);
+        up(el);
+        await flush();
+      } finally {
+        window.localStorage.removeItem(key);
+      }
+    });
+
+    it('in a browser, keeps no earlier page\'s answer', async () => {
+      const key = 'avibe.voice.desktopMicOpened';
+      try {
+        openStream();
+        const el = await mount();
+        await forgetMicrophone(el);
+        window.localStorage.setItem(key, '1');
+        // A browser whose permission cannot be read: only this page's own take would count.
+        vi.mocked(navigator.permissions.query).mockRejectedValueOnce(new TypeError('unsupported'));
+        down(el, 500, 'mouse');
+        await elapse(170);
+        await flush();
+        expect(opened()).toBe(0);
+        up(el);
+        await flush();
+      } finally {
+        window.localStorage.removeItem(key);
+      }
     });
 
     it('opens nothing for a surface gone while the permission was still being read', async () => {

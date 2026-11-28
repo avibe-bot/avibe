@@ -265,6 +265,37 @@ let allowedOnAsk = false;
 // A take in this page opened the microphone: where the page cannot read the permission (Desktop
 // cannot tell the Mac's own), a press may open it before the hold. Only a hold brings up a question.
 let micOpenedHere = false;
+// On Desktop the answer is the Mac's, kept by the system across launches: once a take there opened
+// the microphone, a later page's first press opens it too, as every later one does (owner,
+// 2026-11-28: the first hold after a start lost its first words, the microphone opening only at
+// the hold). A Mac that withdrew it refuses with no question, and the page forgets it then.
+const DESKTOP_MIC_OPENED_KEY = 'avibe.voice.desktopMicOpened';
+const desktopStorage = (): Storage | null => {
+  if (!isDesktopShell()) return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+const micOpenedBefore = (): boolean => {
+  if (micOpenedHere) return true;
+  try {
+    return desktopStorage()?.getItem(DESKTOP_MIC_OPENED_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+const noteMicOpened = (opened: boolean): void => {
+  micOpenedHere = opened;
+  try {
+    const storage = desktopStorage();
+    if (opened) storage?.setItem(DESKTOP_MIC_OPENED_KEY, '1');
+    else storage?.removeItem(DESKTOP_MIC_OPENED_KEY);
+  } catch {
+    // Not kept: this page still knows.
+  }
+};
 
 const stopStream = (stream: MediaStream) => stream.getTracks().forEach((track) => track.stop());
 /** Closes a microphone a press opened and no take used. */
@@ -540,7 +571,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (!current.started) {
       // The microphone never opened while the press was still on: refused, or no microphone.
       allowedOnAsk = false;
-      micOpenedHere = false;
+      noteMicOpened(false);
       end(microphoneFailure(error));
       return;
     }
@@ -622,7 +653,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         return;
       }
       current.started = true;
-      if (pageMic) micOpenedHere = true;
+      if (pageMic && !micOpenedHere) noteMicOpened(true);
       // The take runs from here: setup time is not speech, so it cannot carry a slip past the
       // minimum. A take the App began has been recording since touch-down: it runs from its cue.
       if (!adopt) current.startedAt = Date.now();
@@ -1028,14 +1059,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (isIosDevice()) return;
     // Allowed: the browser says so, or (where it cannot tell, as on Desktop) the microphone
     // already opened in this page.
-    const allowed = state === 'granted' || (state === null && (micOpenedHere || allowedOnAsk));
+    const allowed = state === 'granted' || (state === null && (micOpenedBefore() || allowedOnAsk));
     if (!allowed) return;
     const mic = requestVoiceInputStream();
     // Refused or failed: the take started on it at the hold says so. A refusal also means this
     // page no longer knows the microphone allowed (withdrawn in the system's settings).
     mic.catch((error: unknown) => {
       if (microphoneFailure(error) !== 'denied') return;
-      micOpenedHere = false;
+      noteMicOpened(false);
       allowedOnAsk = false;
     });
     current.mic = mic;
