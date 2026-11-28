@@ -1338,6 +1338,59 @@ describe('ApiProvider workbench stream liveness', () => {
   // would send it.
   const why = async () => (await import('../lib/pageReport')).takePageReport();
 
+  // In the background the phone App closes the port its listener serves. A
+  // request sent on the return before the port is open again goes by a
+  // connection of WebKit's own, and WebKit keeps the page on it: so the page
+  // holds its requests until the shell's answer says the port is open.
+  const returnWith = async (shellPlatform: 'ios' | 'desktop' = 'ios') => {
+    const original = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', original);
+    // A listener of the document that is older than the page's own, and
+    // sends a request the moment the page is shown again.
+    const sendOnReturn = () => {
+      if (document.visibilityState === 'visible') void window.fetch('/api/version');
+    };
+    document.addEventListener('visibilitychange', sendOnReturn);
+    const shell = installDirectShell({ direct: 3 }, shellPlatform);
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    setVisibility('hidden');
+    await vi.advanceTimersByTimeAsync(5_000);
+    setVisibility('visible');
+    document.removeEventListener('visibilitychange', sendOnReturn);
+    return { shell, original };
+  };
+
+  it('holds a return\'s requests until the shell answers that its port is open, and says how long that was', async () => {
+    const { shell, original } = await returnWith();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(original).not.toHaveBeenCalled();
+    await shell.answer(1, 0);
+    expect(original).toHaveBeenCalledTimes(1);
+    // Once, with the page's word, on its next report; then the word alone.
+    expect(await why()).toBe('no_path;hold=300');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await why()).toBe('no_path');
+  });
+
+  it('lets a return\'s requests go after a second when the shell has not answered', async () => {
+    const { original } = await returnWith();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(original).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(original).toHaveBeenCalledTimes(1);
+    expect(await why()).toBe('no_path;hold=1000');
+  });
+
+  it('holds nothing in the desktop app, whose listener keeps its port', async () => {
+    const { original } = await returnWith('desktop');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(original).toHaveBeenCalledTimes(1);
+    expect(await why()).toBe('no_path');
+  });
+
   it('says why it has not moved: no answer yet, no path, the verdict, on the path, the spacing', async () => {
     const shell = installDirectShell({ direct: 3 });
     await mountDirectPage();
