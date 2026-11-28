@@ -5,6 +5,7 @@ import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
+const recoverRemoteAuthFromSessionProbe = vi.hoisted(() => vi.fn(async () => {}));
 const showToast = vi.hoisted(() => vi.fn());
 
 // The local message store only learns about the stream through these two calls;
@@ -27,7 +28,7 @@ vi.mock('../lib/workbenchEventSource', () => ({
   createWorkbenchEventSource: (url: string) => new EventSource(url),
 }));
 
-vi.mock('../lib/apiFetch', () => ({ apiFetch }));
+vi.mock('../lib/apiFetch', () => ({ apiFetch, recoverRemoteAuthFromSessionProbe }));
 vi.mock('../lib/localStore', () => localStore);
 vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('react-i18next', () => ({
@@ -640,6 +641,57 @@ describe('ApiProvider workbench stream liveness', () => {
     FakeEventSource.latest().emit('connected', { type: 'connected' });
     vi.advanceTimersByTime(1_000);
     expect(declared.closed).toBe(true);
+  });
+
+  const sessionProbes = () => apiFetch.mock.calls.filter(([path]) => path === '/api/session').length;
+
+  it('asks the session why a stream failed, at once, in a browser, hidden or not', () => {
+    mountConnectedStream();
+    apiFetch.mockClear();
+    FakeEventSource.latest().onerror?.(new Event('error'));
+    expect(apiFetch).toHaveBeenCalledWith('/api/session', { cache: 'no-store' });
+    expect(sessionProbes()).toBe(1);
+
+    vi.advanceTimersByTime(WORKBENCH_EVENT_RETRY_INITIAL_MS);
+    emitHandshake(2);
+    apiFetch.mockClear();
+    setVisibility('hidden');
+    FakeEventSource.latest().onerror?.(new Event('error'));
+    expect(sessionProbes()).toBe(1);
+  });
+
+  it('in a shell with a direct path, sends nothing for a stream that fails while the page is hidden', async () => {
+    const shell = installDirectShell({ direct: 3 });
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshakeVia(1, 'direct');
+    emitControllerLeg(true);
+    emitHeartbeat();
+    const first = FakeEventSource.latest();
+
+    // The App goes to the background and closes its port: the stream's
+    // socket ends while the page is hidden. A request sent now would leave by
+    // a connection of WebKit's own, and the page would stay on it.
+    setVisibility('hidden');
+    apiFetch.mockClear();
+    first.onerror?.(new Event('error'));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(first.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // The return opens the stream again, as it always did for a stream that
+    // died while the page was away.
+    setVisibility('visible');
+    await shell.answer(1, 0);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.latest().closed).toBe(false);
+
+    // Shown, a failed stream is asked about as before.
+    emitHandshakeVia(2, 'direct');
+    apiFetch.mockClear();
+    FakeEventSource.latest().onerror?.(new Event('error'));
+    expect(sessionProbes()).toBe(1);
   });
 
   it('opens the first stream only after the direct baseline, and at once without the capability', async () => {

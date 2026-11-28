@@ -34,6 +34,7 @@ import { parseHomePreferences, type HomePreferences } from '../lib/homePreferenc
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import {
+  nativeDirectAvailable,
   nativeDirectBaselineState,
   nativeDirectHandover,
   nativeDirectHandoverAvailable,
@@ -3919,9 +3920,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // EventSource does not expose a failed response's status or JSON body.
       // Probe through apiFetch, then inspect the successful /api/session form;
       // both 401s and the 200 refresh payload enter the shared login recovery.
-      void apiFetch('/api/session', { cache: 'no-store' })
-        .then(recoverRemoteAuthFromSessionProbe)
-        .catch(() => undefined);
+      //
+      // Not from a hidden page in a shell with a direct path. The phone App
+      // closes its listener's port when it goes to the background, which is
+      // what ends this stream; a request sent then goes by a connection of
+      // WebKit's own to the public address, and WebKit keeps every later
+      // request of the page on it, where no hand-over can reach it (measured,
+      // docs/plans/remote-direct-ios.md section 8). Nothing is lost by
+      // waiting: no stream opens while the page is hidden, and the one the
+      // return opens reads the session itself and fails into this probe.
+      if (document.visibilityState === 'visible' || !nativeDirectAvailable()) {
+        void apiFetch('/api/session', { cache: 'no-store' })
+          .then(recoverRemoteAuthFromSessionProbe)
+          .catch(() => undefined);
+      }
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
     };
   }
