@@ -136,7 +136,10 @@ def _row_to_payload(
     *,
     include_local_details: bool = True,
 ) -> dict[str, Any]:
+    from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY
+
     metadata = _load_metadata(row.get("metadata_json"))
+    metadata.pop(PICK_METADATA_KEY, None)
     metadata.pop(SESSION_PROJECT_BASE_METADATA_KEY, None)
     speed = session_speed(metadata)
     if not include_local_details:
@@ -736,6 +739,7 @@ def create_session(
     # the global default (see ``update_session``). No project default → the
     # fields stay empty and dispatch falls back to the global default Vibe
     # Agent. An explicit caller backend always wins.
+    explicit_model = model
     inherited_project_default = False
     if not agent_name and not agent_backend and scope_row.get("agent_name") and scope_row.get("agent_backend"):
         inherited_project_default = True
@@ -828,9 +832,14 @@ def create_session(
 
     now = _utc_now_iso()
     variant = agent_variant or agent_backend or "default"
+    from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, record_explicit_pick
+
     metadata_payload = {"created_via": "workbench"}
     if metadata:
         metadata_payload.update(metadata)
+    metadata_payload.pop(PICK_METADATA_KEY, None)  # Never accept a route descriptor from a caller.
+    if explicit_model and model == explicit_model:
+        record_explicit_pick(metadata_payload, agent_backend, model)
     if speed is not None:
         _apply_session_speed(metadata_payload, speed)
 
@@ -1536,7 +1545,10 @@ def update_session(
     # effort is empty must drop the previous agent's override), while an omitted
     # field leaves the stored value untouched (Codex P2).
     if model is not _UNSET:
+        from core.handlers.model_hub.saved_pick import record_explicit_pick
+
         values["model"] = model or None
+        record_explicit_pick(existing_metadata, values.get("agent_backend", current_backend), values["model"])
     if reasoning_effort is not _UNSET:
         values["reasoning_effort"] = reasoning_effort or None
     if speed is not _UNSET:

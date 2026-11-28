@@ -80,7 +80,7 @@ def _route_agent_backend_and_model(agent_name: Optional[str]) -> tuple[Optional[
     return (name, None) if is_agent_backend(name) else (None, None)
 
 
-def normalize_scope_routing(routing_payload: dict) -> dict:
+def normalize_scope_routing(routing_payload: dict, *, saved_pick: object = None) -> dict:
     """The route a scope stores for ``routing_payload``.
 
     Claude Code rejects an effort its model does not support, so a Claude
@@ -100,6 +100,14 @@ def normalize_scope_routing(routing_payload: dict) -> dict:
         agent_catalog = V2ModelHubConfigStore().load().agents["claude"] if is_model_hub_enabled() else None
         if agent_catalog is not None and agent_catalog.mode == "hub":
             row = next((row for row in agent_catalog.models if row.id == model), None)
+            if row is None and model:
+                from core.handlers.model_hub.saved_pick import SavedHubPick
+                from core.handlers.model_hub.service import capture_explicit_native_pick
+
+                pick = SavedHubPick.from_payload(saved_pick)
+                if not pick or (pick.backend, pick.model.id) != (backend, model):
+                    pick = capture_explicit_native_pick(backend, model)
+                row = pick.model if pick else None
             if row is not None:
                 # Match the picker: a present empty list (or non-reasoning
                 # model) is authoritative, not a request for backend tiers.
@@ -181,12 +189,16 @@ def apply_scope_change(
     # Agent and model catalogs, which must not hold other writers up.
     routing_changes: Optional[dict] = None
     if routing_patch is not None:
-        stored_routing = routing_to_dict(source_of(store.settings).routing)
+        previous = source_of(store.settings).routing
+        stored_routing = routing_to_dict(previous)
         # A browser tab from an older release may still send retired aliases.
         routing_patch = lift_legacy_routing_aliases(
             routing_patch, routing_patch.get("agent_name", stored_routing["agent_name"])
         )
-        normalized = normalize_scope_routing({**stored_routing, **routing_patch})
+        merged_routing = {**stored_routing, **routing_patch}
+        normalize_args = ( {"saved_pick": previous._hub_pick} if previous._hub_pick and
+                           merged_routing.get("agent_name") == stored_routing.get("agent_name") else {} )
+        normalized = normalize_scope_routing(merged_routing, **normalize_args)
         routing_changes = {
             name: value
             for name, value in normalized.items()

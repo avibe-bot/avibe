@@ -214,6 +214,9 @@ class ModelHubRemoteService:
     def get_agent_sources(self, backend: str) -> dict:
         return _rpc_sync("get_agent_sources", {"backend": backend})
 
+    async def read_hub_offer_candidates(self, backend: str) -> list[dict]:
+        return await _rpc("hub_offer_candidates", {"backend": backend})
+
     def agent_model_candidates(self, backend: str) -> dict:
         return _rpc_sync("agent_model_candidates", {"backend": backend})
 

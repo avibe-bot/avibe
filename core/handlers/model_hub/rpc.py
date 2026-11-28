@@ -124,10 +124,12 @@ async def dispatch_model_hub_rpc(
             service.get_agent_sources,
             backend,
         )
+    if operation == "hub_offer_candidates":
+        return await service.read_hub_offer_candidates(payload.get("backend"))
     if operation == "agent_model_candidates":
         service.request_inventory_refresh()
         backend = payload.get("backend")
-        if backend in MODEL_HUB_NATIVE_BACKENDS:
+        if backend in MODEL_HUB_NATIVE_BACKENDS and (await asyncio.to_thread(service.store.load)).agents[backend].mode == "direct":
             await _refresh_agent_presence(service, (backend,))
             if backend != "opencode":
                 await service.reconcile_builtin_models((backend,))

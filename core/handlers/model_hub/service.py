@@ -13,6 +13,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from itertools import count
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Final, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
 from urllib.parse import urlsplit
@@ -244,11 +245,13 @@ from .provenance import (
 from .opaque_provenance import OpaqueProvenanceRegistry, filter_opaque_history
 from .fast_mode import FAST_SPEED, FastModeCatalog, FastTierObservations, load_fast_mode_catalog
 from .request import ModelHubRequest, without_opaque_history
+from .saved_pick import SavedHubPick
 from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 from .resolver import (
     BackendName,
     ModelHubTurnResolution,
+    OfferedModel,
     SourceRecoveryAnnotation,
     allowed_origins,
     effective_model_route,
@@ -263,6 +266,8 @@ from .resolver import (
     source_runnable,
     validate_cache_ttl_override,
 )
+from .menu_order import MenuOrder
+from .offers import CompleteListing, ListingFile, listed_supplier_view
 from .revocations import CredentialRevocationJournal, PendingCredentialRevocation, RevocationOperation
 from .retry import (
     RECOVERY_ADMISSION_MARGIN_SECONDS,
@@ -342,9 +347,10 @@ def _storable_backend_model_metadata(
 
 
 def _cached_models_dev_catalog() -> Mapping[str, Any]:
-    from vibe.models_dev_catalog import load_models_dev_catalog_with_date
+    from vibe.models_dev_catalog import cached_models_dev_catalog
 
-    return load_models_dev_catalog_with_date()[0]
+    # Picker reads must not acquire the foreground fetcher's network lock.
+    return cached_models_dev_catalog()
 
 
 def _with_text_only_models(
@@ -1787,6 +1793,14 @@ class ModelHubService:
         self._background_discovery_stop: asyncio.Event | None = None
         # Process-local schedule state: an unchanged listing persists nothing,
         # and a restart rediscovers stale Sources one tick after startup.
+        self._menu_orders = {backend: MenuOrder(events.path.parent / f"hub_{backend}_menu_order.json")
+                             for backend in ("claude", "codex")}
+        self._order_write_lock = asyncio.Lock()
+        self._listing_file = ListingFile(events.path.parent / "hub_source_observations.json")
+        self._pending_hub_listings = self._listing_file.load()
+        self._listing_publish_lock = asyncio.Lock()
+        self._listing_tickets = count(1)
+        self._accepted_listing: dict[str, int] = {}
         self._background_discovery_checked: dict[str, datetime] = {}
         self._background_discovery_retries: dict[str, _DiscoveryRetry] = {}
         self._background_discovery_caught_up = False
@@ -3469,8 +3483,8 @@ class ModelHubService:
             for model in agent.models
         )
 
+    @staticmethod
     def _matching_menu_model_hops(
-        self,
         config: ModelHubConfig,
         backend: BackendName,
         menu_model: str,
@@ -5706,6 +5720,46 @@ class ModelHubService:
                 self.revocations.remove(source.id, source.credential_ref)
             return {"removed_hops": removed_hops, "interrupted": would_interrupt}
 
+    @property
+    def _complete_hub_listings(self) -> dict[str, CompleteListing]:
+        # The controller picker and the UI-process selection writer share exactly one
+        # publication point: the atomic replacement of the observation document.
+        return self._listing_file.load()
+
+    @asynccontextmanager
+    async def _listing_writeback(self):
+        """Observe complete reads in request order; flush after any routing lock is released."""
+        changed = False
+
+        def accept(source: ModelHubSourceConfig, ticket: int, rows: list[DiscoveredModel]) -> bool:
+            nonlocal changed
+            if (not source.credential_ref or source.verification_pending or source.protocol == "search"
+                    or source.supply_channel != "hub"):
+                return True  # Not evidence; existing inventory handling still applies.
+            live = next((item for item in self.store.load().sources if item.id == source.id), None)
+            digest = identity_digest(source)
+            if live is None or identity_digest(live) != digest or ticket <= self._accepted_listing.get(source.id, 0):
+                return False
+            ids = tuple(canonical_model_id(row.id) for row in rows)
+            if any(mid is None or contains_credential_material(mid) for mid in ids) or len(set(ids)) != len(ids):
+                raise ModelHubError("discovery_failed", status=502)
+            receipt = CompleteListing(digest, cast(tuple[str, ...], ids), self.now().isoformat())
+            self._accepted_listing[source.id] = ticket
+            self._pending_hub_listings = {**self._pending_hub_listings, source.id: receipt}
+            changed = True
+            return True
+
+        try:
+            yield accept
+        finally:
+            if changed:
+                # Receipt writes never serialize login, route changes, or menu reads.
+                async with self._listing_publish_lock:
+                    try:
+                        await run_owned_in_thread(self._listing_file.save, self._pending_hub_listings)
+                    except OSError:
+                        logger.warning("Could not publish Hub Source observations; retaining the previous published listing")
+
     async def refresh_source(
         self,
         source_id: str,
@@ -5714,14 +5768,16 @@ class ModelHubService:
         confirmed_remove_hops: object = None,
         confirmed_interruptions: object = None,
     ) -> dict:
-        async with self._mutation_lock:
+        async with self._listing_writeback() as accept, self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
             if source.supply_channel == "native_cli" or source.protocol == "search":
                 raise ModelHubError("discovery_failed")
             try:
+                ticket = next(self._listing_tickets)
                 model_ids = await self._discover(source)
+                accept(source, ticket, model_ids)
                 removed_hops, would_interrupt = await self._finalize_source_discovery(
                     previous,
                     config,
@@ -5929,11 +5985,14 @@ class ModelHubService:
             return
         self._background_discovery_inflight.add(source_id)
         try:
-            await self._refresh_listed_source_in_background(source_id)
+            async with self._listing_writeback() as accept:
+                await self._refresh_listed_source_in_background(source_id, accept)
         finally:
             self._background_discovery_inflight.discard(source_id)
 
-    async def _refresh_listed_source_in_background(self, source_id: str) -> None:
+    async def _refresh_listed_source_in_background(
+        self, source_id: str, accept: Callable[[ModelHubSourceConfig, int, list[DiscoveredModel]], bool],
+    ) -> None:
         config = self.store.load()
         if not config.enabled:
             # Re-read per Source: a runtime stopped mid-pass is not listed again.
@@ -5946,6 +6005,7 @@ class ModelHubService:
             return
         basis = (source_identity(observed), observed.last_discovered_at)
         marked: frozenset[str] | None = None
+        ticket = next(self._listing_tickets)
         try:
             discovered = await asyncio.wait_for(
                 self._discover(observed, start_engine=False),
@@ -5962,6 +6022,8 @@ class ModelHubService:
                 ) != basis:
                     # The listing describes a Source another owner has changed
                     # since; the next tick lists the current one.
+                    return
+                if not accept(observed, ticket, discovered):
                     return
                 # Read now, not at the start: a refusal that arrived while this
                 # listing ran is answered by it.
@@ -6180,6 +6242,60 @@ class ModelHubService:
             fast_catalog=self._load_fast_mode_catalog(),
         )
 
+    def _hub_offer_rows(
+        self, config: ModelHubConfig, backend: BackendName, receipts: Mapping[str, CompleteListing] | None = None,
+    ) -> list[OfferedModel]:
+        return self._listed_offer_rows(
+            config, backend, self._complete_hub_listings if receipts is None else receipts,
+            self._models_dev_descriptions, self._withdrawn_builtin_model_ids,
+        )
+
+    @classmethod
+    def _listed_offer_rows(cls, config, backend, listings, describe, withdrawn_ids) -> list[OfferedModel]:
+        agent = cls._agent(config, backend)
+        if agent.mode != "hub" or backend not in {"claude", "codex", "vibey"} or not listings:
+            return []
+        supplied = listed_supplier_view(config, backend, listings)
+        omitted = set(agent.removed_model_ids) | {row.id for row in agent.models}
+        ids = list(dict.fromkeys(row.id for source in supplied.sources for row in source.models if row.id not in omitted))
+        if not ids:
+            return []
+        withdrawn = withdrawn_ids(backend)
+        descriptions = describe(ids)
+        result = []
+        for mid in ids:
+            match = descriptions.get(mid)
+            if (mid in withdrawn or not match or match.get("match_kind") != "exact" or not match.get("first_party")
+                    or not _described_as_fit_for_agent_turns(match)
+                    or (backend != "vibey" and _NATIVE_VENDOR_BACKENDS.get(match.get("provider_id")) != backend)):
+                continue
+            candidate = cls._provider_candidate(supplied, backend, mid, match)
+            if candidate and candidate[1]:
+                row, suppliers, _ = candidate
+                result.append(OfferedModel(
+                    **row.to_payload(),
+                    listed_hops=tuple(ModelHubRouteHopConfig(s["source_id"], s["model_id"]) for s in suppliers),
+                ))
+        return result
+
+    def project_offer_menu(self, config: ModelHubConfig, backend: BackendName) -> ModelHubConfig:
+        """An ephemeral native menu on this config revision. Never hand this view to a writer."""
+        if backend not in self._menu_orders or config.agents[backend].mode != "hub":
+            return config
+        agent = config.agents[backend]
+        additions = self._hub_offer_rows(config, backend)
+        order = self._menu_orders[backend]
+        if not additions and not order.ids:
+            return config
+        models = order.apply([*agent.models, *additions])
+        return replace(config, agents={**config.agents, backend: replace(agent, models=models)})
+
+    async def read_hub_offer_candidates(self, backend: BackendName) -> list[dict]:
+        def read() -> list[dict]:
+            return [{"id": row.id, "display_name": row.display_name}
+                    for row in self._hub_offer_rows(self.store.load(), backend)]
+        return await asyncio.to_thread(read)
+
     async def read_agent_sources(self, backend: str) -> dict:
         """``get_agent_sources`` for a caller on the controller loop, which owns the recovery state.
 
@@ -6358,6 +6474,10 @@ class ModelHubService:
         return [self._catalog_model_payload(model) for model in agent.models if model.id not in hidden]
 
     def _withdrawn_builtin_model_ids(self, backend: BackendName) -> set[str]:
+        return self._withdrawn_ids(backend, self._current_builtin_models)
+
+    @staticmethod
+    def _withdrawn_ids(backend: BackendName, current_models) -> set[str]:
         # Either catalog may withdraw a model; the remote one does so without a
         # release. A stale remote cache schedules the controller-owned refresh,
         # whose completion reconciles the snapshot, so a new tombstone reaches
@@ -6377,7 +6497,7 @@ class ModelHubService:
         )
         if not retired:
             return set()
-        return retired - {item["id"] for item in self._current_builtin_models(backend)}
+        return retired - {item["id"] for item in current_models(backend)}
 
     def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
         # A retired built-in stays persisted and routeable, so any session,
@@ -6400,7 +6520,7 @@ class ModelHubService:
     def backend_catalog_models(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=404)
-        config = self.store.load()
+        config = self.project_offer_menu(self.store.load(), cast(BackendName, backend))
         return self._catalog_models_payload(config.agents[backend])
 
     def _agent_payload(
@@ -6414,6 +6534,8 @@ class ModelHubService:
         mutation responses are built on the controller loop.
         """
         backend = cast(BackendName, agent.backend)
+        config = self.project_offer_menu(config, backend)
+        agent = config.agents[backend]
         hidden = self._hidden_retired_model_ids(agent)
         builtin_models = (
             [model.id for model in agent.models if model.id not in hidden]
@@ -6581,8 +6703,9 @@ class ModelHubService:
             "builtin_models": builtin_models,
         }
 
+    @classmethod
     def _candidate_suppliers(
-        self,
+        cls,
         config: ModelHubConfig,
         backend: BackendName,
         candidate_id: str,
@@ -6591,7 +6714,7 @@ class ModelHubService:
         suppliers: list[dict] = []
         display_name: Optional[str] = None
         reasoning_efforts: list[str] = []
-        for hop in self._matching_menu_model_hops(config, backend, candidate_id):
+        for hop in cls._matching_menu_model_hops(config, backend, candidate_id):
             source = source_by_id[hop.source_id]
             model = next(
                 (
@@ -6643,8 +6766,9 @@ class ModelHubService:
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
 
+    @classmethod
     def _provider_candidate(
-        self,
+        cls,
         config: ModelHubConfig,
         backend: BackendName,
         model_id: str,
@@ -6658,7 +6782,7 @@ class ModelHubService:
 
         from vibe.models_dev_catalog import native_protocol_for_model_id
 
-        suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
+        suppliers, display_name, reasoning_efforts = cls._candidate_suppliers(
             config,
             backend,
             model_id,
@@ -6704,10 +6828,31 @@ class ModelHubService:
             return None
         return admitted, suppliers, tuple(enrichment)
 
+    def _offer_read_config(
+        self, config: ModelHubConfig, backend: BackendName, receipts: Mapping[str, CompleteListing],
+    ) -> ModelHubConfig:
+        """Supply for Add/its optimistic guard. Never change the execution config."""
+        if config.agents[backend].mode != "hub" or backend not in {"vibey", "claude", "codex"}:
+            return config
+        confirmed = {s.id: s for s in listed_supplier_view(config, backend, receipts).sources}
+        sources = []
+        for source in config.sources:
+            if source.id not in receipts and source.credential_generation is None:
+                # Pre-feature rows remain manually addable but cannot generate hints.
+                sources.append(source)
+                continue
+            listed = {row.id for row in confirmed[source.id].models} if source.id in confirmed else set()
+            sources.append(replace(source, models=[row for row in source.models if row.id in listed or row.provenance == "manual"]))
+        return replace(config, sources=sources)
+
     def agent_model_candidates(self, backend: str) -> dict:
         agent_backend = cast(BackendName, backend)
         config = self.store.load()
         agent = self._agent(config, backend)
+        receipts = self._complete_hub_listings
+        offers = {row.id: row for row in self._hub_offer_rows(config, agent_backend, receipts)}
+        hint_suppliers = listed_supplier_view(config, backend, receipts) if offers else config
+        config = self._offer_read_config(config, agent_backend, receipts)
         from vibe.models_dev_catalog import native_protocol_for_model_id
 
         def protocol_payload(model_id: str) -> dict[str, str]:
@@ -6715,6 +6860,8 @@ class ModelHubService:
                 return {}
             return {"native_protocol": native_protocol_for_model_id(model_id)}
 
+        if backend in self._menu_orders and agent.mode == "hub":
+            agent = replace(agent, models=self._menu_orders[backend].apply([*agent.models, *offers.values()]))
         menu_models = self._catalog_models_payload(agent)
         menu_ids = {model["id"] for model in menu_models}
         snapshot = self._current_builtin_models(agent_backend)
@@ -6740,7 +6887,7 @@ class ModelHubService:
             if admitted is None:
                 continue
             builtin_ids.add(admitted.id)
-            if admitted.id in menu_ids:
+            if admitted.id in menu_ids or (backend == "vibey" and admitted.id in offers):
                 continue
             suppliers, _source_label, _source_efforts = self._candidate_suppliers(
                 config,
@@ -6775,7 +6922,7 @@ class ModelHubService:
                 if (
                     candidate_id in withdrawn
                     or candidate_id in menu_ids
-                    or candidate_id in builtin_ids
+                    or (candidate_id in builtin_ids and candidate_id not in offers)
                     or candidate_id in provider_ids
                 ):
                     continue
@@ -6789,7 +6936,7 @@ class ModelHubService:
         described = self._models_dev_descriptions(provider_ids)
         for model_id in provider_ids:
             candidate = self._provider_candidate(
-                config,
+                hint_suppliers if model_id in offers else config,
                 agent_backend,
                 model_id,
                 described.get(model_id),
@@ -6935,7 +7082,8 @@ class ModelHubService:
         selection remains unsupplied until discovery or an explicit manual hop.
         """
 
-        if self.named_agents_override is None:
+        if backend in ("claude", "codex") or self.named_agents_override is None:
+            # Native Hub menus follow Source observations, not an Agent's private pin.
             return
         agent = config.agents[backend]
         source_by_id = {source.id: source for source in config.sources}
@@ -7509,7 +7657,7 @@ class ModelHubService:
         """Whether a temporarily blocked hop of this route does not refuse the request's effort."""
 
         resolution = self._invocation_resolution(
-            self.store.load(), cast(BackendName, backend), model_id, supply_channel,
+            self.store.load(), cast(BackendName, backend), model_id, supply_channel, request=request,
         )
         return any(
             hop.source is not None
@@ -8369,11 +8517,18 @@ class ModelHubService:
         backend: BackendName,
         model_ids: Iterable[str],
     ) -> dict[str, list[dict[str, str]]]:
+        model_ids = tuple(model_ids)
+        if not model_ids:
+            return {}
+        receipts = self._complete_hub_listings
+        offers = {row.id for row in self._hub_offer_rows(config, backend, receipts)}
+        confirmed = listed_supplier_view(config, backend, receipts) if offers else config
+        config = self._offer_read_config(config, backend, receipts)
         return {
             model_id: [
                 {"source_id": hop.source_id, "model_id": hop.model_id}
                 for hop in self._matching_menu_model_hops(
-                    config,
+                    confirmed if model_id in offers else config,
                     backend,
                     model_id,
                 )
@@ -8811,6 +8966,15 @@ class ModelHubService:
                 if model.id not in desired_by_id and model.id in current_by_id
             ]
             removed_model_id_set = set(removed_model_ids)
+            if agent.mode == "hub" and backend in {"claude", "codex"}:
+                # The baseline can contain a read-time provider offer which has
+                # no stored menu row. Deleting it suppresses future offers even
+                # if the Source withdrew it while the editor was open. It does
+                # not remove a saved selection or an execution route.
+                for row in baseline_models:
+                    if (row.origin == "provider" and row.id not in desired_by_id and row.id not in current_by_id
+                            and row.id not in agent.removed_model_ids):
+                        agent.removed_model_ids.append(row.id)
             for model_id in removed_model_ids:
                 route = effective_model_route(config, agent_backend, model_id)
                 current = current_by_id.get(model_id)
@@ -8961,19 +9125,28 @@ class ModelHubService:
                     raise ModelHubError("backend_model_store_busy", status=503) from None
             # SQLite selections now refer to the new catalog. Engine sync failure
             # must not roll the file back over them; reconcile on next demand.
+            menu_order = self._menu_orders.get(backend) if agent.mode == "hub" and order_changed else None
+            save_positions = menu_order is not None and (menu_order.ids or any(
+                mid not in current_by_id for mid in baseline_by_id
+            ))
+            if save_positions and menu_order.damaged:
+                raise ModelHubError("backend_model_store_busy", status=503)
             await self._commit_synced(previous, config, rollback_on_sync_failure=not moves)
-            await self._refresh_backend_catalog(cast(BackendName, backend))
-            committed = self.store.load()
-            result = {
-                "agent": self._agent_payload(
-                    committed,
-                    self._agent(committed, backend),
-                )
-            }
-            if removed_hops or interrupted:
-                result["removed_hops"] = removed_hops
-                result["interrupted"] = interrupted
-            return result
+        if save_positions:
+            # File publication cannot own a routing/renewal lock. Only an explicit
+            # reorder reaches this file; confirmation follows the atomic replacement.
+            async with self._order_write_lock:
+                try:
+                    await run_owned_in_thread(menu_order.save, desired_order)
+                except OSError:
+                    raise ModelHubError("backend_model_store_busy", status=503) from None
+        await self._refresh_backend_catalog(cast(BackendName, backend))
+        committed = self.store.load()
+        result = {"agent": self._agent_payload(committed, self._agent(committed, backend))}
+        if removed_hops or interrupted:
+            result["removed_hops"] = removed_hops
+            result["interrupted"] = interrupted
+        return result
 
     @staticmethod
     def models_dev_matches(
@@ -11423,6 +11596,8 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         supply_channel: Literal["hub"] | None = None,
+        *,
+        request: Mapping[str, Any] | None = None,
     ) -> ModelHubTurnResolution:
         if config.agents[backend].mode != "hub":
             # Only Hub turns reach the gateway. One admitted before a switch to
@@ -11430,6 +11605,10 @@ class ModelHubService:
             # Direct, so they never get here.
             config = self._clone_config(config)
             config.agents[backend].mode = "hub"
+        config = self.project_offer_menu(config, backend)
+        pick = request.saved_pick if isinstance(request, ModelHubRequest) else None
+        if isinstance(pick, SavedHubPick):
+            config = pick.execution_view(config, backend, model_id)
         live_recovery = self.recovery_annotations(config)
         resolution = resolve_model_hub_turn(
             config,
@@ -11484,7 +11663,7 @@ class ModelHubService:
             try:
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, backend, requested_model_id, supply_channel,
+                    config, backend, requested_model_id, supply_channel, request=request,
                 )
                 pinned_hop = _pinned_hop(request, backend)
                 candidates = [
@@ -11955,7 +12134,7 @@ class ModelHubService:
         async with self._mutation_lock:
             config = self.store.load()
             resolution = self._invocation_resolution(
-                config, cast(BackendName, backend), model_id, supply_channel,
+                config, cast(BackendName, backend), model_id, supply_channel, request=request,
             )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
@@ -12015,7 +12194,7 @@ class ModelHubService:
                     break
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, cast(BackendName, backend), model_id, supply_channel,
+                    config, cast(BackendName, backend), model_id, supply_channel, request=request,
                 )
                 inspection = next(
                     (
@@ -12505,10 +12684,10 @@ class ModelHubService:
                     if pending.expired:
                         raise self._recovery_exhausted(exc, pending.reason) from exc
                     config = self.store.load()
-                    resolution = self._invocation_resolution(
-                        config, kwargs["backend"], kwargs["model_id"], supply_channel,
-                    )
                     request = kwargs.get("request")
+                    resolution = self._invocation_resolution(
+                        config, kwargs["backend"], kwargs["model_id"], supply_channel, request=request,
+                    )
                     if any(
                         hop.source is not None
                         and hop.model_id is not None
@@ -12569,6 +12748,25 @@ def _recovery_cause(reason: str | None) -> dict[str, str] | None:
     """The failure an exhausted recovery waited out, for the caller to classify (``classification.py`` reasons)."""
 
     return {"cause": reason} if reason else None
+
+
+def capture_explicit_native_pick(backend: str, model_id: str | None) -> SavedHubPick | None:
+    """Snapshot an offered route at the choice writer, without a controller or network call."""
+    if not model_id or backend not in ("codex", "claude"):
+        return None
+    config = V2ModelHubConfigStore().load()
+    if config.agents[backend].mode != "hub":
+        return None
+    from vibe.backend_model_catalog import backend_builtin_models
+    from vibe.models_dev_catalog import models_dev_metadata_matches
+
+    receipts = ListingFile(paths.get_state_dir() / "hub_source_observations.json").load()
+    rows = ModelHubService._listed_offer_rows(
+        config, backend, receipts,
+        lambda ids: models_dev_metadata_matches(ids, dict(_cached_models_dev_catalog())),
+        lambda key: ModelHubService._withdrawn_ids(key, lambda b: backend_builtin_models(b, schedule_refresh=False)),
+    )
+    return next((SavedHubPick.from_offer(config, backend, row) for row in rows if row.id == model_id), None)
 
 
 def create_default_service(

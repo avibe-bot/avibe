@@ -835,6 +835,8 @@ class PreparedGatewayRoute:
     # without it, but a route under another identity is another route, so its
     # credential carries the launch identity the gateway compares against.
     primary_identity: str = ""
+    # Immutable and hashable: different selected routes must not share a route token.
+    saved_pick_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -881,9 +883,11 @@ class GatewayTurnTerminalizer:
             request_metadata=self._request_metadata,
         )
         self._prepared_turn_id = self.turn_id
-        self.primary_origin = registry.gateway_primary_origin(
+        route = registry.prepared_gateway_route(
             backend=backend, token=token, request_metadata=self._request_metadata,
         )
+        self.primary_origin = route.primary_origin if route else None
+        self.saved_pick_json = route.saved_pick_json if route else None
         self._stream_started = False
         self._attempt_started = False
         self._downstream_canceled = False
@@ -1492,16 +1496,21 @@ class TurnCorrelationRegistry:
     ) -> HopOrigin | None:
         """Read the immutable launch origin, including an explicit route handle."""
 
+        route = self.prepared_gateway_route(backend=backend, token=token, request_metadata=request_metadata)
+        return route.primary_origin if route else None
+
+    def prepared_gateway_route(
+        self, *, backend: str, token: str, request_metadata: Mapping[str, str] | None = None,
+    ) -> PreparedGatewayRoute | None:
+        """Return only the route bound to this credential or its explicit route handle."""
         with self._lock:
             credential = self._credential(backend, token)
-            if credential is None:
-                return None
-            if credential.route is not None:
-                return credential.route.primary_origin
+            if credential is None or credential.route is not None:
+                return credential.route if credential is not None else None
             explicit = self._explicit_route(
                 backend=backend, token=token, request_metadata=request_metadata,
             )
-            return explicit[2].primary_origin if explicit is not None else None
+            return explicit[2] if explicit is not None else None
 
     def _explicit_route(
         self,
@@ -1792,6 +1801,7 @@ class TurnCorrelationRegistry:
         gateway_request_model_id: str | None = None,
         primary_origin: HopOrigin | None = None,
         primary_identity: str | None = None,
+        saved_pick_json: str | None = None,
         hosted_tools: TurnHostedTools | None = None,
         speed: str | None = None,
     ) -> str:
@@ -1818,6 +1828,7 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
                 primary_origin=primary_origin,
+                saved_pick_json=saved_pick_json,
                 primary_identity=(
                     primary_identity
                     if isinstance(primary_identity, str)

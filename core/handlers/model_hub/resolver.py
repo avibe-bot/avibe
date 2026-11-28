@@ -9,6 +9,7 @@ from typing import Literal, Mapping
 
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
+    ModelHubBackendModelConfig,
     ModelHubConfig,
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
@@ -29,6 +30,13 @@ _GPT_MODEL = re.compile(
     r"gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?",
     re.ASCII,
 )
+
+
+@dataclass
+class OfferedModel(ModelHubBackendModelConfig):
+    """Read-only projection: historical Source rows are not suppliers for a new pick."""
+
+    listed_hops: tuple[ModelHubRouteHopConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -366,8 +374,11 @@ def effective_model_route(
     override = normalized_model_hub_override(agent.routes.get(requested_model))
     if override is not None:
         return EffectiveModelRoute(override, "manual", override.hops, override.cache_ttl)
-    if not requested_model or not any(model.id == requested_model for model in agent.models):
+    menu_row = next((model for model in agent.models if model.id == requested_model), None)
+    if not requested_model or menu_row is None:
         return EffectiveModelRoute(None, None, ())
+    if isinstance(menu_row, OfferedModel):
+        return EffectiveModelRoute(None, "automatic", menu_row.listed_hops)
     by_id = {source.id: source for source in config.sources}
     sources = [
         by_id[source_id]

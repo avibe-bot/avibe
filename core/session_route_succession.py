@@ -65,6 +65,11 @@ def retired_route_succession(
     agent = agents.get(backend) if isinstance(agents, Mapping) else None
     if agent is None or agent.mode != "hub" or agent.menu_kind != "fixed":
         return None
+    if backend in {"claude", "codex"}:
+        # Their Hub menus follow the assigned Sources. Absence (including a
+        # missing observation after restart) is not permission to rewrite a
+        # saved model or effort. Dispatch checks its current binding instead.
+        return None
     listed = {model.id: model for model in agent.models}
 
     def serves(model_id: Optional[str]) -> bool:

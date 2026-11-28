@@ -3520,6 +3520,51 @@ def test_long_inventory_identity_reaches_runtime_config_and_http_consumer(
         asyncio.run(run(base_url, handler))
 
 
+@pytest.mark.parametrize("tail", [None, {"data": [{"id": "second"}, {}]}, {"data": [], "has_more": True, "last_id": "first"}])
+def test_anthropic_inventory_only_returns_after_the_last_complete_page(monkeypatch, tail):
+    from contextlib import asynccontextmanager
+
+    seen = []
+    cursor = "first" if tail is not None else "m" * 17000
+
+    class Session:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        @asynccontextmanager
+        async def get(self, url, *, headers, allow_redirects, params=None, **kwargs):
+            assert not allow_redirects
+            seen.append((url, params or {}))
+            body = ({"data": [{"id": cursor}], "has_more": True, "last_id": cursor}
+                    if not params else tail or {"data": [{"id": "second"}], "has_more": False})
+            buffer = io.BytesIO(json.dumps(body).encode())
+
+            class Response:
+                status = 200
+                content = property(lambda self: self)
+
+                async def read(self, size):
+                    return buffer.read(size)
+
+            yield Response()
+
+    monkeypatch.setattr(client_module.aiohttp, "ClientSession", Session)
+    call = client_module.probe_models(vendor="custom", protocol="anthropic", base_url="https://api.example.test/v1", secret="fixture")
+    if tail is None:
+        assert [m.id for m in asyncio.run(call)] == [cursor, "second"]
+    else:
+        with pytest.raises(client_module.EngineClientError):
+            asyncio.run(call)
+    assert [params for _, params in seen] == [{}, {"after_id": cursor}]
+    assert seen[0][0] == seen[1][0]
+
+
 def test_model_inventory_duplicate_top_level_members_replace_earlier_values() -> None:
     projected = client_module._project_model_inventory(
         io.BytesIO(
@@ -10345,11 +10390,16 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
         assert pinned in MODEL_PROTOCOLS
 
 
-def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inventory", ["valid", "incomplete_rows", "unreadable_response"])
+def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path, inventory: str) -> None:
     class Client:
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             assert (method, path) == ("GET", "/auth-files/models")
             assert query == {"name": "claude-account.json"}
+            if inventory == "unreadable_response":
+                raise client_module.EngineClientError("invalid response JSON", error_type="invalid_json")
+            if inventory == "incomplete_rows":
+                return {"models": [{"id": "first"}, {}]}
             return {
                 "models": [
                     {
@@ -10395,6 +10445,12 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
             state_store=store,
         )
 
+        if inventory != "valid":
+            from core.handlers.model_hub.errors import ModelDiscoveryError
+            with pytest.raises(ModelDiscoveryError):
+                await adapter.discover_models("anthropic", "anthropic", None, credential_ref)
+            assert store.credential_metadata(credential_ref)["auth_name"] == "claude-account.json"
+            return
         models = await adapter.discover_models(
             "anthropic",
             "anthropic",

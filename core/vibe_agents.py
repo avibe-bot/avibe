@@ -38,6 +38,7 @@ from storage.models import (
     scopes,
     state_meta,
 )
+from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, record_explicit_pick
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
 from storage.settings_revision import (
     RUNTIME_SETTINGS_SCOPE_TYPES,
@@ -65,7 +66,7 @@ MAIN_BOT_HANDLE = "main"
 MAIN_BOT_AGENT_NAME = "main"
 MAIN_BOT_DESCRIPTION = "The user's main Bot and first point of contact."
 #: Metadata no public create or update can set, change, or clear.
-STORE_OWNED_METADATA_KEYS = frozenset((*BUILTIN_AGENT_MARKER_KEYS, BOT_METADATA_KEY, BUILTIN_BOT_METADATA_KEY))
+STORE_OWNED_METADATA_KEYS = frozenset((*BUILTIN_AGENT_MARKER_KEYS, BOT_METADATA_KEY, BUILTIN_BOT_METADATA_KEY, PICK_METADATA_KEY))
 # The description a built-in Agent is created with. The built-in backend's Agent is Vibey, as its system prompt
 # says (``modules/agents/vibey/prompt.py``); the prompt's Agents roster (``core/prompts/harness-agents.md``)
 # lists this description beside that identity.
@@ -1123,6 +1124,9 @@ class VibeAgentStore:
             created_at=now,
             updated_at=now,
         )
+        agent.metadata.pop(PICK_METADATA_KEY, None)
+        if source != "builtin" and _clean_optional(model):
+            record_explicit_pick(agent.metadata, normalized_backend, agent.model)
         try:
             with self.engine.begin() as conn:
                 if before_insert is not None:
@@ -1200,6 +1204,11 @@ class VibeAgentStore:
                     (key, existing.metadata[key]) for key in STORE_OWNED_METADATA_KEYS if key in existing.metadata
                 )
                 values["metadata_json"] = _json_dumps(metadata)
+            if model is not _UNSET:
+                owned = dict(existing.metadata if metadata is _UNSET else metadata)
+                record_explicit_pick(owned, existing.backend, _clean_optional(model))
+                if owned != existing.metadata or metadata is not _UNSET:
+                    values["metadata_json"] = _json_dumps(owned)
             if enabled is not _UNSET:
                 if not enabled and (is_always_enabled_agent(existing) or is_main_bot_agent(existing)):
                     raise AgentAlwaysEnabledError(agent_name=existing.name)

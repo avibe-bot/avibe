@@ -46,6 +46,7 @@ from core.handlers.model_hub.provenance import (
     render_turn_outcome_copy,
     supply_interruption_reason,
 )
+from core.handlers.model_hub.saved_pick import SavedHubPick
 from core.handlers.model_hub.resolver import (
     BackendName,
     CacheTtl,
@@ -362,6 +363,17 @@ async def resolve_model_hub_launch(
             turn_lookup = getattr(manager, "model_hub_turn_id_for_task", None)
             turn_id = turn_lookup() if callable(turn_lookup) else None
         snapshot = {"config": config} if config is not None else {}
+        if backend in ("claude", "codex") and context is not None:
+            from core.agent_session_context import resolve_context_agent_session_target
+            from core.handlers.model_hub.saved_pick import read_session_pick
+
+            target = resolve_context_agent_session_target(context) or {}
+            inherited = getattr(context, "_vibe_inherited_hub_pick", None)
+            pick = inherited if isinstance(inherited, SavedHubPick) else None
+            if pick is None and isinstance(target.get("id"), str):
+                pick = await asyncio.to_thread(read_session_pick, target["id"], backend, requested_model)
+            if pick and pick.backend == backend and pick.model.id == requested_model:
+                snapshot["saved_pick"] = pick
         try:
             return await resolver(
                 backend,
@@ -987,6 +999,7 @@ class ModelHubRuntimeRouter:
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
         primary_origin: HopOrigin | None = None,
+        saved_pick: SavedHubPick | None = None,
         hosted_tools: TurnHostedTools | None = None,
         request_scoped: bool | None = None,
         primary_identity: str | None = None,
@@ -1008,6 +1021,7 @@ class ModelHubRuntimeRouter:
                     else backend in {"codex", "opencode"}
                 ),
                 **({"primary_origin": primary_origin} if primary_origin is not None else {}),
+                **({"saved_pick": saved_pick} if saved_pick is not None else {}),
                 **({"primary_identity": primary_identity} if primary_identity is not None else {}),
                 **({"hosted_tools": hosted_tools} if hosted_tools is not None else {}),
                 **({"speed": speed} if speed is not None else {}),
@@ -1275,7 +1289,10 @@ class ModelHubRuntimeRouter:
         and its runtime's launch inputs from one load, so a concurrent catalog
         change cannot split them.
         """
-        return self.service.store.load()
+        config = self.service.store.load()
+        for backend in ("claude", "codex"):
+            config = self.service.project_offer_menu(config, backend)
+        return config
 
     def turn_mode(self, backend: BackendName, *, config: ModelHubConfig | None = None) -> TurnMode:
         if backend not in MODEL_HUB_BACKENDS:
@@ -1347,6 +1364,7 @@ class ModelHubRuntimeRouter:
         turn_id: Optional[str] = None,
         config: ModelHubConfig | None = None,
         speed: Optional[str] = None,
+        saved_pick: SavedHubPick | None = None,
     ) -> ModelHubLaunch:
         """``speed`` is the processing tier this resolution asks for (``"fast"`` or None).
 
@@ -1356,7 +1374,12 @@ class ModelHubRuntimeRouter:
         requested_model = str(requested_model or "").strip()
         if backend not in MODEL_HUB_BACKENDS:
             return self._direct_launch(backend, requested_model)
-        config = config if config is not None else self.service.store.load()
+        config = config if config is not None else self.snapshot()
+        if saved_pick is not None:
+            if saved_pick.backend != backend or saved_pick.model.id != requested_model or config.agents[backend].mode != "hub":
+                saved_pick = None
+            else:
+                config = saved_pick.execution_view(config, backend, requested_model)
         if backend == "vibey" and (
             config.agents[backend].mode != "hub" or self.turn_gateway is None
         ):
@@ -1445,6 +1468,7 @@ class ModelHubRuntimeRouter:
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
                 primary_origin=route_origin,
+                saved_pick=saved_pick,
                 primary_identity=identity,
                 # The executor endpoint runs only what the turn froze.
                 hosted_tools=frozen,
@@ -1466,6 +1490,7 @@ class ModelHubRuntimeRouter:
                         gateway_request_model_id=runtime_model,
                         primary_origin=route_origin,
                         primary_identity=identity,
+                        saved_pick_json=saved_pick.route_key() if saved_pick is not None else None,
                     ),
                 )
             elif self.turn_gateway is not None and backend == "vibey" and str(turn_id or "").strip():

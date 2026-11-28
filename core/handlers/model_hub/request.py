@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Final, Mapping
 
 if TYPE_CHECKING:
     from .provenance import HopOrigin
+    from .saved_pick import SavedHubPick
 
 # Caller headers that cross from an agent CLI's request to the local engine.
 # Protocol capability headers select request features. ``user-agent`` keeps
@@ -46,6 +47,7 @@ class ModelHubRequest(dict[str, Any]):
         protocol: str,
         headers: Mapping[str, str] | None = None,
         primary_origin: HopOrigin | None = None,
+        saved_pick: SavedHubPick | None = None,
         pinned_hop: tuple[str, str | None] | None = None,
         pin_identity_claim: Callable[[str, bool], bool] | None = None,
         speed: str | None = None,
@@ -57,6 +59,8 @@ class ModelHubRequest(dict[str, Any]):
         # Launch snapshot, not wire JSON. Every retry compares against this
         # origin, even when resolution restarts after cooldown/config changes.
         self.primary_origin = primary_origin
+        # Controller-owned selection metadata, never taken from the request body or headers.
+        self.saved_pick = saved_pick
         # The one (Source, model) a Vibey request carrying Source-specific hosted
         # content may be served by: no failover, no recovery wait, no rewrite.
         # A model of None matches no hop.
@@ -76,7 +80,7 @@ class ModelHubRequest(dict[str, Any]):
 
         return ModelHubRequest(
             payload, protocol=self.protocol, headers=self.headers,
-            primary_origin=self.primary_origin, pinned_hop=self.pinned_hop,
+            primary_origin=self.primary_origin, saved_pick=self.saved_pick, pinned_hop=self.pinned_hop,
             pin_identity_claim=self.pin_identity_claim, speed=self.speed, thread_calls=self.thread_calls,
         )
 

@@ -51,6 +51,7 @@ from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILAB
 from .hosted_images import IMAGE_CALL_MAX_BYTES
 from .hosted_turn import IMAGE_TOOL, TurnHostedTools
 from .request import ModelHubRequest, forwarded_caller_headers
+from .saved_pick import SavedHubPick
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
@@ -662,6 +663,7 @@ class ModelHubTurnGateway:
         request_scoped: bool = False,
         primary_origin: HopOrigin | None = None,
         primary_identity: str | None = None,
+        saved_pick: SavedHubPick | None = None,
         hosted_tools: TurnHostedTools | None = None,
         speed: str | None = None,
     ) -> tuple[str, str]:
@@ -712,6 +714,7 @@ class ModelHubTurnGateway:
                     gateway_request_model_id=gateway_request_model_id,
                     primary_origin=primary_origin,
                     primary_identity=primary_identity,
+                    saved_pick_json=saved_pick.route_key() if saved_pick is not None else None,
                     hosted_tools=hosted_tools,
                     speed=speed,
                 )
@@ -1330,6 +1333,8 @@ class ModelHubTurnGateway:
                         headers=caller_headers,
                         thread_calls=thread_calls,
                         primary_origin=terminalizer.primary_origin,
+                        saved_pick=(SavedHubPick.from_payload(json.loads(terminalizer.saved_pick_json))
+                                    if terminalizer.saved_pick_json is not None else None),
                         pinned_hop=(
                             terminalizer.pinned_hop(pin_source_id, pin_model_id) if pin_source_id else None
                         ),

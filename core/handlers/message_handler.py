@@ -462,6 +462,21 @@ class MessageHandler(BaseHandler):
                 fallback_model=resolved_target.get("model") or inherited_model,
                 fallback_reasoning_effort=resolved_target.get("reasoning_effort") or inherited_reasoning_effort,
             )
+            # An Agent pin is execution intent only for a turn that inherits its model.
+            # Never adopt route material from a Session/run's caller-supplied metadata.
+            from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, SavedHubPick
+
+            inherited_pin = None
+            if (agent_name in ("claude", "codex") and not resolved_target.get("model")
+                    and not (isinstance(session_target, dict) and session_target.get("model"))
+                    and "model" not in explicit_overrides):
+                if scope_model_override:
+                    inherited_pin = SavedHubPick.from_payload(getattr(routing, "_hub_pick", None))
+                else:
+                    metadata = getattr(vibe_agent, "metadata", None)
+                    if isinstance(metadata, dict):
+                        inherited_pin = SavedHubPick.from_payload(metadata.get(PICK_METADATA_KEY))
+            context._vibe_inherited_hub_pick = inherited_pin
             succession = await self._succeed_retired_session_route(
                 context,
                 session_target if isinstance(session_target, dict) else resolved_target,
@@ -488,6 +503,7 @@ class MessageHandler(BaseHandler):
             # semantics remain owned by channel routing.
             if (
                 context.platform == "avibe"
+                and inherited_pin is None
                 and isinstance(session_target, dict)
                 and session_target.get("id")
                 and (

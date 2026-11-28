@@ -8,7 +8,7 @@ import threading
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, ClassVar, Dict, List, Optional, Tuple
 
 from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
@@ -133,6 +133,8 @@ def _infer_user_platform(user_id: str) -> str:
 
 @dataclass
 class RoutingSettings:
+    # Server-owned execution intent. Not a settings field, API input, or serialized routing key.
+    _hub_pick: ClassVar[Optional[dict]] = None
     agent_name: Optional[str] = None
     # Scope-level overrides applied on top of the selected Vibe Agent.
     model: Optional[str] = None
@@ -169,7 +171,9 @@ def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSet
     """A copy of a scope route, or the empty route."""
     if routing is None:
         return RoutingSettings()
-    return RoutingSettings(**{item.name: getattr(routing, item.name, None) for item in fields(RoutingSettings)})
+    result = RoutingSettings(**{item.name: getattr(routing, item.name, None) for item in fields(RoutingSettings)})
+    result._hub_pick = getattr(routing, "_hub_pick", None)
+    return result
 
 
 def routing_from_stored_payload(payload: Optional[dict]) -> RoutingSettings:

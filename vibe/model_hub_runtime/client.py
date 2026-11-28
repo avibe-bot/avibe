@@ -1282,20 +1282,36 @@ async def probe_models(
         # stays on the uncredentialed request: it must differ in exactly one way.
         headers["anthropic-version"] = "2023-06-01"
     deadline = time.monotonic() + timeout
-    client_timeout = aiohttp.ClientTimeout(total=timeout, ceil_threshold=float("inf"))
+    models: dict[str, DiscoveredModel] = {}
+    cursors: set[str] = set()
+    cursor: str | None = None
     try:
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(url, headers=headers, allow_redirects=False) as response:
-                if response.status >= 300:
-                    raise await _model_discovery_http_error(response, secret)
-                with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
-                    while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
-                        await run_owned_in_thread(payload.write, chunk)
-                    projected = await run_owned_in_thread(
-                        _project_model_inventory_before_deadline,
-                        payload,
-                        deadline=deadline,
-                    )
+        async with aiohttp.ClientSession() as session:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                async with session.get(
+                    url, headers=headers, allow_redirects=False,
+                    params={"after_id": cursor} if cursor else {},
+                    timeout=aiohttp.ClientTimeout(total=remaining, ceil_threshold=float("inf")),
+                ) as response:
+                    if response.status >= 300:
+                        raise await _model_discovery_http_error(response, secret)
+                    with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
+                        while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
+                            await run_owned_in_thread(payload.write, chunk)
+                        page, next_id = await run_owned_in_thread(
+                            _project_model_inventory_before_deadline, payload, deadline=deadline,
+                        )
+                for model in page:
+                    models.setdefault(model.id, model)
+                if next_id is None or first_page_only:
+                    return tuple(models.values())
+                if protocol != "anthropic" or next_id in cursors:
+                    raise EngineClientError("model discovery returned an unsupported continuation")
+                cursors.add(next_id)
+                cursor = next_id
     except asyncio.TimeoutError:
         raise EngineClientError("model discovery timed out", error_type="timeout") from None
     except aiohttp.ClientError:
@@ -1305,16 +1321,6 @@ async def probe_models(
             "model discovery failed",
             error_type=type(exc).__name__,
         ) from None
-    if projected is None:
-        raise EngineClientError("model discovery returned an invalid payload")
-    data_seen, data_is_array, data_models, fallback_seen, fallback_is_array, fallback_models = projected
-    if data_seen:
-        if not data_is_array:
-            raise EngineClientError("model discovery returned an invalid payload")
-        return tuple(data_models)
-    if not fallback_seen or not fallback_is_array:
-        raise EngineClientError("model discovery returned an invalid payload")
-    return tuple(fallback_models)
 
 
 def _project_google_inventory(
@@ -1419,7 +1425,7 @@ async def _probe_google_models(
 
 
 def _project_model_inventory(
-    reader: BinaryIO,
+    reader: BinaryIO, *, pagination: dict[str, object] | None = None,
 ) -> tuple[
     bool,
     bool,
@@ -1441,6 +1447,9 @@ def _project_model_inventory(
         ("models", "*", "supported_parameters"),
         ("models", "*", "supported_parameters", "*"),
     }
+    rows: dict[str, set[JSONScope]] = {"data": set(), "models": set()}
+    if pagination is not None:
+        paths.update({("has_more",), ("last_id",)})
     root_is_map = False
     data_seen = False
     data_is_array = False
@@ -1466,6 +1475,14 @@ def _project_model_inventory(
         scope: JSONScope,
     ) -> None:
         nonlocal root_is_map, data_seen, data_is_array, fallback_seen, fallback_is_array
+        if path in {("has_more",), ("last_id",)} and pagination is not None:
+            if event != "nonempty":
+                pagination[path[0]] = value if event == "scalar" else None
+            return
+        if path in {("data",), ("models",)} and event == "replace":
+            rows[path[0]].clear()
+        if path in {("data", "*"), ("models", "*")} and event not in {"replace", "nonempty"}:
+            rows[path[0]].add(scope)
         if path == () and event == "start_map":
             root_is_map = True
         elif path == ("data",):
@@ -1576,12 +1593,16 @@ def _project_model_inventory(
         for member in ("data", "models")
         for suffix in (("*",), ("*", "id"), ("*", "supported_parameters", "*"))
     }
+    if pagination is not None:
+        # Anthropic uses the last model ID as its opaque continuation token.
+        # Preserve it exactly, even when it exceeds the diagnostic token cap.
+        lossless_paths.add(("last_id",))
     if not project_json_reader(
         reader, paths, visit, lossless_string_paths=lossless_paths
     ) or not root_is_map:
         return None
-    if (data_seen and invalid_data_models) or (
-        not data_seen and fallback_seen and invalid_fallback_models
+    if (data_seen and (invalid_data_models or rows["data"] != data_models.keys())) or (
+        not data_seen and fallback_seen and (invalid_fallback_models or rows["models"] != fallback_models.keys())
     ):
         return None
     return (
@@ -1667,20 +1688,22 @@ def _project_model_inventory_before_deadline(
     payload: BinaryIO,
     *,
     deadline: float,
-) -> tuple[
-    bool,
-    bool,
-    list[DiscoveredModel],
-    bool,
-    bool,
-    list[DiscoveredModel],
-] | None:
+) -> tuple[list[DiscoveredModel], str | None]:
     payload.seek(0)
-    return _project_before_deadline(
-        payload,
-        _project_model_inventory,
-        deadline=deadline,
+    pagination: dict[str, object] = {}
+    projected = _project_before_deadline(
+        payload, functools.partial(_project_model_inventory, pagination=pagination), deadline=deadline,
     )
+    if projected is None:
+        raise EngineClientError("model discovery returned an invalid payload")
+    data_seen, data_array, data, fallback_seen, fallback_array, fallback = projected
+    if not (data_array if data_seen else fallback_seen and fallback_array):
+        raise EngineClientError("model discovery returned an invalid payload")
+    more = pagination.get("has_more", False)
+    last = pagination.get("last_id")
+    if not isinstance(more, bool) or (more and not (isinstance(last, str) and last.strip())):
+        raise EngineClientError("model discovery returned an invalid continuation")
+    return (data if data_seen else fallback), (cast(str, last) if more else None)
 
 
 def engine_disowned_call(outcome: RawCallOutcome) -> bool:

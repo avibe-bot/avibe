@@ -246,9 +246,11 @@ class SQLiteSettingsService:
             kept: set[str] = set()
 
             for scoped_key, item in state.channels.items():
+                previous_item = current.channels.get(scoped_key)
                 platform, channel_id = _split_scoped_key(scoped_key)
                 scope_id = upsert_scope(conn, platform or "unknown", "channel", channel_id, now=now)
                 routed = self._reconcile_agent_binding(conn, scope_id, item)
+                pick_fields = _scope_pick_fields(conn, previous_item, routed)
                 routing = asdict(routed)
                 self._upsert_scope_settings(
                     conn,
@@ -260,6 +262,7 @@ class SQLiteSettingsService:
                     settings_json=_json_dumps(
                         {
                             "show_message_types": normalize_show_message_types(item.show_message_types),
+                            **pick_fields,
                             "routing": routing,
                             "require_bind": item.require_bind,
                         }
@@ -273,6 +276,7 @@ class SQLiteSettingsService:
                 saved_bindings.append((item, routed))
 
             for scoped_key, item in state.threads.items():
+                previous_item = current.threads.get(scoped_key)
                 platform, native_id = _split_scoped_key(scoped_key)
                 channel_id, thread_id = split_thread_native_id(native_id)
                 resolved_platform = platform or "unknown"
@@ -293,6 +297,7 @@ class SQLiteSettingsService:
                     now=now,
                 )
                 routed = self._reconcile_agent_binding(conn, scope_id, item)
+                pick_fields = _scope_pick_fields(conn, previous_item, routed)
                 routing = asdict(routed)
                 self._upsert_scope_settings(
                     conn,
@@ -304,6 +309,7 @@ class SQLiteSettingsService:
                     settings_json=_json_dumps(
                         {
                             "show_message_types": normalize_show_message_types(item.show_message_types),
+                            **pick_fields,
                             "routing": routing,
                             "require_bind": item.require_bind,
                         }
@@ -358,6 +364,7 @@ class SQLiteSettingsService:
                 kept.add(scope_id)
 
             for scoped_key, item in state.users.items():
+                previous_item = current.users.get(scoped_key)
                 platform, user_id = _split_scoped_key(scoped_key)
                 scope_id = upsert_scope(
                     conn,
@@ -369,6 +376,7 @@ class SQLiteSettingsService:
                     now=now,
                 )
                 routed = self._reconcile_agent_binding(conn, scope_id, item)
+                pick_fields = _scope_pick_fields(conn, previous_item, routed)
                 routing = asdict(routed)
                 self._upsert_scope_settings(
                     conn,
@@ -384,6 +392,7 @@ class SQLiteSettingsService:
                             "dm_chat_id": item.dm_chat_id or "",
                             "pending_bind_menu_hint": bool(item.pending_bind_menu_hint),
                             "show_message_types": normalize_show_message_types(item.show_message_types),
+                            **pick_fields,
                             "routing": routing,
                         }
                     ),
@@ -705,6 +714,22 @@ def _active_routing_variant(routing: RoutingSettings) -> str | None:
     return routing.codex_agent or routing.claude_agent or routing.opencode_agent or routing.antigravity_agent
 
 
+def _scope_pick_fields(conn: Connection, previous, route: RoutingSettings) -> dict:
+    """Persist the scope's own explicit choice, not a descriptor from an incoming settings payload."""
+    from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY, record_explicit_pick
+
+    before = previous.routing if previous else None
+    route._hub_pick = None if before is None else before._hub_pick
+    if before is None or (before.agent_name, before.model) != (route.agent_name, route.model):
+        fields = {}
+        if route.agent_name and route.model:
+            backend = conn.execute(select(agents.c.backend).where(agents.c.name == route.agent_name)).scalar_one_or_none()
+            if backend:
+                record_explicit_pick(fields, backend, route.model)
+        route._hub_pick = fields.get(PICK_METADATA_KEY)
+    return {PICK_METADATA_KEY: route._hub_pick} if route._hub_pick else {}
+
+
 def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSettings:
     routing_payload = payload.get("routing") or {}
     aliases = {key: value for key, value in routing_payload.items() if key in LEGACY_ROUTING_ALIASES}
@@ -733,6 +758,9 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
     lifted = routing_from_stored_payload({**aliases, "agent_name": routing.agent_name})
     routing.model = routing.model or lifted.model
     routing.reasoning_effort = routing.reasoning_effort or lifted.reasoning_effort
+    from core.handlers.model_hub.saved_pick import PICK_METADATA_KEY
+
+    routing._hub_pick = payload.get(PICK_METADATA_KEY)
     return routing
 
 
