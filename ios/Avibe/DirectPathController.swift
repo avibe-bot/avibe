@@ -729,10 +729,13 @@ final class DirectPathController {
     /// of the selection.
     private var probationLink: (number: Int, key: String, host: String)?
     private var probationLinks = 0
-    /// The wait of a link that is not adopted yet, and the probe it is
-    /// asked once a minute meanwhile.
+    /// The kind of path that link was last seen on, for the report: at its
+    /// loss the transport no longer names one.
+    private var probationPath = DirectPathUse.Path.none
     /// What the store holds, so that it is written only when it changes.
     private var storedProbation: [String: DirectProbationRecord] = [:]
+    /// The wait of a link that is not adopted yet, and the probe it is
+    /// asked once a minute meanwhile.
     private var probationWake: Task<Void, Never>?
     private var probationProbe: Task<Void, Never>?
     /// How often a waiting link is asked whether it still answers.
@@ -939,7 +942,7 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         pathUse: DirectPathUse = .shared,
-        probationStore: DirectProbationStoring = DirectProbationDefaultsStore(defaults: .standard),
+        probationStore: DirectProbationStoring,
         probationClock: DirectProbationClock = .system,
         controlPlaneHost: String? = MobileControlPlaneConfiguration().baseURL.host,
         onStatusChanged: @escaping () -> Void,
@@ -1544,9 +1547,11 @@ final class DirectPathController {
     func setDirectOnly(_ enabled: Bool, forInstanceURL url: URL) {
         guard let authority = DirectAuthority(instanceURL: url) else { return }
         let host = authority.host
+        // Whether the tunnel is ruled out in effect, before the change.
+        let wasStrict = needsListener(host)
         if enabled {
             guard requestedStrict.insert(host).inserted else { return }
-            choiceDidChangeOnLiveLink(host)
+            choiceDidChangeOnLiveLink(host, wasStrict: wasStrict)
             policyGeneration[host, default: 0] &+= 1
             if needsListener(host), !directAuthorized(for: authority), let port = listenerPort {
                 _ = routeOwner.rewrite(host, store: websiteDataStore.identifier,
@@ -1555,7 +1560,7 @@ final class DirectPathController {
             if !hostsNeedingColdStore.contains(host), directAuthorized(for: authority) { cutover(host) }
         } else {
             guard requestedStrict.remove(host) != nil else { return }
-            choiceDidChangeOnLiveLink(host)
+            choiceDidChangeOnLiveLink(host, wasStrict: wasStrict)
             if let wait = firstRouteWait, DirectAuthority(instanceURL: wait.runtime.instance.url)?.host == host {
                 cancelFirstRouteWait()
             }
@@ -1860,11 +1865,13 @@ final class DirectPathController {
             let key = DirectProbationDefaultsStore.entry(accountID: target.runtime.account.id, host: host)
             let link = (number: probationLinks, key: key, host: host)
             probationLink = link
+            probationPath = .none
             let waitMs = probation.linkUp(
                 key, link: link.number, now: probationClock.now(), wall: probationClock.wall(),
                 // With the tunnel ruled out by the user there is nothing
-                // to wait on.
-                strict: requestedStrict.contains(host)
+                // to wait on. Ruled out in effect: a choice that waits for
+                // the next launch still has the tunnel.
+                strict: needsListener(host)
             )
             if waitMs > 0 {
                 noteProbation(held: true)
@@ -1964,8 +1971,9 @@ final class DirectPathController {
     /// new choice, with a new number, so a timer of the old turn adopts
     /// nothing. A link that was waiting is used at once; one that was used
     /// at once waits the level's time from here.
-    private func choiceDidChangeOnLiveLink(_ host: String) {
-        guard let target, target.authority.host == host, probationLink != nil else {
+    private func choiceDidChangeOnLiveLink(_ host: String, wasStrict: Bool) {
+        guard let target, target.authority.host == host, probationLink != nil,
+              needsListener(host) != wasStrict else {
             return
         }
         endProbationLink(.choice)
@@ -1991,10 +1999,16 @@ final class DirectPathController {
         guard level > 0 || held else {
             return
         }
-        let selected = transport.pathDiagnostics.selected
+        // The kind the transport names now, or the last it named for this
+        // link: at a loss it names none.
+        let diagnostics = transport.pathDiagnostics
+        let seen = DirectPathUse.Path(kind: diagnostics.current, local: diagnostics.selected?.local)
+        if seen != .none {
+            probationPath = seen
+        }
         pathUse.probation(
             scope: useScope(link.host),
-            path: DirectPathUse.Path(kind: transport.pathDiagnostics.current, local: selected?.local),
+            path: probationPath,
             levelSeconds: level,
             rose: probation.rose(link.key),
             held: held

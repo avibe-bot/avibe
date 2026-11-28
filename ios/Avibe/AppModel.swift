@@ -597,6 +597,7 @@ final class AppModel: ObservableObject {
                 isCurrentRuntime: { [weak self] runtime in
                     self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
                 },
+                probationStore: DirectProbationDefaultsStore(defaults: defaults),
                 controlPlaneHost: controlPlane.baseURL.host,
                 onStatusChanged: { [weak self] in
                     self?.deliverDirectStatus()
