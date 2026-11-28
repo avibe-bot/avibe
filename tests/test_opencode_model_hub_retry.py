@@ -102,7 +102,7 @@ async def _poll(monkeypatch, *, channel="hub", error=None, baseline=False, busy=
     )
     agent = SimpleNamespace(
         controller=controller,
-        opencode_config=SimpleNamespace(error_retry_limit=2, active_turn_timeout_seconds=0),
+        opencode_config=SimpleNamespace(),
         record_model_hub_native_failure=AsyncMock(),
         _extract_response_text=lambda message: message["parts"][0]["text"] if message["parts"] else "",
     )
@@ -173,22 +173,28 @@ async def test_hub_terminal_skips_automatic_continue_and_emits_one_failure(monke
 
 
 @pytest.mark.parametrize("channel", [None, "direct", "native_cli"])
-async def test_ordinary_native_failure_still_uses_existing_continue(monkeypatch, channel):
+async def test_ordinary_native_failure_fails_immediately_without_continue(monkeypatch, channel):
     result, server, agent, controller = await _poll(monkeypatch, channel=channel)
-    assert result == ("later legitimate output", True)
-    server.prompt_async.assert_awaited_once()
-    assert server.prompt_async.await_args.kwargs["text"] == "continue"
-    agent.record_model_hub_native_failure.assert_not_awaited()
-    controller.emit_agent_message.assert_not_awaited()
+    assert result == (None, False)
+    server.prompt_async.assert_not_awaited()
+    agent.record_model_hub_native_failure.assert_awaited_once()
+    calls = controller.emit_agent_message.await_args_list
+    assert [call.args[1] for call in calls] == ["notify", "result"]
+    assert "APIError" in calls[0].args[2]
+    assert calls[0].args[2] != t("modelHub.recovery.ended", "en")
 
 
-async def test_unrelated_hub_error_keeps_existing_retry(monkeypatch):
+async def test_unrelated_hub_error_fails_immediately_with_backend_error(monkeypatch):
     error = _error()
     error["data"]["statusCode"] = 503
-    result, server, agent, _controller = await _poll(monkeypatch, error=error)
-    assert result == ("later legitimate output", True)
-    server.prompt_async.assert_awaited_once()
-    agent.record_model_hub_native_failure.assert_not_awaited()
+    result, server, agent, controller = await _poll(monkeypatch, error=error)
+    assert result == (None, False)
+    server.prompt_async.assert_not_awaited()
+    agent.record_model_hub_native_failure.assert_awaited_once()
+    calls = controller.emit_agent_message.await_args_list
+    assert [call.args[1] for call in calls] == ["notify", "result"]
+    assert "APIError" in calls[0].args[2]
+    assert calls[0].args[2] != t("modelHub.recovery.ended", "en")
 
 
 @pytest.mark.parametrize("guard", ["baseline", "busy"])

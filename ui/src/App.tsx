@@ -856,9 +856,9 @@ const settingsRoute = () => (
     <Route index element={null} />
     <Route path="general" element={<SettingsGeneralPage />} />
     {/* Appearance was the theme page; General now owns the theme controls, so the
-        alias follows them. Account keeps pointing at Replies, which still owns it. */}
+        alias follows them. Account keeps pointing at Messages, which still owns it. */}
     <Route path="appearance" element={<Navigate to="/settings/general" replace />} />
-    <Route path="account" element={<Navigate to="/settings/replies" replace />} />
+    <Route path="account" element={<Navigate to="/settings/messages" replace />} />
     <Route path="notifications" element={<SettingsNotificationsPage />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />
     <Route path="microphone" element={<SettingsMicrophonePage />} />
@@ -889,7 +889,7 @@ const settingsRoute = () => (
       }
     />
     <Route path="dependencies" element={<SettingsDependenciesPage />} />
-    <Route path="replies" element={<SettingsMessagingPage />} />
+    <Route path="messages" element={<SettingsMessagingPage />} />
     <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
     <Route path="diagnostics/logs" element={<SettingsLogsPage />} />
     <Route path="access" element={<PermissionsPage />} />

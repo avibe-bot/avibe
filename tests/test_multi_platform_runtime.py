@@ -1223,7 +1223,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
     agent.im_client = agent.controller.im_client
     agent.settings_manager = agent.controller.settings_manager
     agent.sessions = agent.controller.sessions
-    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+    agent.opencode_config = type("OpenCodeConfig", (), {})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}
@@ -1421,7 +1421,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     agent.im_client = agent.controller.im_client
     agent.settings_manager = agent.controller.settings_manager
     agent.sessions = agent.controller.sessions
-    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+    agent.opencode_config = type("OpenCodeConfig", (), {})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}
@@ -1476,7 +1476,7 @@ def test_opencode_poll_aborts_disabled_question_toolcall():
             emitted.append((message_type, text))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         im_client = type("IM", (), {"formatter": _Formatter()})()
 
@@ -1627,12 +1627,12 @@ def test_settlement_assistant_message_walks_back_to_the_owning_turn():
     assert owner is not None and owner["info"]["id"] == "msg-ok"
 
 
-def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
-    # A completed assistant message carrying an error, with retries exhausted
-    # (error_retry_limit=0) and the auth-recovery path declining (non-auth error),
-    # is a terminal FAILURE. It emits one visible notification plus one silent
-    # failed settlement, then suppresses the idle "(No response from OpenCode)"
-    # result that would overwrite the terminal state.
+def test_opencode_poll_notifies_and_settles_on_assistant_error():
+    # A completed assistant message carrying an error, with the auth-recovery
+    # path declining (non-auth error), is an immediate terminal FAILURE. It
+    # emits one visible notification plus one silent failed settlement, then
+    # suppresses the idle "(No response from OpenCode)" result that would
+    # overwrite the terminal state.
     emitted = []
     model_hub_failures = []
 
@@ -1669,7 +1669,7 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
             emitted.append((message_type, text, is_error, level, terminal_error))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         im_client = type("IM", (), {"formatter": _Formatter()})()
 
@@ -1773,7 +1773,7 @@ def test_opencode_poll_settles_error_when_trailing_user_is_last():
             emitted.append((message_type, text, is_error, level, terminal_error))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         def _extract_response_text(self, message):
@@ -1882,7 +1882,7 @@ def test_opencode_poll_keeps_accepted_steer_pending_while_native_busy(monkeypatc
             emitted.append((args, kwargs, polls["n"]))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         def _extract_response_text(self, message):
@@ -1982,7 +1982,7 @@ def test_opencode_poll_uses_snapshot_live_flag_instead_of_rereading_status(monke
             emitted.append((args, kwargs, polls["n"]))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         def _extract_response_text(self, message):
@@ -2098,7 +2098,7 @@ def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypat
             emitted.append((message_type, text, is_error, level, terminal_error, output))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         def _extract_response_text(self, message):
@@ -2165,146 +2165,7 @@ def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypat
     assert not any(_ends_the_turn(item[0], item[5]) for item in emitted)
 
 
-def test_opencode_poll_keeps_continue_pending_through_idle_visibility_gap(monkeypatch):
-    """After posting continue, an idle trailing-user snapshot is still live."""
-
-    monkeypatch.setattr(
-        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
-    )
-    monkeypatch.setattr(
-        "modules.agents.opencode.poll_loop._POST_INJECT_CONFIRMATION_SECONDS", 1.0
-    )
-    emitted = []
-    polls = {"n": 0}
-
-    class _AuthSvc:
-        async def maybe_emit_auth_recovery_message(
-            self, context, backend, message, *, output=None, terminal_error=None
-        ):
-            return False
-
-    class _Controller:
-        agent_auth_service = _AuthSvc()
-
-        def _t(self, key, **kwargs):
-            if key == "error.opencodeBackendError":
-                return f"OpenCode error: {kwargs['error']}"
-            return f"translated:{key}"
-
-        async def emit_agent_message(
-            self,
-            context,
-            message_type,
-            text,
-            parse_mode=None,
-            *,
-            is_error=False,
-            level="normal",
-            output=None,
-            terminal_error=None,
-        ):
-            emitted.append((message_type, text, is_error, level, terminal_error, output))
-
-    class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
-        controller = _Controller()
-
-        def _extract_response_text(self, message):
-            return "recovered"
-
-        async def record_model_hub_native_failure(self, context, diagnostic):
-            raise AssertionError("must not settle during the continue visibility gap")
-
-    class _Server:
-        async def list_messages(self, session_id, directory):
-            polls["n"] += 1
-            if polls["n"] == 1:
-                return [
-                    {
-                        "info": {
-                            "id": "msg-err",
-                            "role": "assistant",
-                            "time": {"completed": 1},
-                            "error": {"name": "UnknownError", "data": {"message": "tls"}},
-                        },
-                        "parts": [],
-                    }
-                ]
-            if polls["n"] == 2:
-                return [
-                    {
-                        "info": {
-                            "id": "msg-err",
-                            "role": "assistant",
-                            "time": {"completed": 1},
-                            "error": {"name": "UnknownError", "data": {"message": "tls"}},
-                        },
-                        "parts": [],
-                    },
-                    {
-                        "info": {"id": "msg-continue", "role": "user", "time": {}},
-                        "parts": [{"type": "text", "text": "continue"}],
-                    },
-                ]
-            return [
-                {
-                    "info": {
-                        "id": "msg-err",
-                        "role": "assistant",
-                        "time": {"completed": 1},
-                        "error": {"name": "UnknownError", "data": {"message": "tls"}},
-                    },
-                    "parts": [],
-                },
-                {
-                    "info": {"id": "msg-continue", "role": "user", "time": {}},
-                    "parts": [{"type": "text", "text": "continue"}],
-                },
-                {
-                    "info": {
-                        "id": "msg-new",
-                        "role": "assistant",
-                        "time": {"completed": 1},
-                        "finish": "stop",
-                    },
-                    "parts": [{"type": "text", "text": "recovered"}],
-                },
-            ]
-
-        async def prompt_async(self, **kwargs):
-            return None
-
-        async def get_session_status(self, session_id, directory):
-            return None
-
-    request = AgentRequest(
-        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
-        message="hello",
-        user_message="hello",
-        working_path="/tmp/work",
-        base_session_id="base",
-        composite_session_id="base:/tmp/work",
-        session_key="slack::c",
-    )
-
-    final_text, should_emit = asyncio.run(
-        OpenCodePollLoop(_Agent()).run_prompt_poll(
-            request,
-            _Server(),
-            "oc-session",
-            agent_to_use=None,
-            model_dict=None,
-            reasoning_effort=None,
-            baseline_message_ids=set(),
-        )
-    )
-
-    assert (final_text, should_emit) == ("recovered", True)
-    assert polls["n"] >= 3
-    assert not any(_ends_the_turn(item[0], item[5]) for item in emitted)
-
-
-def test_opencode_poll_keeps_retry_pending_before_continue_user_appears(monkeypatch):
+def test_opencode_poll_keeps_awaiting_boundary_pending_before_followup_appears(monkeypatch):
     """Awaiting boundary holds the old error until post-inject evidence exists."""
 
     monkeypatch.setattr(
@@ -2335,7 +2196,7 @@ def test_opencode_poll_keeps_retry_pending_before_continue_user_appears(monkeypa
         awaiting_user_text = "continue"
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         def _extract_response_text(self, message):
@@ -2433,7 +2294,7 @@ def test_opencode_poll_does_not_settle_error_while_followup_has_parts():
             emitted.append((args, kwargs))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         def _extract_response_text(self, message):
@@ -2536,7 +2397,7 @@ def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
             emitted.append((message_type, text, is_error, level))
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         im_client = type("IM", (), {"formatter": _Formatter()})()
 
@@ -2685,7 +2546,7 @@ def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
     server = _Server()
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         sessions = _Sessions()
 
@@ -2807,7 +2668,7 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
     server = _Server()
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         sessions = _Sessions()
         im_client = type("IM", (), {"formatter": _Formatter()})()
@@ -2912,7 +2773,7 @@ def test_opencode_restored_poll_emits_intermediate_assistant_once():
     server = _Server()
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         sessions = _Sessions()
 
@@ -3009,11 +2870,7 @@ def test_opencode_restored_poll_settles_after_consecutive_transport_failures(
     server = _Server()
 
     class _Agent:
-        opencode_config = type(
-            "OpenCodeConfig",
-            (),
-            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0},
-        )()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         sessions = _Sessions()
 
@@ -3049,104 +2906,6 @@ def test_opencode_restored_poll_settles_after_consecutive_transport_failures(
     assert all("No response from OpenCode" not in (item[1] or "") for item in emitted)
 
 
-def test_opencode_restored_poll_consumes_original_timeout_budget():
-    emitted = []
-    removed = []
-    aborted = []
-    list_calls = []
-
-    class _AuthSvc:
-        async def maybe_emit_auth_recovery_message(
-            self, context, backend, message, *, output=None, terminal_error=None
-        ):
-            return False
-
-    class _Controller:
-        agent_auth_service = _AuthSvc()
-
-        def __init__(self):
-            self.config = type(
-                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"}
-            )()
-            self.processing_indicator = ProcessingIndicatorService(self)
-
-        def _t(self, key, **kwargs):
-            return f"{key}:{kwargs.get('seconds')}"
-
-        async def emit_agent_message(
-            self,
-            context,
-            message_type,
-            text,
-            parse_mode=None,
-            *,
-            is_error=False,
-            level="normal",
-            output=None,
-            terminal_error=None,
-        ):
-            emitted.append((message_type, text, is_error, level, terminal_error))
-
-    class _Sessions:
-        def remove_active_poll(self, session_id):
-            removed.append(session_id)
-
-    class _Server:
-        async def list_messages(self, session_id, directory):
-            list_calls.append((session_id, directory))
-            return []
-
-        async def abort_session(self, session_id, directory):
-            aborted.append((session_id, directory))
-            return True
-
-    server = _Server()
-
-    class _Agent:
-        opencode_config = type(
-            "OpenCodeConfig",
-            (),
-            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0.05},
-        )()
-        controller = _Controller()
-        sessions = _Sessions()
-
-
-        async def _remove_ack_reaction(self, request):
-            return None
-
-        async def record_model_hub_native_failure(self, context, diagnostic):
-            return False
-
-    poll = ActivePollInfo(
-        opencode_session_id="oc-restored-timeout",
-        base_session_id="base",
-        channel_id="c",
-        thread_id="t",
-        settings_key="c",
-        working_path="/tmp/work",
-        baseline_message_ids=[],
-        platform="slack",
-        prompt_started_at=time.time() - 1,
-    )
-
-    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server))
-
-    assert list_calls == []
-    assert aborted == [("oc-restored-timeout", "/tmp/work")]
-    assert terminal is True
-    assert removed == []
-    assert [item[0] for item in emitted] == ["notify", "notify", "result"]
-    assert emitted[1][1] == "error.opencodeActiveTurnTimeout:0.05"
-    assert emitted[2][1:] == (
-        "",
-        True,
-        "silent",
-        "OpenCode active turn exceeded the configured 0.05-second wall-clock limit",
-    )
-    assert all("No response from OpenCode" not in item[1] for item in emitted)
-
-
 def test_opencode_active_turn_poll_propagates_cancellation_without_settlement():
     emitted = []
     aborted = []
@@ -3166,11 +2925,7 @@ def test_opencode_active_turn_poll_propagates_cancellation_without_settlement():
             return True
 
     class _Agent:
-        opencode_config = type(
-            "OpenCodeConfig",
-            (),
-            {"error_retry_limit": 0, "active_turn_timeout_seconds": 60},
-        )()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         @staticmethod
@@ -3216,39 +2971,8 @@ def test_opencode_active_turn_poll_propagates_cancellation_without_settlement():
     assert emitted == []
 
 
-def test_opencode_active_turn_timeout_reads_disabled_semantics():
-    """Every unset, non-positive, or non-finite shape reads as disabled.
-
-    The seed set is every value shape the config can carry once the shipped
-    default is disabled: the dataclass default (missing attribute), an
-    explicit opt-out, a negative number, None, NaN, infinity, and an
-    unparseable string. None of them may silently re-enable the historical
-    wall-clock cap; only a positive opt-in survives as itself.
-    """
-
-    def _config_with(value) -> type:
-        attrs = {"error_retry_limit": 0}
-        if value is not Ellipsis:
-            attrs["active_turn_timeout_seconds"] = value
-        return type("OpenCodeConfig", (), attrs)()
-
-    for raw_value in (Ellipsis, 0, -5, None, float("nan"), float("inf"), "garbage"):
-        loop = OpenCodePollLoop(type("A", (), {"opencode_config": _config_with(raw_value)})())
-        assert loop._active_turn_timeout_seconds() == 0.0, raw_value
-
-    loop = OpenCodePollLoop(type("A", (), {"opencode_config": _config_with(90 * 60)})())
-    assert loop._active_turn_timeout_seconds() == 5400.0
-
-    assert (
-        OpenCodePollLoop._deadline_from_persisted_start(0.0, time.time())
-        == float("inf")
-    )
-    assert OpenCodePollLoop._wait_timeout(float("inf")) is None
-    assert OpenCodePollLoop._wait_timeout(1.5) == 1.5
-
-
-def test_opencode_prompt_poll_has_no_wall_clock_deadline_when_disabled(monkeypatch):
-    """With the cap disabled the poll loop only stops on a terminal message."""
+def test_opencode_prompt_poll_has_no_wall_clock_deadline(monkeypatch):
+    """The poll loop has no wall-clock limit and only stops on a terminal message."""
 
     monkeypatch.setattr(
         "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
@@ -3286,11 +3010,7 @@ def test_opencode_prompt_poll_has_no_wall_clock_deadline_when_disabled(monkeypat
             return True
 
     class _Agent:
-        opencode_config = type(
-            "OpenCodeConfig",
-            (),
-            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0},
-        )()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         @staticmethod
@@ -3391,11 +3111,7 @@ def test_opencode_prompt_poll_settles_after_consecutive_transport_failures(
             return True
 
     class _Agent:
-        opencode_config = type(
-            "OpenCodeConfig",
-            (),
-            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0},
-        )()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         @staticmethod
@@ -3494,11 +3210,7 @@ def test_opencode_prompt_poll_transport_failure_counter_resets_on_recovery(
             return True
 
     class _Agent:
-        opencode_config = type(
-            "OpenCodeConfig",
-            (),
-            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0},
-        )()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
 
         @staticmethod
@@ -3601,7 +3313,7 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
     server = _Server()
 
     class _Agent:
-        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        opencode_config = type("OpenCodeConfig", (), {})()
         controller = _Controller()
         sessions = _Sessions()
 
@@ -4044,7 +3756,6 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
                             {
                                 "default_provider": "openai",
                                 "default_reasoning_effort": "high",
-                                "error_retry_limit": 0,
                             },
                     )(),
                 },

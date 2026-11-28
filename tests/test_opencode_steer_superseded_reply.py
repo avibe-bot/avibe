@@ -62,7 +62,7 @@ def _agent(results, persisted=None):
 
     return SimpleNamespace(
         controller=controller,
-        opencode_config=SimpleNamespace(error_retry_limit=1, active_turn_timeout_seconds=0),
+        opencode_config=SimpleNamespace(),
         sessions=SimpleNamespace(
             update_active_poll_state=lambda _session_id, **state: (
                 persisted.update(state) if persisted is not None else None

@@ -287,7 +287,6 @@ different concepts:
 - inbound processing: future audio transcription
 - agent context metadata: current time, user info
 - run feedback: ACK mode, duration display
-- reliability: OpenCode error retry limit
 - output formatting: quick-reply buttons, Slack link previews
 - scope/routing navigation: allowed groups link
 
@@ -316,10 +315,9 @@ Recommended grouping:
 3. **Work Feedback**
    - ACK mode.
    - Show duration.
-   - Error retry limit.
    - These settings affect how Vibe Remote signals progress and handles a
-     running turn. Keep the retry row here because the product direction is a
-     shared backend retry setting, not an OpenCode-only setting.
+     running turn. (The former OpenCode error retry limit row was later removed
+     along with auto-`'continue'` retries.)
 
 4. **Reply Experience**
    - Quick-reply buttons.
@@ -407,4 +405,3 @@ for this narrow settings layout change.
 - WeChat Silk: not supported in the first version; rely on WeChat's official
   voice transcript when present.
 - Echo: enabled by default and sent immediately after ASR success.
-- Retry setting: keep in Messaging / Work Feedback as a shared backend setting.

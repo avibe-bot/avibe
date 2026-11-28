@@ -215,7 +215,7 @@ def default_config(spec: TenantSpec) -> dict:
         "wechat": None,
         "runtime": {"default_cwd": TENANT_WORKDIR, "log_level": "INFO"},
         "agents": {
-            "opencode": {"enabled": "opencode" in enabled, "cli_path": "opencode", "error_retry_limit": 1},
+            "opencode": {"enabled": "opencode" in enabled, "cli_path": "opencode"},
             "claude": {"enabled": "claude" in enabled, "cli_path": "claude"},
             "codex": {"enabled": "codex" in enabled, "cli_path": "codex"},
             "antigravity": {"enabled": False, "cli_path": "agy"},

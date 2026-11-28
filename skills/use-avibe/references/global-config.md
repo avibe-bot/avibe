@@ -79,8 +79,7 @@ Important config payload shape:
       "cli_path": "opencode",
       "auto_update": true,
       "default_agent": null,
-      "default_reasoning_effort": null,
-      "error_retry_limit": 1
+      "default_reasoning_effort": null
     },
     "claude": {
       "enabled": true,

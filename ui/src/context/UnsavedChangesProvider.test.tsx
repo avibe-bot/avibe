@@ -70,7 +70,7 @@ const SettingsFrame = () => {
       <button type="button" onClick={() => origin && closeSettingsOverlay(navigate, origin)}>
         close-settings
       </button>
-      <Link to="/settings/replies">replies-section</Link>
+      <Link to="/settings/messages">messages-section</Link>
       <Outlet />
     </section>
   );
@@ -89,7 +89,7 @@ const Root = () => (
         <Route path="/chat/:sessionId" element={<div data-testid="chat">chat</div>} />
         <Route path="/settings" element={<SettingsFrame />}>
           <Route path="general" element={<div>general-settings</div>} />
-          <Route path="replies" element={<div>replies-settings</div>} />
+          <Route path="messages" element={<div>messages-settings</div>} />
         </Route>
       </SettingsOverlayRouteSurface>
     </SettingsOverlayNavigationBoundary>
@@ -171,8 +171,8 @@ describe.each(['standalone', 'inline'] as const)(
       const user = userEvent.setup();
       const router = await openSettingsOverDirtyEditor(user);
 
-      await user.click(screen.getByRole('link', { name: 'replies-section' }));
-      expect(screen.getByText('replies-settings')).toBeTruthy();
+      await user.click(screen.getByRole('link', { name: 'messages-section' }));
+      expect(screen.getByText('messages-settings')).toBeTruthy();
       window.history.replaceState(historyAtClose, '');
       await user.click(screen.getByRole('button', { name: 'close-settings' }));
 

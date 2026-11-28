@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import sys
 from pathlib import Path
@@ -14,8 +13,6 @@ from config.v2_config import (
     CodexConfig,
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
-    DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
-    DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
     DiscordConfig,
     OpenCodeConfig,
     PlatformsConfig,
@@ -123,73 +120,15 @@ def test_to_app_config_uses_shared_agent_defaults() -> None:
     assert compat.default_backend == DEFAULT_AGENT_BACKEND
     assert compat.claude.idle_timeout_seconds == DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     assert compat.opencode is not None
-    assert compat.opencode.error_retry_limit == DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
-    assert (
-        compat.opencode.active_turn_timeout_seconds
-        == DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
-    )
-    assert DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS == 0
+    assert not hasattr(compat.opencode, "error_retry_limit")
+    assert not hasattr(compat.opencode, "active_turn_timeout_seconds")
 
 
-def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
+def test_config_load_ignores_legacy_opencode_retry_and_turn_timeout_keys(
     monkeypatch, tmp_path
 ) -> None:
-    """The shipped 5400-second cap is the old default's echo, not a choice.
+    """Old config files carrying removed OpenCode keys load cleanly without effect."""
 
-    Seeding every persisted shape proves the property in one pass: a legacy
-    payload (marker absent) with the default echo loads as disabled, while the
-    same value carrying the provenance marker — the shape every post-change
-    save writes — is an explicit choice that survives. An explicit custom value
-    and an absent key keep their meaning.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    from core.services.settings import default_config
-    from vibe import api
-
-    base = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
-    # A genuine pre-change payload carries the echo value and no provenance
-    # marker; a post-change save always carries the marker.
-    cases = [
-        (
-            {
-                "active_turn_timeout_seconds": 90 * 60,
-                "legacy_turn_timeout_neutralized": True,
-            },
-            None,
-            90 * 60,
-        ),
-        ({"active_turn_timeout_seconds": 7200}, None, 7200),
-        ({"active_turn_timeout_seconds": 0}, None, 0),
-        ({"active_turn_timeout_seconds": 90 * 60}, "legacy", 0),
-        ({"active_turn_timeout_seconds": 7200}, "legacy", 7200),
-    ]
-    for index, (override, legacy_shape, expected) in enumerate(cases):
-        payload = copy.deepcopy(base)
-        payload["agents"]["opencode"].update(override)
-        if legacy_shape:
-            payload["agents"]["opencode"].pop("legacy_turn_timeout_neutralized", None)
-        config_path = tmp_path / f"config-{index}.json"
-        config_path.write_text(json.dumps(payload), encoding="utf-8")
-
-        loaded = V2Config.load(config_path=config_path)
-
-        assert loaded.agents.opencode.active_turn_timeout_seconds == expected
-        assert loaded.agents.opencode.legacy_turn_timeout_neutralized is True
-
-    payload = copy.deepcopy(base)
-    payload["agents"]["opencode"].pop("active_turn_timeout_seconds", None)
-    config_path = tmp_path / "config-missing.json"
-    config_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    loaded = V2Config.load(config_path=config_path)
-
-    assert loaded.agents.opencode.active_turn_timeout_seconds == 0
-
-
-def test_opencode_timeout_only_migration_does_not_rewrite_model_hub_config(
-    monkeypatch, tmp_path
-) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from core.services.settings import default_config
     from vibe import api
@@ -199,21 +138,27 @@ def test_opencode_timeout_only_migration_does_not_rewrite_model_hub_config(
         include_secrets=True,
         include_internal=True,
     )
+    payload["agents"]["opencode"]["enabled"] = True
+    payload["agents"]["opencode"]["error_retry_limit"] = 3
     payload["agents"]["opencode"]["active_turn_timeout_seconds"] = 90 * 60
-    payload["agents"]["opencode"].pop("legacy_turn_timeout_neutralized", None)
+    payload["agents"]["opencode"]["legacy_turn_timeout_neutralized"] = True
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
     original = config_path.read_bytes()
 
-    for _ in range(2):
-        loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path)
+    compat = to_app_config(loaded)
 
-        assert loaded.agents.opencode.active_turn_timeout_seconds == 0
-        assert loaded.agents.opencode.legacy_turn_timeout_neutralized is True
-        assert config_path.read_bytes() == original
-        assert not list(
-            config_path.parent.glob("config.json.bak-model-hub-migration-*")
-        )
+    assert not hasattr(loaded.agents.opencode, "error_retry_limit")
+    assert not hasattr(loaded.agents.opencode, "active_turn_timeout_seconds")
+    assert not hasattr(loaded.agents.opencode, "legacy_turn_timeout_neutralized")
+    assert compat.opencode is not None
+    assert not hasattr(compat.opencode, "error_retry_limit")
+    assert not hasattr(compat.opencode, "active_turn_timeout_seconds")
+    assert config_path.read_bytes() == original
+    assert not list(
+        config_path.parent.glob("config.json.bak-model-hub-migration-*")
+    )
 
 
 def test_to_app_config_exposes_opencode_provider_and_reasoning_fields() -> None:
