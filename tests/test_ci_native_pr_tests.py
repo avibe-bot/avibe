@@ -3,9 +3,11 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
+from scripts import ci_native_pr_tests as native
 from scripts.ci_native_pr_tests import (
     CONTRACTS,
     Owners,
@@ -425,6 +427,59 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     assert seen == [["-only-testing:" + TARGET], ["-only-testing:" + PHONE]][:calls]
     assert (tmp_path / "ios-simulator-stall.txt").exists() == (calls == 2)
     assert ("::warning title=Simulator stall::" in capfd.readouterr().out) == (calls == 2)
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='The native selector reads the OpenStep project using macOS plutil')
+@pytest.mark.parametrize(('paths', 'fixture_builds', 'fixture_runs'), [
+    (['ios/Avibe/NativeBridge.swift'], 1, 0),  # Shared app source, not under the fixture directory (#4397).
+    (['ios/AvibeSheetFixture/SheetFixtureApp.swift', 'ios/Moved.swift'], 1, 0),  # Deleted/renamed old side.
+    (['ios/Avibe/AppModel.swift', 'ios/Other/NativeBridge.swift'], 0, 0),
+    ([native.PROJECT], 1, 0),  # Removed/retargeted membership is not in the new graph.
+    (['ios/Avibe/NativeBridge.swift', 'ios/AvibeSheetFixtureTests/SomeTest.swift'], 1, 1),
+])
+def test_native_fixture_build_vs_execution(monkeypatch, tmp_path, paths, fixture_builds, fixture_runs):
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    for key in ('SIMULATOR_ID', 'NATIVE_PATH_RECEIPT', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
+        monkeypatch.setenv(key, str(tmp_path / key))
+    target = 'AvibeSheetFixtureTests'
+    changes = {target: [object()]} if fixture_runs else {}
+    monkeypatch.setattr(native, 'verified_merge_paths', lambda *_: ('base', paths))
+    monkeypatch.setattr(native, 'changed_sources', lambda *_: changes)
+    commands, enumerated, executed = [], [], []
+    real_run = subprocess.run
+
+    def run(cmd, **kwargs):
+        if cmd[0] == '/usr/bin/plutil':
+            return real_run(cmd, **kwargs)
+        commands.append(cmd)
+        assert kwargs['check']
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(native, 'verify_membership', lambda *_: None)
+    monkeypatch.setattr(native, 'enumerate_tests', lambda _, t, __: (enumerated.append(t), set()))
+    monkeypatch.setattr(native, 'selection', lambda *_: (['selected'], set()))
+    monkeypatch.setattr(native, 'execute_tests', lambda _, t, *args: executed.append(t) or 0)
+    native.main()
+    assert [cmd[cmd.index('-scheme') + 1] for cmd in commands if cmd[-1] == 'build-for-testing'] == (
+        ['Avibe'] + ['AvibeSheetFixture'] * fixture_builds
+    )
+    assert enumerated == executed == ['AvibeTests'] + [target] * fixture_runs
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Requires the native OpenStep project reader')
+def test_fixture_members_have_an_outer_native_pr_route(monkeypatch):
+    from scripts.ci_targeted_paths import matched_proofs
+
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    project = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', native.PROJECT]))
+    # A new shared source outside ios/ must also reach this selector from Linux.
+    for path in native.fixture_members(project):
+        assert 'ios-app' in matched_proofs(path), path
+
+
+def test_unreadable_fixture_project_builds_instead_of_skipping(monkeypatch):
+    monkeypatch.setattr(subprocess, 'check_output', lambda *_: b'{}')
+    assert native.needs_fixture_build(['ios/Avibe/AppModel.swift'])
 
 
 def test_only_required_identities_must_pass_from_the_right_bundle():
