@@ -5,6 +5,7 @@ import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NATIVE_HOLD_GONE } from '../../lib/nativeVoiceCapture';
+import { noteAppVoice } from '../../lib/appVoice';
 import { NATIVE_HOLD_GRACE_MS } from '../../lib/nativeVoiceHold';
 import { answerVoiceConsent, closeVoiceConsent, noteVoiceStatus, voiceConsentAsking } from '../../lib/voiceConsent';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
@@ -563,6 +564,10 @@ describe('useHoldToTalk', () => {
   // The wait at the hold was the device starting only then (owner, 11-25: the ring is full and
   // nothing happens yet). The press starts it, so at the hold the take only begins on it.
   describe('the microphone during a press', () => {
+    // Most of these were written for a start at 150 ms, the number before one was set for every
+    // surface: the instance says it here, as it may.
+    beforeEach(() => noteAppVoice({ app_hold_start_ms: 150 }));
+    afterEach(() => noteAppVoice({ app_hold_start_ms: null }));
     const openStream = () => {
       const track = { stop: vi.fn() };
       vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementation(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
@@ -598,6 +603,34 @@ describe('useHoldToTalk', () => {
       const stream = await pipeline.takes[0].input.stream;
       expect(stream?.getTracks()).toEqual([track]);
       expect(track.stop).not.toHaveBeenCalled();
+    });
+
+    // One number for every surface (Product, 2026-11-28): the instance's start for the iPhone
+    // App's holds, else the App's own default, for a finger and a mouse alike.
+    it('starts it when the instance says, the iPhone App\'s default where it says nothing', async () => {
+      openStream();
+      noteAppVoice({ app_hold_start_ms: null });
+      const el = await mouse();
+      down(el, 500, 'mouse');
+      await elapse(49);
+      await flush();
+      expect(opened()).toBe(0);
+      await elapse(1);
+      await flush();
+      expect(opened()).toBe(1);
+      up(el);
+      await flush();
+
+      noteAppVoice({ app_hold_start_ms: 100 });
+      down(el);
+      await elapse(99);
+      await flush();
+      expect(opened()).toBe(1);
+      await elapse(1);
+      await flush();
+      expect(opened()).toBe(2);
+      up(el);
+      await flush();
     });
 
     it('closes it when the press ends before the hold: a tap records and sends nothing', async () => {
@@ -778,6 +811,26 @@ describe('useHoldToTalk', () => {
       } finally {
         window.localStorage.removeItem(key);
       }
+    });
+
+    it('on Desktop, keeps the Mac\'s answer past a microphone missing at a take', async () => {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+      const key = 'avibe.voice.desktopMicOpened';
+      openStream();
+      const el = await mouse();
+      await forgetMicrophone(el);
+      window.localStorage.setItem(key, '1');
+      pipeline.startError = new DOMException('Missing', 'NotFoundError');
+      down(el, 500, 'mouse');
+      await elapse(400);
+      await flush();
+      await elapse(0);
+      await flush();
+      expect(hold.outcome).toBe('no-device');
+      up(el);
+      await flush();
+      pipeline.startError = null;
+      expect(window.localStorage.getItem(key)).toBe('1');
     });
 
     it('in a browser, keeps no earlier page\'s answer', async () => {
