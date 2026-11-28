@@ -6,6 +6,13 @@ import WebKit
 // source. The capture routes do not exercise push, notification reconciliation,
 // or direct transport; these shapes preserve the production bridge's parser
 // and handler table without importing the full App target.
+// Health uses NativeBridge's default failed handler in this fixture.
+struct HealthConnectionOptions {
+    var supportedMetrics = ["steps", "activity", "workouts", "sleep"]
+    var requestedMetrics = ["steps", "activity", "workouts", "sleep"]
+    var expansion = false
+}
+
 struct DirectPathStatus: Equatable, Sendable {
     enum Preference: String, Equatable, Sendable { case tunnel, direct }
     let preferred: Preference
