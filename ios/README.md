@@ -801,8 +801,13 @@ conforms to. Without a conforming controller the App offers neither:
   (`directOnlyNeedsRelaunch`, answered as `pendingRelaunch`). Opens under
   `direct` use the direct path as automatic does. Each load of the
   instance the view starts calls `noteInstanceLoad` first.
-- **The link.** Its first arrival in a bootstrap reloads the view once, so
-  the page's connections move to it.
+- **The link.** Nothing is reloaded when it arrives. The controller's
+  cut-over waits, up to five seconds, until the host's tunnel connections
+  have carried nothing for a second (the page has just opened and may still
+  be loading; a load cut there is not made again), closes what is left, and
+  tells the page as a closure. The page opens its stream again and catches
+  up, on the link. Until 2026-11-28 the view was reloaded instead, at every
+  open and every return to the foreground.
 - **Going back to automatic** (`DirectOnlyRevertRules`; `reverted.from` is
   `direct`) happens only on evidence that this phone reached the instance,
   counted per bootstrap (an open, a return to the foreground, a drop):

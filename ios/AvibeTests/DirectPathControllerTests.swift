@@ -382,6 +382,80 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNotNil(try XCTUnwrap(controller.plan(for: authority)).openPublic)
     }
 
+    /// The link arrives a second or two after the page opened, while it may
+    /// still be loading through the tunnel. The cut-over waits until that
+    /// tunnel carries nothing, closes it, and tells the page as a closure:
+    /// the page opens its connections again on the link. Nothing is reloaded.
+    @MainActor
+    func testTheStrictCutoverWaitsForABusyTunnelThenClosesItAndTellsThePage() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let page = LoopbackClient(port: port)
+        defer { page.close() }
+        let tunnel = try await establishPublic(page, harness: harness)
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        // Still loading: bytes cross the tunnel for most of a second.
+        for _ in 0..<4 {
+            try await page.send("x")
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        try await page.send("x")
+        let lastByte = ContinuousClock.now
+        XCTAssertFalse(tunnel.isCancelled, "a tunnel that carries the page's load is not cut")
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+
+        try await eventually { tunnel.isCancelled }
+        // Closed once it had carried nothing for a second, not at the bound.
+        let waited = lastByte.duration(to: .now)
+        XCTAssertGreaterThanOrEqual(waited, .milliseconds(900))
+        XCTAssertLessThan(waited, .seconds(8))
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.status("instance-1").closure, 1, "the page hears of the close and opens its connections again")
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+    }
+
+    /// A tunnel that never goes quiet does not hold the choice up for good.
+    @MainActor
+    func testTheStrictCutoverClosesATunnelStillBusyAtItsBound() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 0.5), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let page = LoopbackClient(port: port)
+        defer { page.close() }
+        let tunnel = try await establishPublic(page, harness: harness)
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let busy = Task {
+            while !Task.isCancelled {
+                try? await page.send("x")
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { busy.cancel() }
+        try await eventually(timeout: .seconds(5)) { tunnel.isCancelled }
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.status("instance-1").closure, 1)
+    }
+
     @MainActor
     func testCONNECTWaitsThroughHostDrainWithoutAnAnswerOrPublicDial() async throws {
         try await checkHeldCONNECT(strictAtFirstLoad: false)
