@@ -48,9 +48,24 @@ struct DirectResolvedAddress: Equatable, Sendable, CustomStringConvertible {
 }
 
 /// Which resolved addresses the public backend may connect to: public
-/// unicast only. Loopback, unspecified, link-local, multicast, private,
-/// shared (CGNAT), and documentation or benchmarking ranges are refused. A
-/// local-network path is the direct backend's job, not this one's.
+/// unicast, and the benchmarking range 198.18.0.0/15 that fake-IP VPNs
+/// answer with. Loopback, unspecified, link-local, multicast, private,
+/// shared (CGNAT), and documentation ranges are refused. A local-network
+/// path is the direct backend's job, not this one's.
+///
+/// 198.18.0.0/15 is allowed since 2026-11-28. A VPN app in fake-IP mode
+/// (the default in Clash, Surge and Shadowrocket) answers every DNS lookup
+/// with an address from it and carries the connection itself. Refused, the
+/// listener could reach no instance under such a VPN and answered every
+/// page `502`, while Safari reached the same instance through the VPN. Why
+/// it is safe to dial:
+/// - The range is not routable on the internet; an address in it exists
+///   only where a local VPN (or a test network) owns it, and the system
+///   resolver gave it to us for the instance's own host name.
+/// - The listener carries WebKit's TLS bytes unchanged: WebKit's session is
+///   for the instance's host name and validates its certificate, so whoever
+///   answers on that address cannot read or alter the page.
+/// - Safari dials the same address for the same name.
 enum DirectPublicAddressPolicy {
     static func allows(_ address: DirectResolvedAddress) -> Bool {
         switch address.family {
@@ -82,9 +97,6 @@ enum DirectPublicAddressPolicy {
             return false
         case 192 where second == 0 && (third == 0 || third == 2):
             // IETF protocol assignments, documentation.
-            return false
-        case 198 where second == 18 || second == 19:
-            // Benchmarking.
             return false
         case 198 where second == 51 && third == 100:
             return false
