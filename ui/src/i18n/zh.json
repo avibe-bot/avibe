@@ -3333,6 +3333,7 @@
         "title": "信息茧房",
         "summary": "用你自己的脚本处理 Vibey 的网页搜索、网页读取、文件读取和命令结果。",
         "use": "启用信息茧房",
+        "usageNote": "开启后，Vibey 不再使用模型内置搜索，改用 Avibe 的搜索工具。web_search、web_fetch、read 和 bash 会经过你配置的脚本；脚本中可能调用模型，使 Agent 整体工作变慢。建议只在特定场景下启用，日常不建议开着。",
         "guide": "脚本怎么写",
         "scripts": "脚本",
         "scriptsHint": "放在下面的目录里，没放的会跳过。",

@@ -1,15 +1,16 @@
 // Settings › Experimental: a list of experiments, each with its own page (ui/design:
 // settings/source-filter/*). A row only opens its page and never carries the switch, so a tap
 // cannot turn an experiment on by mistake. Source filter is the first experiment
-// (`docs/plans/vibey-source-filter-hooks.md`): the owner's scripts around Vibey's web search and
-// web fetch. The page shows the folder and each script's state; it never uploads, edits or runs
-// code, and the details live in the guide, not on the page.
-import React, { useCallback, useEffect, useState } from 'react';
+// (`docs/plans/vibey-source-filter-hooks.md`): the owner's tool hooks. Script names open the
+// existing Editor app; this page never uploads, creates or runs code. Details live in the guide.
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, BookOpen, Check, ChevronRight, Copy, Filter, TriangleAlert } from 'lucide-react';
 import clsx from 'clsx';
 
+import { useAppLaunch } from '@/apps/useAppLaunch';
+import { FilesApiError, fileBrowserErrorMessage, fileMeta, joinPath } from '@/lib/filesApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { copyTextToClipboard } from '@/lib/utils';
@@ -86,7 +87,7 @@ export const SettingsExperimentalPage: React.FC = () => {
   );
 };
 
-const HookRow: React.FC<{ file: string; hook: SourceFilterHook }> = ({ file, hook }) => {
+const HookRow: React.FC<{ file: string; hook: SourceFilterHook; onOpen: () => void }> = ({ file, hook, onOpen }) => {
   const { t, i18n } = useTranslation();
   const failed = hook.found && hook.last_failure !== null;
   return (
@@ -95,7 +96,14 @@ const HookRow: React.FC<{ file: string; hook: SourceFilterHook }> = ({ file, hoo
       className={clsx('flex flex-col gap-1 border-b border-border px-5 py-3 last:border-b-0', failed && 'bg-destructive/[0.04]')}
     >
       <div className="flex items-center justify-between gap-3">
-        <span className={clsx('truncate font-mono text-[13px] font-medium', hook.found ? 'text-foreground' : 'text-muted')}>{file}</span>
+        <Button
+          type="button"
+          variant="link"
+          className="h-auto min-w-0 justify-start p-0 font-mono text-[13px] font-medium"
+          onClick={onOpen}
+        >
+          <span className="truncate">{file}</span>
+        </Button>
         {failed ? (
           <Badge variant="destructive"><TriangleAlert className="size-3" />{t('settings.experimental.sourceFilter.lastFailed')}</Badge>
         ) : hook.found ? (
@@ -118,6 +126,33 @@ export const SettingsSourceFilterPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { status, error, saving, setEnabled } = useSourceFilter();
   const [copied, setCopied] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const launchApp = useAppLaunch('deep-link');
+  const openRequest = useRef(0);
+  useEffect(() => () => { openRequest.current += 1; }, [status?.dir, status?.enabled]);
+  const openScript = async (file: string) => {
+    if (!status?.enabled) return;
+    const request = ++openRequest.current;
+    const path = joinPath(status.dir, file);
+    setOpenError(null);
+    try {
+      // Carry the save-conflict baseline, just like opening a file from the File Browser.
+      let mtime: number | null = null;
+      try {
+        mtime = (await fileMeta(path)).mtime;
+      } catch (cause) {
+        // Missing scripts stay clickable, but opening one must not create an executable hook.
+        // Let the existing Editor display its ordinary file-not-found state.
+        if (!(cause instanceof FilesApiError) || cause.code !== 'not_found') throw cause;
+      }
+      if (request !== openRequest.current) return;
+      await launchApp({ appId: 'editor', title: file, params: { path, filename: file, rootDir: status.dir, mtime } });
+    } catch (cause) {
+      if (request === openRequest.current) {
+        setOpenError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.loadFailed')));
+      }
+    }
+  };
   const copy = async () => {
     if (status && await copyTextToClipboard(status.dir)) {
       setCopied(true);
@@ -142,15 +177,18 @@ export const SettingsSourceFilterPage: React.FC = () => {
           variant="preference"
           title={t('settings.experimental.sourceFilter.use')}
           description={(
-            <a
-              href={sourceFilterGuideUrl(i18n.language)}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 font-medium text-cyan-ink hover:underline"
-            >
-              <BookOpen className="size-3.5" />
-              {t('settings.experimental.sourceFilter.guide')}
-            </a>
+            <>
+              <span className="mb-2 block">{t('settings.experimental.sourceFilter.usageNote')}</span>
+              <a
+                href={sourceFilterGuideUrl(i18n.language)}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 font-medium text-cyan-ink hover:underline"
+              >
+                <BookOpen className="size-3.5" />
+                {t('settings.experimental.sourceFilter.guide')}
+              </a>
+            </>
           )}
           actions={(
             <ToggleSwitch
@@ -162,6 +200,7 @@ export const SettingsSourceFilterPage: React.FC = () => {
           )}
         />
         {error && <p role="alert" className="text-[12px] text-destructive">{t('settings.experimental.loadFailed')}</p>}
+        {openError && <p role="alert" className="text-[12px] text-destructive">{openError}</p>}
 
         {status?.enabled && (
           <SettingsPanel
@@ -181,7 +220,7 @@ export const SettingsSourceFilterPage: React.FC = () => {
               </Button>
             </div>
             {SOURCE_FILTER_HOOKS.map((name) => (
-              <HookRow key={name} file={`${name}.py`} hook={status.hooks[name]} />
+              <HookRow key={name} file={`${name}.py`} hook={status.hooks[name]} onOpen={() => void openScript(`${name}.py`)} />
             ))}
           </SettingsPanel>
         )}
