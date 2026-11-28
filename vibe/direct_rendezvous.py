@@ -222,6 +222,29 @@ def log_path_use(entries: Any) -> None:
         )
 
 
+def log_path_guard(entries: Any) -> None:
+    """A separate optional batch: never invalidate a legacy path_use report."""
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
+        return
+    for row in entries:
+        if not isinstance(row, dict) or row.keys() != {"client", "age_min", "path", "guard_level_s", "guard_rose", "held"}:
+            return
+        level, rose = row["guard_level_s"], row["guard_rose"]
+        if (row["client"] not in _PATH_USE_CLIENTS or row["path"] not in _LEG_FAULT_PATHS
+                or type(level) is not int or level not in (0, 30, 600)
+                or rose not in ("none", "adopted", "probation") or (level == 0) != (rose == "none")):
+            return
+        if type(row["age_min"]) is not int or not 0 <= row["age_min"] <= 1440:
+            return
+        if type(row["held"]) is not int or not 0 <= row["held"] < 2**31:
+            return
+    for row in entries:
+        logger.info(
+            "direct rendezvous path_guard client=%s age_min=%d path=%s guard_level_s=%d guard_rose=%s held=%d",
+            row["client"], row["age_min"], row["path"], row["guard_level_s"], row["guard_rose"], row["held"],
+        )
+
+
 def log_handovers(entries: Any) -> None:
     """Log the client's bounded per-ask observations without changing rendezvous state."""
     if not isinstance(entries, list) or not 1 <= len(entries) <= 8:

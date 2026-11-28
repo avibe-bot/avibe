@@ -1310,17 +1310,18 @@ async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path, mon
     observed.observe(_responses(usage={"input_tokens": 1200, "output_tokens": 3})[-1])
 
     async def cancelled_after_admission(source_id, model_id, request, stream, origin, *, on_admitted=None):
+        nonlocal offset
         on_admitted()
         if ended_by == "deadline":
+            # Expire the real wait_for timer only once this attempt owns the wire facts.
+            offset += search_chain_module.call_timeout("web_search") + 1
             try:
-                await asyncio.Event().wait()
+                await asyncio.sleep(5)  # Failure guard, not the trigger for cancellation.
             except asyncio.CancelledError:
                 raise InvokeCancelledError(observed) from None
+            pytest.fail("the admitted call was not cancelled at its deadline")
         raise InvokeCancelledError(observed)
 
-    if ended_by == "deadline":
-        from core.handlers.model_hub import search_chain
-        monkeypatch.setattr(search_chain, "call_timeout", lambda _tool: 0.05)
     service.adapter.invoke = cancelled_after_admission
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
@@ -1333,7 +1334,12 @@ async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path, mon
             with pytest.raises(asyncio.CancelledError):
                 await call
         else:
-            answer = await call
+            loop = asyncio.get_running_loop()
+            real_time = loop.time
+            offset = 0.0
+            with monkeypatch.context() as clock:
+                clock.setattr(loop, "time", lambda: real_time() + offset)
+                answer = await call
             assert answer["record"]["status"] == "failed" and "timed out" in answer["record"]["error"]
     finally:
         await gateway.close()

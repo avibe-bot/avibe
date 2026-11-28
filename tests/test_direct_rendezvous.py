@@ -688,6 +688,40 @@ def test_invalid_path_use_batches_are_ignored_in_full(instance, caplog):
     assert not any("path_use" in line for line in caplog.messages)
 
 
+def test_path_guard_batch_is_independent_of_path_use_and_the_offer(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready"
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    clear = dict(client="ios", age_min=0, path="none", guard_level_s=0, guard_rose="none", held=0)
+    held = dict(client="desktop", age_min=1440, path="relay", guard_level_s=600, guard_rose="probation", held=2**31-1)
+    raised = {**held, "path": "lan", "guard_level_s": 30, "guard_rose": "adopted", "held": 1}
+
+    def ask(entries):
+        caplog.clear()
+        response = _post(client, {**_body(), "path_use": [_path_use()], "path_guard": entries})
+        assert response.status_code == 200 and response.get_json() == baseline
+        assert sum("direct rendezvous path_use " in line for line in caplog.messages) == 1
+        return [line for line in caplog.messages if "direct rendezvous path_guard " in line]
+
+    assert ask([clear] * 8 + [raised, held]) == [
+        "direct rendezvous path_guard client=ios age_min=0 path=none guard_level_s=0 guard_rose=none held=0"
+    ] * 8 + [
+        "direct rendezvous path_guard client=desktop age_min=1440 path=lan guard_level_s=30 guard_rose=adopted held=1",
+        "direct rendezvous path_guard client=desktop age_min=1440 path=relay guard_level_s=600 guard_rose=probation held=2147483647",
+    ]
+    for invalid in (None, [], clear, [clear] * 11, [clear, None], [clear, {}],
+                    *([clear, {**clear, key: value}] for key, value in (
+                        ("extra", "x"), ("client", []), ("path", {}), ("guard_level_s", False),
+                        ("guard_level_s", 30.0), ("guard_level_s", 5), ("guard_level_s", 600),
+                        ("guard_rose", "adopted"), ("guard_rose", "unknown"), ("guard_rose", []),
+                        ("age_min", True), ("age_min", -1), ("age_min", 1441),
+                        ("held", False), ("held", 1.0), ("held", -1), ("held", 2**31)))):
+        assert ask(invalid) == []
+
+
 def test_startup_is_bounded_and_independent_of_the_offer_and_path_use(instance, caplog):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
