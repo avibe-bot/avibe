@@ -437,19 +437,24 @@ def _ordering_sql(*, include_claimable: bool, pinned: bool) -> TextualSelect:
     ).columns(*message_deliveries.c)
 
 
-_FIFO_INDEX_KEYS = [("session_id", 0, "BINARY"), ("submitted_at", 0, "BINARY"), ("id", 0, "BINARY")]
+# The released DDL, as written by the model and by migration 0044. Only this
+# index is session-bounded, FIFO-ordered and limited to live rows; a same-name
+# redefinition (other keys, or a predicate that keeps terminal rows) is not pinned.
+_FIFO_INDEX_DDL = frozenset({
+    f"CREATE INDEX {_FIFO_INDEX} ON message_deliveries (session_id, submitted_at, id) "
+    f"WHERE {DELIVERY_SESSION_ORDER_PREDICATE}",
+    f"CREATE INDEX {_FIFO_INDEX} ON message_deliveries (session_id, submitted_at, id) "
+    "WHERE state in ('reserved','queued','claimed','pending_steer','steering','reconciling_steer')",
+})
 _PIN_REFUSED = {f"no such index: {_FIFO_INDEX}", "no query solution"}
 
 
-def _fifo_index_has_released_keys(conn: Connection) -> bool:
-    # A compatible newer schema may redefine the index under the same name; only
-    # (session_id, submitted_at, id) ascending gives the session-bounded FIFO seek.
-    keys = conn.exec_driver_sql(
-        "SELECT x.name, x.desc, x.coll FROM pragma_index_list('message_deliveries') AS l "
-        "JOIN pragma_index_xinfo(l.name) AS x WHERE l.name = ? AND x.key = 1 ORDER BY x.seqno",
+def _fifo_index_is_released(conn: Connection) -> bool:
+    sql = conn.exec_driver_sql(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ? AND tbl_name = 'message_deliveries'",
         (_FIFO_INDEX,),
-    ).all()
-    return [tuple(key) for key in keys] == _FIFO_INDEX_KEYS
+    ).scalar()
+    return sql in _FIFO_INDEX_DDL
 
 
 def _ordering_rows(conn: Connection, session_id: str, *, include_claimable: bool = True) -> CursorResult[Any]:
@@ -458,13 +463,13 @@ def _ordering_rows(conn: Connection, session_id: str, *, include_claimable: bool
     Pinned because a planner (for example with statistics) can otherwise prefer
     ix_message_deliveries_session_state for the IN terms and sort the whole live
     set. The WHERE repeats the index predicate, which INDEXED BY needs for a
-    partial index. The pin is used only when the index has the released keys; if
-    SQLite still refuses it while preparing (the index changed since the check, or
-    its predicate is not implied), nothing has been read and the same query runs
-    unpinned. A missing index costs a sort, never a wrong row.
+    partial index. The pin is used only when the index has the released DDL; if
+    SQLite still refuses it while preparing (the index changed since the check),
+    nothing has been read and the same query runs unpinned. A missing or
+    redefined index costs a sort, never a wrong row.
     """
     params = {"session_id": session_id}
-    if _fifo_index_has_released_keys(conn):
+    if _fifo_index_is_released(conn):
         try:
             return conn.execute(_ordering_sql(include_claimable=include_claimable, pinned=True), params)
         except OperationalError as error:
