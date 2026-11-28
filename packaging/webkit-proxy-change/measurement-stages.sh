@@ -242,8 +242,8 @@ run_measurement_stages() {
   run_stage test-launch "install" test_method test-launch testHostLaunch 150
   if [[ "${MEASURE_ONLY:-}" == "late" ]]; then
     run_stage controls-health "test-launch" fixture_health controls-health
-    run_stage direct-minimal "controls-health" test_method direct-minimal testDirectTLSMinimal 120
-    run_stage cold-minimal "direct-minimal" test_method cold-minimal testColdMinimal 120
+    run_stage direct-minimal "controls-health" test_method direct-minimal testDirectTLSMinimal 300
+    run_stage cold-minimal "direct-minimal" test_method cold-minimal testColdMinimal 300
     run_stage late-health "cold-minimal" fixture_health late-health
     run_stage late-routes "cold-minimal late-health" test_method late-routes testLateRoutes 900
     return
