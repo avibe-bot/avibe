@@ -1498,3 +1498,157 @@ def test_antigravity_get_backend_runtime_reports_auto_update_capability_by_insta
     assert runtime["managed_by"] == ("desktop" if managed else None)
     assert runtime["auto_update_supported"] is True
     assert runtime["auto_update"] is True
+
+
+@pytest.mark.parametrize(
+    ("os_name", "tools", "expected_exe", "expected_fragments"),
+    [
+        (
+            "darwin",
+            {"bash": "/bin/bash", "curl": "/usr/bin/curl"},
+            "/bin/bash",
+            [
+                desktop_backends.CURL_INSTALL_RETRY_FLAGS,
+                desktop_backends._ANTIGRAVITY_INSTALL_SH_URL,
+                "--dir",
+            ],
+        ),
+        (
+            "win32",
+            {"powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"},
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            [
+                "[scriptblock]::Create((irm https://antigravity.google/cli/install.ps1 -ErrorAction Stop))",
+                "--dir",
+                "--skip-path",
+                "--skip-aliases",
+            ],
+        ),
+    ],
+)
+def test_antigravity_official_script_command_construction(
+    tmp_path: Path,
+    os_name: str,
+    tools: dict[str, str],
+    expected_exe: str,
+    expected_fragments: list[str],
+) -> None:
+    staging = tmp_path / "staging dir"
+    cmd = desktop_backends._antigravity_official_script_command(
+        staging,
+        os_name=os_name,
+        which=tools.get,
+    )
+    assert cmd is not None
+    assert cmd[0] == expected_exe
+    joined = " ".join(cmd)
+    for fragment in expected_fragments:
+        assert fragment in joined
+    assert str(staging) in joined
+    if os_name == "win32":
+        assert "| iex" not in joined
+
+
+def _install_fake_shell_tools(bin_dir: Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    tool_names = ("powershell.exe",) if os.name == "nt" else ("bash", "curl")
+    for name in tool_names:
+        tool = bin_dir / name
+        tool.write_text("#!/bin/sh\n", encoding="utf-8")
+        tool.chmod(0o755)
+
+
+def test_desktop_antigravity_install_uses_official_script_with_isolated_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unpinned desktop Antigravity install tries Google's official script in staging with isolated HOME."""
+    env = _desktop_archive_env(tmp_path)
+    _install_fake_shell_tools(Path(env["PATH"]))
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    env["HOME"] = str(real_home)
+    env["USERPROFILE"] = str(real_home)
+    env["LOCALAPPDATA"] = str(real_home / "AppData" / "Local")
+
+    exe_name = "agy.exe" if os.name == "nt" else "agy"
+    script_calls: list[tuple[list[str], dict[str, str], Path]] = []
+
+    def fake_run(cmd, *, cwd, env, timeout_seconds):
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return subprocess.CompletedProcess(cmd, 0, "1.6.0\n", "")
+        script_calls.append((list(cmd), dict(env), cwd))
+        _write_native(cwd / exe_name)
+        return subprocess.CompletedProcess(cmd, 0, "installed via official script", "")
+
+    def forbid_github(*_a, **_kw):
+        raise AssertionError("GitHub release fallback must not be called when official script succeeds")
+
+    monkeypatch.setattr(desktop_backends, "_run_command", fake_run)
+    monkeypatch.setattr(desktop_backends, "_fetch_github_release", forbid_github)
+
+    activated: list[str] = []
+    result = desktop_backends.install_desktop_backend("antigravity", base_env=env, activate=activated.append)
+
+    assert len(script_calls) == 1
+    cmd, script_env, staging_cwd = script_calls[0]
+    assert f"--dir" in " ".join(cmd) and str(staging_cwd) in " ".join(cmd)
+    assert Path(script_env["HOME"]).is_relative_to(staging_cwd)
+    assert script_env["HOME"] != str(real_home)
+    assert script_env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+    assert (result.backend, result.version, result.path) == ("antigravity", "1.6.0", activated[0])
+    assert desktop_backends.resolve_published_desktop_backend("antigravity", env) == result.path
+    assert not (Path(result.path).parent / ".installer-home").exists()
+
+
+def test_desktop_antigravity_script_failure_falls_back_to_github_and_combines_dual_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Script failure cleans staging and falls back to GitHub; dual failure reports both labelled causes."""
+    env = _desktop_archive_env(tmp_path)
+    _install_fake_shell_tools(Path(env["PATH"]))
+
+    asset_name = f"agy_cli_{desktop_backends._release_archive_platform_tag('antigravity')}.tar.gz"
+    exe_name = "agy.exe" if os.name == "nt" else "agy"
+    source_archive = tmp_path / asset_name
+    digest = _build_archive(source_archive, "tar.gz", {f"bin/{exe_name}": _native_binary_bytes()})
+
+    def failing_script_then_probe(cmd, *, cwd, env, timeout_seconds):
+        if len(cmd) == 2 and cmd[1] == "--version":
+            return subprocess.CompletedProcess(cmd, 0, "1.5.16\n", "")
+        (cwd / "leftover-from-script").write_text("stale", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            "",
+            "Fatal: Could not connect to the release server to download the manifest.\n",
+        )
+
+    monkeypatch.setattr(desktop_backends, "_run_command", failing_script_then_probe)
+    monkeypatch.setattr(desktop_backends, "_fetch_github_release", lambda _r, **_kw: _release_payload(asset_name, digest))
+    monkeypatch.setattr(
+        desktop_backends,
+        "_download_release_asset",
+        lambda _u, dest, **_kw: dest.write_bytes(source_archive.read_bytes()),
+    )
+
+    activated: list[str] = []
+    result = desktop_backends.install_desktop_backend("antigravity", base_env=env, activate=activated.append)
+    assert result.version == "1.5.16"
+    assert activated == [result.path]
+    assert not (Path(result.path).parent.parent / "leftover-from-script").exists()
+
+    def failing_github(_r, **_kw):
+        raise desktop_backends.DesktopBackendError(
+            "Failed to fetch release metadata for google-antigravity/antigravity-cli: HTTP Error 403",
+            code="archive_download_failed",
+        )
+
+    monkeypatch.setattr(desktop_backends, "_fetch_github_release", failing_github)
+    with pytest.raises(desktop_backends.DesktopBackendError) as raised:
+        desktop_backends.install_desktop_backend("antigravity", base_env=env)
+    assert raised.value.output is not None
+    assert "[official script]" in raised.value.output
+    assert "Fatal: Could not connect to the release server" in raised.value.output
+    assert "[GitHub release]" in raised.value.output
+    assert "HTTP Error 403" in raised.value.output
+    assert raised.value.exit_code == 1

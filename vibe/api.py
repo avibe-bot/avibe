@@ -66,6 +66,7 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.desktop_backends import (
+    CURL_INSTALL_RETRY_FLAGS,
     DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS,
     DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS,
     DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS,
@@ -164,8 +165,6 @@ from core.dependency_network import DependencyNetworkError, dependency_error_mes
 
 
 logger = logging.getLogger(__name__)
-
-_CURL_INSTALL_RETRY_FLAGS = "--retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120"
 
 # Cache per cwd: { cwd: { "data": ..., "updated_at": ... } }
 _OPENCODE_OPTIONS_CACHE: dict[str, dict] = {}
@@ -9681,12 +9680,30 @@ def _run_desktop_backend_install(name: str, truncate_output, *, version: str | N
         version_kw = {"version": version} if version is not None else {}
         result = install_desktop_backend(name, activate=_activate, **version_kw)
     except DesktopBackendError as exc:
-        return {
+        raw_output = exc.output or str(exc) or None
+        logger.warning(
+            "Desktop backend install failed for %s (code=%s, exit_code=%s): %s",
+            name,
+            exc.code,
+            exc.exit_code,
+            raw_output,
+        )
+        hint_code, hint_params = _recognize_install_failure(
+            raw_output,
+            timed_out=(exc.code == "install_timeout"),
+        )
+        language = _configured_backend_language()
+        payload: dict[str, Any] = {
             "ok": False,
             "code": exc.code,
             "message": _desktop_backend_install_message(name, exc.code),
-            "output": truncate_output(exc.output) if exc.output else None,
+            "hint": _install_failure_hint(hint_code, hint_params, language),
+            "hint_params": hint_params,
+            "output": truncate_output(raw_output) if raw_output else None,
         }
+        if exc.exit_code is not None:
+            payload["exit_code"] = exc.exit_code
+        return payload
     health = detect_cli(result.path, name)
     if health["status"] != "ok":
         # Publication/activation already committed. Report failed verification,
@@ -9788,7 +9805,7 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
         # Check before network activity, then in the actual non-login bootstrap
         # shell. No startup hook/imported function can restore the old PATH.
         consumer = [bash, "--noprofile", "--norc", "-s", "--", "--no-modify-path"]
-        download = shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://opencode.ai/install"])
+        download = shlex.join([curl, "-fsSL", *shlex.split(CURL_INSTALL_RETRY_FLAGS), "https://opencode.ai/install"])
         # Prefix the guard to the streamed script rather than sourcing a pipe
         # through /dev/stdin (macOS bash may see an empty source before data arrives).
         script = "set -euo pipefail; " + guard + "{ printf '%s\\n' " + shlex.quote(guard) + "; " + download + "; } | " + shlex.join(consumer)
@@ -9804,7 +9821,7 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
             bash, curl = resolve_cli_path("bash"), resolve_cli_path("curl")
             if not bash or not curl:
                 return _cli_repair_refusal(name)
-            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://claude.ai/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
+            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(CURL_INSTALL_RETRY_FLAGS), "https://claude.ai/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
     elif name == "antigravity":
         if version is not None:
             return _antigravity_pinned_version_unsupported()
@@ -9818,7 +9835,7 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
             bash, curl = resolve_cli_path("bash"), resolve_cli_path("curl")
             if not bash or not curl:
                 return _cli_repair_refusal(name)
-            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://antigravity.google/cli/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
+            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(CURL_INSTALL_RETRY_FLAGS), "https://antigravity.google/cli/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
     else:
         return _cli_repair_refusal(name)
     return _run_install_command(name, cmd, truncate_output, mode="repair", env=command_env, expected_path=source.destination)
@@ -10071,7 +10088,7 @@ def _curl_installer_command(url: str, consumer: str) -> list[str]:
     return [
         "bash",
         "-c",
-        f"set -euo pipefail; curl -fsSL {_CURL_INSTALL_RETRY_FLAGS} {url} | {consumer}",
+        f"set -euo pipefail; curl -fsSL {CURL_INSTALL_RETRY_FLAGS} {url} | {consumer}",
     ]
 
 
@@ -10096,6 +10113,9 @@ _NPM_REQUEST_URL_RE = re.compile(r"request to (?P<url>\S+) failed")
 _CURL_UNREACHABLE_RE = re.compile(
     r"^curl: \((?:6\) Could not resolve host: (?P<dns_host>\S+)|(?:7|28)\) Failed to connect to (?P<connect_host>\S+) port)",
     re.MULTILINE,
+)
+_ANTIGRAVITY_SCRIPT_UNREACHABLE_RE = re.compile(
+    r"Fatal: Failed to download (?:release package|release manifest|binary) from (?P<url>https?://\S+)"
 )
 _GITHUB_API_FORBIDDEN_RE = re.compile(r"\b403\b.*\bapi\.github\.com\b|\bapi\.github\.com\b.*\b403\b")
 _GITHUB_RATE_LIMIT_URL = "https://api.github.com/rate_limit"
@@ -10162,6 +10182,11 @@ def _recognize_install_failure(output: str | None, *, timed_out: bool = False) -
     curl = _CURL_UNREACHABLE_RE.search(text)
     if curl:
         return "network_unreachable", {"host": curl.group("dns_host") or curl.group("connect_host")}
+    script_net = _ANTIGRAVITY_SCRIPT_UNREACHABLE_RE.search(text)
+    if script_net:
+        host = urllib.parse.urlsplit(script_net.group("url").rstrip(".,;:")).hostname
+        if host:
+            return "network_unreachable", {"host": host}
     return "install_failed", {}
 
 

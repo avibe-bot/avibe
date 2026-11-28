@@ -4640,6 +4640,7 @@
     "setupPermission": "在 opencode.json 写入 allow",
     "permissionGateHint": "请先在上方为 OpenCode 写入工具调用权限，才能继续。",
     "installHint": "未找到 Agent，点击自动安装。",
+    "antigravityCliNote": "Avibe 使用的是 Antigravity CLI（agy 命令），不是 Antigravity 桌面应用，因此需要单独安装 CLI。",
     "installAgent": "一键安装",
     "installing": "安装中...",
     "showOutput": "显示详情",

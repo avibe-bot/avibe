@@ -189,6 +189,29 @@ def _installer(tmp_path: Path, *, stderr: str, exit_code: int) -> list[str]:
             {"host": "claude.ai"},
             id="curl-connect-timeout",
         ),
+        pytest.param(
+            "Fatal: Failed to download release package from "
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/releases/agy.tar.gz. "
+            "Please check your internet connection or firewall settings.\n",
+            "network_unreachable",
+            {"host": "antigravity-cli-auto-updater-974169037036.us-central1.run.app"},
+            id="agy-sh-download-package",
+        ),
+        pytest.param(
+            "Fatal: Failed to download release manifest from "
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/windows_amd64.json. "
+            "Network or DNS issue?\n",
+            "network_unreachable",
+            {"host": "antigravity-cli-auto-updater-974169037036.us-central1.run.app"},
+            id="agy-ps1-download-manifest",
+        ),
+        pytest.param(
+            "Fatal: Failed to download binary from https://storage.googleapis.com/agy/agy.exe. "
+            "Network or DNS issue?\n",
+            "network_unreachable",
+            {"host": "storage.googleapis.com"},
+            id="agy-ps1-download-binary",
+        ),
         # A reachable server that refuses the download is not a network problem.
         pytest.param("curl: (56) The requested URL returned error: 404\n", "install_failed", {}, id="curl-http-404"),
         # npm renaming a retired copy back is not a leftover from an earlier run.
@@ -291,3 +314,51 @@ def test_github_403_hint_says_when_the_limit_resets(tmp_path, github_rate_limit,
             "GitHub's API limit for this network is used up. It resets within an hour; try again later."
         )
     assert "403 GET https://api.github.com/repos/anomalyco/opencode/releases/latest" in result["output"]
+
+
+def test_desktop_backend_install_failure_returns_output_hint_and_exit_code(monkeypatch, tmp_path):
+    """Desktop install errors surface output (falling back to str(exc)), recognized hint, and exit_code."""
+    from vibe.desktop_backends import DesktopBackendError
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.default()
+    config.language = "en"
+    config.save()
+
+    script_err = (
+        "[official script]\n"
+        "Fatal: Failed to download release package from "
+        "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/releases/agy.tar.gz. "
+        "Please check your internet connection or firewall settings.\n\n"
+        "[GitHub release]\n"
+        "Failed to fetch release metadata: URLError"
+    )
+    monkeypatch.setattr(
+        api,
+        "install_desktop_backend",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            DesktopBackendError("Both install paths failed", code="archive_download_failed", output=script_err, exit_code=1)
+        ),
+    )
+
+    result = api._run_desktop_backend_install("antigravity", lambda s: s)
+    assert result["ok"] is False
+    assert result["code"] == "archive_download_failed"
+    assert result["message"] == "Could not install Antigravity."
+    assert result["output"] == script_err
+    assert result["hint"] == (
+        "Could not reach antigravity-cli-auto-updater-974169037036.us-central1.run.app. "
+        "Check your network connection or proxy settings, then try again."
+    )
+    assert result["exit_code"] == 1
+
+    monkeypatch.setattr(
+        api,
+        "install_desktop_backend",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            DesktopBackendError("Failed to download release archive: timed out", code="archive_download_failed")
+        ),
+    )
+    fallback_result = api._run_desktop_backend_install("antigravity", lambda s: s)
+    assert fallback_result["output"] == "Failed to download release archive: timed out"
+    assert "exit_code" not in fallback_result

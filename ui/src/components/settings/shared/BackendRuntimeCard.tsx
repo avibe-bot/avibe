@@ -157,6 +157,9 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
         {capabilities.supports_install && (runtime.cliStatus === 'missing' || runtime.cliStatus === 'broken') && (
           <div className="space-y-2 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
             <p className="text-[12px] text-cyan-ink">{t(runtime.cliStatus === 'broken' ? 'backendLifecycle.brokenHint' : 'agentDetection.installHint', { name: label })}</p>
+            {backend === 'antigravity' && runtime.cliStatus === 'missing' && (
+              <p className="text-[12px] text-muted">{t('agentDetection.antigravityCliNote')}</p>
+            )}
             <Button
               variant="brand-cyan"
               size="xs"
