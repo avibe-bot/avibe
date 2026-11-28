@@ -1630,6 +1630,8 @@ final class DirectRendezvousWebViewSource {
             let use = DirectPathUse.shared.pending(for: scope)
             // And the hand-overs its page asked for, one record each.
             let handovers = DirectPathUse.shared.pendingHandovers(for: scope)
+            // And the probation level of its link, minute by minute.
+            let pathGuard = DirectPathUse.shared.pendingGuard(for: scope)
             // And this App's measured cold starts, the same way.
             let starts = ColdStartTimings.shared.pending
             // And why the public leg failed, and how often the App went
@@ -1646,7 +1648,8 @@ final class DirectRendezvousWebViewSource {
                 startup: starts.map(\.json),
                 handovers: handovers.json,
                 publicFaults: publicFaults.map(\.json),
-                routeFallbacks: fallbacks.map(\.json)
+                routeFallbacks: fallbacks.map(\.json),
+                pathGuard: pathGuard.json
             )
             self?.faultReport.answered(faults)
             SlowStoreRemovals.shared.answered(removals)
@@ -1655,6 +1658,7 @@ final class DirectRendezvousWebViewSource {
             DirectRouteFallbacks.shared.answered(fallbacks)
             DirectPathUse.shared.answered(use)
             DirectPathUse.shared.answered(handovers)
+            DirectPathUse.shared.answered(pathGuard)
             return answer
         }
     }

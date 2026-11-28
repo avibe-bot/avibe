@@ -130,14 +130,44 @@ final class DirectPathUse: @unchecked Sendable {
         case otherDocuments = "other_documents"
     }
 
-    /// Why committed direct connections were closed for a path that was gone.
+    /// Why committed direct connections were closed for a path that was
+    /// gone: the transport's own cause for the loss (`DirectLossCause`, the
+    /// same words), or the App leaving the foreground.
     enum RetiredRule: String, CaseIterable, Sendable {
-        /// The transport reported the path lost.
-        case pathMonitor = "path_monitor"
+        /// The connection timed out idle: nothing came from the instance.
+        case idle
+        /// It ended some other way with no close from the instance.
+        case connectionEnded = "connection_ended"
+        /// A probe got no answer on a connection still open.
+        case probeTimeout = "timeout"
+        /// The instance closed it, saying the admission ended.
+        case revocation
+        /// The instance closed it for another reason of its own.
+        case closedByPeer = "closed_by_peer"
+        /// The newest rendezvous answer offers no direct path.
+        case notReady = "not_ready"
         /// A newer rendezvous answer replaced the endpoint they ran on.
         case superseded
+        /// The probe that a change of network started failed.
+        case networkChange = "network_change"
+        /// This App closed the connection itself.
+        case withdrawn = "other"
         /// The App went to the background.
         case background
+
+        init(_ cause: DirectLossCause) {
+            switch cause {
+            case .idle: self = .idle
+            case .connectionEnded: self = .connectionEnded
+            case .probeTimeout: self = .probeTimeout
+            case .revocation: self = .revocation
+            case .closedByPeer: self = .closedByPeer
+            case .notReady: self = .notReady
+            case .superseded: self = .superseded
+            case .networkChange: self = .networkChange
+            case .withdrawn: self = .withdrawn
+            }
+        }
     }
 
     /// Whose connections a count is of: the account's data store and the
@@ -199,6 +229,15 @@ final class DirectPathUse: @unchecked Sendable {
         }
     }
 
+    /// The probation level of one instance in the finished minutes no
+    /// answered request has carried yet, ready to send (`path_guard`).
+    struct GuardReport: Sendable {
+        let scope: Scope
+        let minutes: [Int]
+        /// Oldest first, at most `guardLimit`.
+        let json: [String]
+    }
+
     /// The hand-overs of one instance waiting for an answered request, with
     /// the entries to send for them.
     struct HandoverReport: Sendable {
@@ -210,6 +249,9 @@ final class DirectPathUse: @unchecked Sendable {
     /// The most entries one request carries; the instance ignores a longer
     /// list whole.
     static let reportLimit = 10
+    /// The most `path_guard` rows one request carries; the instance ignores
+    /// a longer list whole. Of more, the newest go.
+    static let guardLimit = 10
     /// The most hand-overs one request carries, and the most kept for one
     /// instance while none is answered: the oldest is dropped for a new one.
     static let handoverLimit = 8
@@ -259,6 +301,21 @@ final class DirectPathUse: @unchecked Sendable {
         var retiredRules: [RetiredRule: Int] = [:]
     }
 
+    private struct GuardKey: Hashable {
+        let scope: Scope
+        let minute: Int
+    }
+
+    /// One minute of one instance's probation level: the level and why it
+    /// last rose as last noted in the minute, the kind of the link that
+    /// note spoke of, and how many links were newly made to wait in it.
+    private struct GuardEntry {
+        var path: Path
+        var levelSeconds: Int
+        var rose: DirectProbationRose
+        var held = 0
+    }
+
     private let lock = NSLock()
     private let seconds: @Sendable () -> Int
     /// This App's build (`CFBundleVersion`, for example "57.1"), sent as each
@@ -266,6 +323,7 @@ final class DirectPathUse: @unchecked Sendable {
     /// accepts (1–32 printable ASCII characters).
     let app: String?
     private var entries: [Key: Entry] = [:]
+    private var guards: [GuardKey: GuardEntry] = [:]
     /// In the order they were answered.
     private var handovers: [Handover] = []
     private var nextHandoverID = 0
@@ -412,6 +470,72 @@ final class DirectPathUse: @unchecked Sendable {
         }
     }
 
+    /// The probation level of `scope`'s link, noted when a link is made to
+    /// wait (`held`) and when a waiting one is adopted, and only while the
+    /// level is above 0 (docs/plans/remote-direct-probation.md section 7).
+    /// `path` is the kind of that link, `none` when the App does not know
+    /// it yet.
+    func probation(scope: Scope, path: Path, levelSeconds: Int, rose: DirectProbationRose, held: Bool) {
+        lock.withLock {
+            let now = seconds() / 60
+            let key = GuardKey(scope: scope, minute: now)
+            var entry = guards[key] ?? GuardEntry(path: path, levelSeconds: levelSeconds, rose: rose)
+            entry.path = path
+            entry.levelSeconds = levelSeconds
+            entry.rose = rose
+            if held {
+                entry.held += 1
+            }
+            guards[key] = entry
+            dropGuardsLocked(now: now)
+        }
+    }
+
+    /// The finished minutes of `scope` with a probation note that no
+    /// answered request has carried yet, oldest first, the newest
+    /// `guardLimit` of them. Asking changes nothing. A minute whose level
+    /// and reason do not agree as the instance requires (0 with a reason,
+    /// or a level with none) is left out rather than sent: one such row
+    /// would cost the request its whole list.
+    func pendingGuard(for scope: Scope) -> GuardReport {
+        lock.withLock {
+            let now = seconds() / 60
+            dropGuardsLocked(now: now)
+            let minutes = guards.keys
+                .filter { $0.scope == scope && $0.minute < now }
+                .map(\.minute)
+                .sorted()
+                .suffix(Self.guardLimit)
+            var sent: [Int] = []
+            var rows: [String] = []
+            for minute in minutes {
+                guard let entry = guards[GuardKey(scope: scope, minute: minute)],
+                      DirectProbationGuard.levelsSeconds.contains(entry.levelSeconds),
+                      (entry.levelSeconds == 0) == (entry.rose == .none)
+                else {
+                    continue
+                }
+                sent.append(minute)
+                rows.append(
+                    "{\"client\":\"ios\",\"age_min\":\(min(max(now - minute, 0), Self.maxAgeMinutes))"
+                        + ",\"path\":\"\(entry.path.rawValue)\",\"guard_level_s\":\(entry.levelSeconds)"
+                        + ",\"guard_rose\":\"\(entry.rose.rawValue)\""
+                        + ",\"held\":\(min(max(entry.held, 0), Int(Int32.max)))}"
+                )
+            }
+            return GuardReport(scope: scope, minutes: sent, json: rows)
+        }
+    }
+
+    /// The instance answered a request that carried these: they are done.
+    func answered(_ report: GuardReport) {
+        lock.withLock {
+            for minute in report.minutes {
+                guards.removeValue(forKey: GuardKey(scope: report.scope, minute: minute))
+            }
+        }
+    }
+
     /// The minutes of `scope` that are over and not yet answered, oldest
     /// first, at most `reportLimit`. Asking changes nothing: a request that
     /// fails reports them again with the next.
@@ -445,6 +569,7 @@ final class DirectPathUse: @unchecked Sendable {
         lock.withLock {
             entries.removeAll()
             handovers.removeAll()
+            guards.removeAll()
         }
     }
 
@@ -467,6 +592,20 @@ final class DirectPathUse: @unchecked Sendable {
         }
         for key in entries.keys.sorted(by: Key.earlier).prefix(excess) {
             entries.removeValue(forKey: key)
+        }
+    }
+
+    /// Probation minutes too old to send, then the oldest past `kept`.
+    private func dropGuardsLocked(now: Int) {
+        for key in guards.keys where now - key.minute > Self.maxAgeMinutes {
+            guards.removeValue(forKey: key)
+        }
+        let excess = guards.count - Self.kept
+        guard excess > 0 else {
+            return
+        }
+        for key in guards.keys.sorted(by: { ($0.minute, $0.scope.host) < ($1.minute, $1.scope.host) }).prefix(excess) {
+            guards.removeValue(forKey: key)
         }
     }
 
