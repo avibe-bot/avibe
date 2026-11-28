@@ -125,3 +125,91 @@ enum DirectProbationCases {
         return (cases.count, events, failures)
     }
 }
+
+/// The probation rule's clocks, moved by the test. A sleep ends when the
+/// time it was asked for has been moved past, never by itself.
+final class DirectProbationTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nowMs: Int64 = 1_000_000
+    private var wallMs: Int64 = 1_700_000_000_000
+    private var sleepers: [Int: (due: Int64, wake: CheckedContinuation<Void, Error>)] = [:]
+    /// Sleeps cancelled before they had registered.
+    private var cancelled: Set<Int> = []
+    private var nextID = 0
+
+    var clock: DirectProbationClock {
+        DirectProbationClock(
+            now: { [self] in lock.withLock { nowMs } },
+            wall: { [self] in lock.withLock { wallMs } },
+            sleep: { [self] in try await sleep($0) }
+        )
+    }
+
+    /// How many sleeps are waiting now.
+    var sleeping: Int {
+        lock.withLock { sleepers.count }
+    }
+
+    /// Moves both clocks on and ends every sleep that is due.
+    func advance(_ milliseconds: Int64) {
+        let due: [CheckedContinuation<Void, Error>] = lock.withLock {
+            nowMs += milliseconds
+            wallMs += milliseconds
+            let ready = sleepers.filter { $0.value.due <= nowMs }
+            for id in ready.keys {
+                sleepers.removeValue(forKey: id)
+            }
+            return ready.values.map(\.wake)
+        }
+        for wake in due {
+            wake.resume()
+        }
+    }
+
+    private func sleep(_ milliseconds: Int64) async throws {
+        let id: Int = lock.withLock {
+            nextID += 1
+            return nextID
+        }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (wake: CheckedContinuation<Void, Error>) in
+                let gone: Bool = lock.withLock {
+                    if cancelled.remove(id) != nil {
+                        return true
+                    }
+                    sleepers[id] = (nowMs + milliseconds, wake)
+                    return false
+                }
+                if gone {
+                    wake.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            let wake: CheckedContinuation<Void, Error>? = lock.withLock {
+                if let sleeper = sleepers.removeValue(forKey: id) {
+                    return sleeper.wake
+                }
+                cancelled.insert(id)
+                return nil
+            }
+            wake?.resume(throwing: CancellationError())
+        }
+    }
+}
+
+/// The levels, kept in memory.
+final class DirectProbationMemoryStore: DirectProbationStoring {
+    var levels: [String: DirectProbationRecord]
+
+    init(_ levels: [String: DirectProbationRecord] = [:]) {
+        self.levels = levels
+    }
+
+    func load() -> [String: DirectProbationRecord] {
+        levels
+    }
+
+    func save(_ levels: [String: DirectProbationRecord]) {
+        self.levels = levels
+    }
+}

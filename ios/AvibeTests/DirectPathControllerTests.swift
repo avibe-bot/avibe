@@ -259,6 +259,191 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(data.proxyConfigurations.first?.allowFailover, true)
     }
 
+    // MARK: Probation
+
+    /// A path that died soon after it was taken into use is not used again
+    /// at once: its next link waits, and meanwhile the page hears of no
+    /// direct path and its connections go by the tunnel. The level and the
+    /// link that was made to wait are reported.
+    @MainActor
+    func testALinkAfterAnEarlyDeathWaitsAndThePageIsOnTheTunnelMeanwhile() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let authority = try XCTUnwrap(DirectAuthority(host: one))
+        harness.transport.currentPath = .ipv4
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 3)
+
+        // The first link is used at once, and nothing waits.
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
+        XCTAssertEqual(harness.probationStore.levels, [:])
+        // It dies ten seconds later: an early death.
+        harness.probationTime.advance(10_000)
+        harness.transport.report(.lost(.idle), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [1])
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.rose), [.adopted])
+
+        // The next link waits half a minute.
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        XCTAssertNil(harness.status("instance-1").path)
+        let waiting = try XCTUnwrap(harness.controller.plan(for: authority))
+        XCTAssertNil(waiting.openDirect)
+        XCTAssertNotNil(waiting.openPublic)
+        // Its wait and its probe are running.
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(29_000)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        XCTAssertEqual(harness.transport.waitingProbes, 0)
+        // A report that it is still usable does not shorten the wait.
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+
+        harness.probationTime.advance(1_000)
+        try await eventually { harness.status("instance-1").preferred == .direct }
+        XCTAssertEqual(harness.status("instance-1").path, .ipv4)
+        XCTAssertNotNil(try XCTUnwrap(harness.controller.plan(for: authority)).openDirect)
+        // Adopted: its probe has stopped.
+        try await eventually { harness.probationTime.sleeping == 0 }
+
+        // The minute's row: the level, why it rose, and one link held.
+        harness.pathUseClock.now += 60
+        let scope = DirectPathUse.Scope(store: harness.websiteDataStore.identifier, host: one)
+        let rows = try harness.pathUse.pendingGuard(for: scope).json.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(Set(try XCTUnwrap(rows.first).keys), ["client", "age_min", "path", "guard_level_s", "guard_rose", "held"])
+        XCTAssertEqual(rows.first?["client"] as? String, "ios")
+        XCTAssertEqual(rows.first?["path"] as? String, "lan")
+        XCTAssertEqual(rows.first?["guard_level_s"] as? Int, 30)
+        XCTAssertEqual(rows.first?["guard_rose"] as? String, "adopted")
+        XCTAssertEqual(rows.first?["held"] as? Int, 1)
+    }
+
+    /// A waiting link carries nothing, so it is asked once a minute whether
+    /// it still answers; and a link that dies while it waits makes the next
+    /// one wait ten minutes.
+    @MainActor
+    func testAWaitingLinkIsProbedOnceAMinuteAndADeathOnProbationRaisesTheWait() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        harness.transport.report(.lost(.idle), for: target)
+        // On probation for half a minute, and its probe fails.
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.transport.report(.lost(.probeTimeout), for: target)
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [2])
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.rose), [.probation])
+        try await eventually { harness.probationTime.sleeping == 0 }
+
+        // Ten minutes now, with a probe each minute.
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(60_000)
+        try await eventually { harness.transport.waitingProbes == 1 }
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(60_000)
+        try await eventually { harness.transport.waitingProbes == 2 }
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(480_000)
+        try await eventually { harness.status("instance-1").preferred == .direct }
+    }
+
+    /// Only a death of the path raises the level: a close the instance
+    /// sent, a newer answer, or the App leaving does not, and the next link
+    /// is used at once.
+    @MainActor
+    func testACloseTheInstanceSentANewerAnswerOrTheBackgroundRaisesNothing() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+
+        for cause in [DirectLossCause.closedByPeer, .revocation, .notReady, .superseded, .withdrawn] {
+            harness.transport.report(.usable(generation: "g1"), for: target)
+            XCTAssertEqual(harness.status("instance-1").preferred, .direct, cause.rawValue)
+            harness.transport.report(.lost(cause), for: target)
+            XCTAssertEqual(harness.status("instance-1").preferred, .tunnel, cause.rawValue)
+        }
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level).filter { $0 > 0 }, [])
+
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
+        harness.enterBackground()
+        try await eventually { harness.controller.listenerState != .ready }
+        harness.enterForeground()
+        try await eventually { harness.controller.listenerState == .ready }
+        try await eventually { harness.transport.selections.count > 1 }
+        harness.transport.report(.usable(generation: "g1"), for: try XCTUnwrap(harness.transport.selections.last))
+        try await eventually { harness.status("instance-1").preferred == .direct }
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level).filter { $0 > 0 }, [])
+        XCTAssertEqual(harness.probationTime.sleeping, 0)
+    }
+
+    /// With the tunnel ruled out there is nothing to wait on: a link is
+    /// used at once whatever the level, and the level is still kept. When
+    /// the user allows the tunnel again on a live link, that link waits the
+    /// level's time from then.
+    @MainActor
+    func testWithTheTunnelRuledOutALinkIsUsedAtOnceAndWaitsOnceTheTunnelIsAllowedAgain() async throws {
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.currentPath = .ipv4
+
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        // An early death under this choice is counted as any other.
+        harness.transport.report(.lost(.idle), for: target)
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [1])
+        // The next link is used at once all the same.
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.probationTime.sleeping, 0)
+
+        // The tunnel is allowed again: the link's turn starts over, on
+        // probation, and the page is on the tunnel until it is adopted.
+        controller.setDirectOnly(false, forInstanceURL: url)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(30_000)
+        try await eventually { harness.status("instance-1").preferred == .direct }
+    }
+
+    /// The level outlives the launch: a controller that starts with a
+    /// stored level makes its first link wait.
+    @MainActor
+    func testAStoredLevelMakesTheFirstLinkOfALaunchWait() async throws {
+        let clock = DirectProbationTestClock()
+        let key = DirectProbationDefaultsStore.entry(accountID: "account-1", host: one)
+        let stored = [key: DirectProbationRecord(level: 1, rose: .adopted, lastEarlyWallMs: clock.clock.wall() - 60_000)]
+        let harness = try Harness(probation: stored, probationTime: clock, test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(30_000)
+        try await eventually { harness.status("instance-1").preferred == .direct }
+        XCTAssertEqual(harness.probationStore.levels, stored)
+    }
+
     // MARK: The preference
 
     @MainActor
@@ -280,7 +465,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-1"), DirectPathStatus(preferred: .tunnel, sequence: 2, closure: 0))
         harness.transport.report(.usable(generation: "g1"), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         XCTAssertEqual(harness.status("instance-1"), DirectPathStatus(preferred: .tunnel, sequence: 4, closure: 0))
         harness.controller.runtimeDidStop()
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
@@ -335,7 +520,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertTrue(directCurrent)
 
         // Any event of the path-generation table fences both.
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         let directAfter = await directPlan.isCurrent()
         let tunnelAfter = await tunnelPlan.isCurrent()
         XCTAssertFalse(directAfter)
@@ -368,7 +553,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNotNil(linked.openDirect)
         XCTAssertNil(linked.openPublic)
         XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
         let waiting = try XCTUnwrap(controller.plan(for: authority))
         XCTAssertNil(waiting.openDirect)
@@ -865,7 +1050,7 @@ final class DirectPathControllerTests: XCTestCase {
         let linked = LoopbackClient(port: port)
         defer { linked.close() }
         _ = try await establishDirect(linked, harness: harness)
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         let waiting = LoopbackClient(port: port)
         defer { waiting.close() }
         let start = ContinuousClock.now
@@ -880,7 +1065,7 @@ final class DirectPathControllerTests: XCTestCase {
         // deliberate bootstrap. It still gets no public candidate or HTTP answer.
         let again = LoopbackClient(port: port)
         defer { again.close() }
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         try await again.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
         let nextBytes = try await again.receiveUntilClosed()
         XCTAssertTrue(nextBytes.isEmpty)
@@ -1133,7 +1318,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(harness.status("instance-2").jsonObject["rtt_ms"])
 
         // Lost: no path, so neither.
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         XCTAssertNil(harness.status("instance-1").jsonObject["path_scope"])
         XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
     }
@@ -1296,7 +1481,7 @@ final class DirectPathControllerTests: XCTestCase {
 
         // Lost: no path is claimed, and the next selection starts clean.
         harness.transport.report(.pathChanged(.ipv6), for: target)
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
         XCTAssertNil(harness.status("instance-1").path)
         XCTAssertNil(harness.status("instance-1").eventObject["path"])
@@ -1341,7 +1526,7 @@ final class DirectPathControllerTests: XCTestCase {
         // Lost closes the direct relays only, and counts once for the host.
         harness.transport.currentPath = .ipv4
         harness.transport.report(.usable(generation: "g1"), for: target)
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         try await eventually { aStream.isCancelled && bStream.isCancelled }
         try await eventually { harness.status("instance-1").closure == 1 }
         XCTAssertFalse(publicStream.isCancelled)
@@ -1361,8 +1546,12 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-2").losses, [])
         harness.transport.currentPath = nil
 
-        // A new rendezvous generation closes the relays of the old one.
+        // A new rendezvous generation closes the relays of the old one. The
+        // path died early, so its next link waits half a minute first.
         harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { harness.probationTime.sleeping == 2 }
+        harness.probationTime.advance(30_000)
+        try await eventually { harness.status("instance-1").preferred == .direct }
         let c = LoopbackClient(port: port)
         let cStream = try await establishDirect(c, harness: harness)
         harness.transport.report(.usable(generation: "g2"), for: target)
@@ -1392,7 +1581,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(counted[0]["retired_rule"] as? String, "superseded")
         // The loss on an address whose class was never read.
         XCTAssertEqual(counted[1]["retired"] as? Int, 1)
-        XCTAssertEqual(counted[1]["retired_rule"] as? String, "path_monitor")
+        XCTAssertEqual(counted[1]["retired_rule"] as? String, "idle")
         XCTAssertEqual(counted[1]["direct"] as? Int, 0)
         // The replaced generation is never accepted again.
         let before = harness.preferences
@@ -2826,6 +3015,11 @@ private final class Harness {
     var loadingDocument: () -> Bool = { false }
     private(set) var loadingPageCuts: [MobileRuntimeContext] = []
 
+    /// The probation rule's clocks and stored levels: time passes only when
+    /// the test moves it.
+    let probationTime: DirectProbationTestClock
+    let probationStore: DirectProbationMemoryStore
+
     /// This harness's own account of path use, on a clock the test moves.
     let pathUseClock = DirectPathUseTestClock()
     private(set) lazy var pathUse = DirectPathUse(seconds: { [pathUseClock] in pathUseClock.now })
@@ -2841,6 +3035,8 @@ private final class Harness {
         timing: timing,
         notificationCenter: notifications,
         pathUse: pathUse,
+        probationStore: probationStore,
+        probationClock: probationTime.clock,
         controlPlaneHost: Harness.controlPlaneHost,
         onStatusChanged: { [unowned self] in
             self.announcements += 1
@@ -2888,8 +3084,12 @@ private final class Harness {
             rebindSeconds: 10,
             foregroundSeconds: 600
         ),
+        probation: [String: DirectProbationRecord] = [:],
+        probationTime: DirectProbationTestClock = DirectProbationTestClock(),
         test: XCTestCase
     ) throws {
+        self.probationTime = probationTime
+        probationStore = DirectProbationMemoryStore(probation)
         let suiteName = "DirectPathControllerTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         test.addTeardownBlock {
@@ -3375,6 +3575,14 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
         failedTags.append(tag)
     }
 
+    /// How often the controller asked for a probe of a waiting path.
+    @MainActor private(set) var waitingProbes = 0
+
+    @MainActor
+    func probeWaitingPath() {
+        waitingProbes += 1
+    }
+
     func openStream(for tag: DirectStreamTag) async throws -> any DirectByteStream {
         openedTags.record(tag)
         return try await streams.open()
@@ -3596,7 +3804,7 @@ extension DirectPathControllerTests {
         let recovered = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
         XCTAssertTrue(recovered.isCurrent())
         XCTAssertFalse(direct.isCurrent())
-        harness.transport.report(.lost, for: target)
+        harness.transport.report(.lost(.idle), for: target)
         XCTAssertFalse(recovered.isCurrent())
         XCTAssertNil(harness.controller.measurementLink(forInstanceURL: one))
         // Nothing of all this told the transport a path had failed.

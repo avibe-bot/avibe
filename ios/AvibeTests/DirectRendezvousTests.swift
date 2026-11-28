@@ -825,6 +825,23 @@ final class ColdStartTimingsTests: XCTestCase {
         XCTAssertEqual(DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: []), head + "}")
     }
 
+    /// `path_guard`: beside `path_use`, never inside it; at most ten rows,
+    /// the newest; and no field when there is none.
+    func testTheRequestCarriesThePathGuardBesidePathUse() throws {
+        let rows = (0..<12).map {
+            #"{"client":"ios","age_min":\#(12 - $0),"path":"lan","guard_level_s":30,"guard_rose":"adopted","held":1}"#
+        }
+        let body = DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], pathGuard: rows)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        XCTAssertNil(object["path_use"])
+        let sent = try XCTUnwrap(object["path_guard"] as? [[String: Any]])
+        XCTAssertEqual(sent.count, DirectPathUse.guardLimit)
+        XCTAssertEqual(sent.first?["age_min"] as? Int, 10)
+        XCTAssertEqual(sent.last?["age_min"] as? Int, 1)
+        XCTAssertEqual(Set(sent[0].keys), ["client", "age_min", "path", "guard_level_s", "guard_rose", "held"])
+        XCTAssertFalse(DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: []).contains("path_guard"))
+    }
+
     func testTheRequestCarriesTheEntriesUntilAnswered() throws {
         let timings = ColdStartTimings()
         timings.launched()

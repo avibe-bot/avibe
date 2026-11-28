@@ -167,7 +167,12 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
             owner.streamOpened()
             return DirectIrohStreamHalves(send: Send(base: halves.send, owner: owner), receive: Receive(base: halves.receive, owner: owner))
         }
-        func closed() async { await base.closed(); owner.connectionEnded() }
+        func closed() async -> String {
+            let text = await base.closed()
+            owner.connectionEnded()
+            return text
+        }
+        var closeReason: String? { base.closeReason }
         func close() { base.close() }
     }
 
