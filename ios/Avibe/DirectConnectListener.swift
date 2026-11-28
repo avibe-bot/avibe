@@ -58,11 +58,11 @@ enum DirectConnectRequest: Equatable {
     case refused(Int)
 
     /// Accepts `CONNECT <host>:443 HTTP/1.1` for exactly one of
-    /// `allowedHosts`, or for the parent domain of one, and refuses
-    /// everything else. WebKit also sends this listener a CONNECT for any
-    /// subdomain of a routed host, which is refused, and for its parent
-    /// domain, which is carried to that host itself
-    /// (`DirectAuthority.isParentDomain`).
+    /// `allowedHosts` and refuses everything else. `matchDomains` is a
+    /// suffix match, so WebKit also sends this listener a CONNECT for any
+    /// subdomain of a routed host; and it sends the parent domain of one
+    /// too (`DirectAuthority.isParentDomain`). Which of those the listener
+    /// may be asked for is the controller's decision (`allowHost`).
     static func parse(
         _ received: Data,
         allowedHosts: Set<String>,
@@ -118,17 +118,16 @@ enum DirectConnectRequest: Equatable {
         guard hosts.count <= 1 else {
             return .refused(400)
         }
-        // The target decides: exactly an allowed host or the parent
-        // domain of one, on port 443. Another host, a subdomain, a
-        // grandparent, another port, no port, userinfo, and an IP literal
-        // all fail here.
+        // The target decides: exactly an allowed host, on port 443. Another
+        // host, a subdomain, another port, no port, userinfo, and an IP
+        // literal all fail here.
         let target = requestLine[1].lowercased()
         guard target.hasSuffix(":443") else {
             return .refused(403)
         }
         let host = String(target.dropLast(4))
         guard
-            allowedHosts.contains(host) || DirectAuthority.isParentDomain(host, ofAny: allowedHosts),
+            allowedHosts.contains(host),
             let authority = DirectAuthority(host: host)
         else {
             return .refused(403)

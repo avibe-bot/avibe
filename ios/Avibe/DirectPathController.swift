@@ -660,6 +660,9 @@ final class DirectPathController {
     // a timed-out CONNECT still using a failover-enabled route during cutover.
     private var hostsNeedingColdStore: Set<String> = []
     private var armed: Set<String> = []
+    /// The control plane's host (avibe.bot). The only host the listener
+    /// carries without a route of its own (`carriesControlPlane`).
+    private let controlPlaneHost: String?
     private var rewriting: Set<String> = []
     /// Hosts whose policy is changing: from the wait for their tunnel
     /// connections to go quiet until the drain and rewrite are done.
@@ -800,10 +803,12 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         pathUse: DirectPathUse = .shared,
+        controlPlaneHost: String? = MobileControlPlaneConfiguration().baseURL.host,
         onStatusChanged: @escaping () -> Void,
         onAvailabilityChanged: @escaping () -> Void = {}
     ) {
         self.pathUse = pathUse
+        self.controlPlaneHost = controlPlaneHost?.lowercased()
         self.websiteDataStore = websiteDataStore
         self.transport = transport
         self.isCurrentRuntime = isCurrentRuntime
@@ -1085,6 +1090,11 @@ final class DirectPathController {
         // The listener accepts the host before WebKit can be routed to it.
         // Its list only grows: `plan(for:)` refuses a host no route lists.
         await listener.allowHost(authority.host)
+        // And the control plane's host, where WebKit will send it here too
+        // because it is this host's parent domain (`carriesControlPlane`).
+        if let controlPlaneHost, DirectAuthority.isParentDomain(controlPlaneHost, ofAny: [authority.host]) {
+            await listener.allowHost(controlPlaneHost)
+        }
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -1667,23 +1677,43 @@ final class DirectPathController {
         transport.pathDidFail(for: tag)
     }
 
+    /// Whether a CONNECT for `host` is carried though no route lists it:
+    /// only the control plane's own host, only while it is exactly the
+    /// parent domain of a host some route lists, and not once it is routed
+    /// itself (its own policy then decides).
+    private func carriesControlPlane(_ host: String) -> Bool {
+        host == controlPlaneHost
+            && !routeOwner.allowedHosts.contains(host)
+            && DirectAuthority.isParentDomain(host, ofAny: routeOwner.allowedHosts)
+    }
+
     // MARK: Plans
 
     /// Decides one accepted CONNECT (section 6). `nil` refuses it.
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
         let host = authority.host
         guard routeOwner.allowedHosts.contains(host) else {
-            // The parent domain of a routed host (avibe.bot, for an instance
-            // under it): WebKit sends it here though no route lists it. It
-            // is not the instance: it goes straight to that host through the
-            // public opener under every choice, never over the direct path,
-            // and is in no count of the instance's connections.
-            guard DirectAuthority.isParentDomain(host, ofAny: routeOwner.allowedHosts) else { return nil }
+            // The control plane's own host, when it is the parent domain of
+            // a routed host (avibe.bot, for an instance under it): WebKit
+            // sends it here though no route lists it. It is not the
+            // instance: it goes straight to that host through the public
+            // opener and its address policy under every choice, never over
+            // the direct path, and is in no count of the instance's
+            // connections. Fenced as any public-only plan is, so nothing
+            // planned before a change of selection or account is granted
+            // after it; and no longer carried once the host is routed in
+            // its own right or stops being a routed host's parent.
+            guard carriesControlPlane(host) else { return nil }
+            let fence = Fence(selection: selection, pathGeneration: pathGeneration, accountEpoch: accountEpoch)
             let publicBackend = publicBackend
             return DirectConnectPlan(
                 scope: scope, generation: pathGeneration, openDirect: nil,
                 openPublic: { try await publicBackend.open(authority) },
-                isCurrent: { true }, directFailed: {}
+                isCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.isCurrent(fence, lease: nil) && self.carriesControlPlane(host)
+                },
+                directFailed: {}
             )
         }
         if awaitingFirstConnect.remove(host) != nil {

@@ -2877,32 +2877,30 @@ final class DirectConnectListenerTests: XCTestCase {
     }
 
     /// WebKit sends a route's proxy the parent domain of a routed host too
-    /// (measured). It is accepted, to be carried to that host itself; nothing
-    /// else that is not listed is.
-    func testOnlyTheExactParentDomainOfARoutedHostIsAcceptedBesideIt() {
-        let routed: Set<String> = ["alex-app.avibe.bot", "desk.team.example.com"]
-        func parse(_ target: String) -> DirectConnectRequest {
+    /// (measured). The head's rule stays exact: a parent is accepted only
+    /// when the controller allowed that very host, never for being a parent.
+    func testAParentDomainIsRefusedUnlessThatHostItselfIsAllowed() {
+        func parse(_ target: String, allowed: Set<String>) -> DirectConnectRequest {
             DirectConnectRequest.parse(
                 Data("CONNECT \(target) HTTP/1.1\r\nHost: \(target)\r\n\r\n".utf8),
-                allowedHosts: routed, limit: 4096
+                allowedHosts: allowed, limit: 4096
             )
         }
-        XCTAssertEqual(parse("alex-app.avibe.bot:443"),
-                       .accepted(DirectAuthority(host: "alex-app.avibe.bot")!, earlyData: Data()))
-        XCTAssertEqual(parse("avibe.bot:443"), .accepted(DirectAuthority(host: "avibe.bot")!, earlyData: Data()))
-        XCTAssertEqual(parse("team.example.com:443"),
-                       .accepted(DirectAuthority(host: "team.example.com")!, earlyData: Data()))
-        // A grandparent, a top-level domain, a sibling, a subdomain, a name
-        // that only ends alike, and the parent on another port.
-        for refused in ["example.com:443", "bot:443", "com:443", "other.avibe.bot:443",
-                        "x.alex-app.avibe.bot:443", "notavibe.bot:443", "avibe.bot:8443", "avibe.bot"] {
-            XCTAssertEqual(parse(refused), .refused(403), refused)
-        }
+        XCTAssertEqual(parse("avibe.bot:443", allowed: ["alex-app.avibe.bot"]), .refused(403))
+        XCTAssertEqual(
+            parse("avibe.bot:443", allowed: ["alex-app.avibe.bot", "avibe.bot"]),
+            .accepted(DirectAuthority(host: "avibe.bot")!, earlyData: Data())
+        )
+        XCTAssertEqual(parse("avibe.bot:8443", allowed: ["alex-app.avibe.bot", "avibe.bot"]), .refused(403))
 
+        // Exactly the parent: a host without its first label.
+        let routed: Set<String> = ["alex-app.avibe.bot", "desk.team.example.com"]
         XCTAssertTrue(DirectAuthority.isParentDomain("avibe.bot", ofAny: routed))
-        XCTAssertFalse(DirectAuthority.isParentDomain("alex-app.avibe.bot", ofAny: routed))
-        XCTAssertFalse(DirectAuthority.isParentDomain("example.com", ofAny: routed))
-        XCTAssertFalse(DirectAuthority.isParentDomain("bot", ofAny: routed))
+        XCTAssertTrue(DirectAuthority.isParentDomain("team.example.com", ofAny: routed))
+        for other in ["example.com", "bot", "com", "other.avibe.bot", "x.alex-app.avibe.bot",
+                      "notavibe.bot", "alex-app.avibe.bot"] {
+            XCTAssertFalse(DirectAuthority.isParentDomain(other, ofAny: routed), other)
+        }
         XCTAssertFalse(DirectAuthority.isParentDomain("avibe.bot", ofAny: ["avibe.bot"]))
     }
 

@@ -426,37 +426,83 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
     }
 
-    /// The page's requests to the parent domain of its instance (avibe.bot:
-    /// voice) reach the listener too. They are carried to that host through
-    /// the public opener under every choice, 「仅直连和中继」 included, and
-    /// never over the direct path.
+    /// The page's requests to the control plane's host (avibe.bot: voice)
+    /// reach the listener too, because that host is the parent domain of
+    /// the instance's. With the instance strict and linked, they are carried
+    /// to that host through the public opener, never over the direct path.
     @MainActor
-    func testTheParentDomainOfARoutedHostIsCarriedByThePublicOpenerEvenWhenStrictIsLinked() async throws {
+    func testTheControlPlaneHostIsCarriedByThePublicOpenerWhileItsInstanceIsStrictAndLinked() async throws {
         let baseline = try listeningSockets()
         let harness = try Harness(test: self)
         let controller = harness.controller
+        let child = "team.service.example"
+        let url = try XCTUnwrap(URL(string: "https://\(child)"))
         try await harness.signIn()
-        try await harness.select("instance-1")
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-under-service")
+        let target = try XCTUnwrap(harness.transport.selections.last)
         let port = try harness.listenerPort(since: baseline)
-        // A second routed host, with a parent domain of two labels.
-        let routed = "alex-app.avibe.example"
-        XCTAssertTrue(controller.routeOwner.add(
-            routed, store: harness.websiteDataStore.identifier,
-            dataStore: harness.websiteDataStore.dataStore, port: port.rawValue
-        ))
-        let parent = try XCTUnwrap(DirectAuthority(host: "avibe.example"))
-        let plan = try XCTUnwrap(controller.plan(for: parent))
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        let strict = try XCTUnwrap(controller.plan(for: try XCTUnwrap(DirectAuthority(host: child))))
+        XCTAssertNil(strict.openPublic, "the instance's own traffic has no tunnel candidate")
+        XCTAssertNotNil(strict.openDirect)
+
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        let plan = try XCTUnwrap(controller.plan(for: service))
         XCTAssertNil(plan.openDirect)
         XCTAssertNotNil(plan.openPublic)
         XCTAssertNil(plan.strictWaitSeconds)
         XCTAssertFalse(plan.sticky)
         XCTAssertNil(plan.connectionSettled, "not one of the instance's connections: in no count")
+
+        // Through the real listener: it reaches the public opener, and
+        // nothing is opened on the direct path.
+        let publicBefore = harness.publicOrigin.streams.opened.count
+        let directBefore = harness.transport.streams.attempts
+        let client = LoopbackClient(port: port)
+        defer { client.close() }
+        let name = Harness.controlPlaneHost
+        try await client.send("CONNECT \(name):443 HTTP/1.1\r\nHost: \(name):443\r\n\r\n")
+        _ = try await harness.publicOrigin.streams.waitForStream(count: publicBefore + 1)
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(harness.transport.streams.attempts, directBefore, "never over the direct path")
+    }
+
+    /// Being a parent domain is not enough: only the control plane's own
+    /// host is carried. And a plan for it is fenced like any other: one
+    /// made before the selection ended is not granted after it.
+    @MainActor
+    func testOnlyTheControlPlaneHostIsCarriedAndItsPlanIsFencedByTheSelection() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        try await harness.signIn()
+
+        // An instance under somebody else's domain: its parent gets no plan,
+        // and the listener refuses it.
+        try await harness.select("instance-under-other")
+        let port = try harness.listenerPort(since: baseline)
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "other.example"))))
+        let refused = LoopbackClient(port: port)
+        defer { refused.close() }
+        try await refused.send("CONNECT other.example:443 HTTP/1.1\r\nHost: other.example:443\r\n\r\n")
+        let answer = String(decoding: try await refused.receiveUntilClosed(), as: UTF8.self)
+        XCTAssertTrue(answer.hasPrefix("HTTP/1.1 403"), answer)
+        // The control plane's host is not a routed host's parent yet either.
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        XCTAssertNil(controller.plan(for: service))
+
+        try await harness.select("instance-under-service")
+        let plan = try XCTUnwrap(controller.plan(for: service))
         XCTAssertTrue(plan.isCurrent())
-        // Under the strict choice for the routed host too.
-        controller.setDirectOnly(true, forInstanceURL: try XCTUnwrap(URL(string: "https://\(routed)")))
-        XCTAssertNotNil(try XCTUnwrap(controller.plan(for: parent)).openPublic)
-        // Nothing else that no route lists gets a plan.
-        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "other.avibe.example"))))
+        // The selection ends: what was planned under it is no longer current.
+        controller.runtimeDidStop()
+        XCTAssertFalse(plan.isCurrent())
+        // A sibling of the instance and an unrelated host never get a plan.
+        XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "else.service.example"))))
         XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "example.org"))))
     }
 
@@ -2603,6 +2649,7 @@ private final class Harness {
         timing: timing,
         notificationCenter: notifications,
         pathUse: pathUse,
+        controlPlaneHost: Harness.controlPlaneHost,
         onStatusChanged: { [unowned self] in
             self.announcements += 1
             let status = self.status("instance-1")
@@ -2790,6 +2837,9 @@ private final class Harness {
         )
     }
 
+    /// The control plane's host in these tests, as avibe.bot is in the App.
+    static let controlPlaneHost = "service.example"
+
     static func session(accountID: String) -> MobileSessionSnapshot {
         func instance(_ id: String, _ url: String) -> MobileInstance {
             let url = URL(string: url)!
@@ -2810,6 +2860,10 @@ private final class Harness {
                 instance("instance-2", "https://instance-two.example"),
                 instance("instance-custom-port", "https://instance-three.example:8443"),
                 instance("instance-unqualified", "https://avibe-direct-test"),
+                // Under the control plane's host (`controlPlaneHost`), as an
+                // instance is under avibe.bot; and under another domain.
+                instance("instance-under-service", "https://team.\(controlPlaneHost)"),
+                instance("instance-under-other", "https://app.other.example"),
             ]
         )
     }

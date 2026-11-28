@@ -49,9 +49,11 @@ struct DirectAuthority: Equatable, Sendable {
     /// parent always did, and `excludedDomains` with the parent took the
     /// routed host off the route with it). Refusing the parent was harmless
     /// only while the route allowed fail-over. Under 「仅直连和中继」 it does
-    /// not, and the page's requests to avibe.bot (voice) failed. So the
-    /// listener carries it: straight to that host through the public opener
-    /// and its address policy, on port 443, never over the direct path.
+    /// not, and the page's requests to avibe.bot (voice) failed.
+    ///
+    /// Being a parent is spelling, not ownership: the parent of a routed
+    /// host can be anyone's. The controller carries one only when it is
+    /// also the control plane's own host (`DirectPathController.plan`).
     static func isParentDomain(_ host: String, ofAny routed: some Sequence<String>) -> Bool {
         host.contains(".") && routed.contains { name in
             name.firstIndex(of: ".").map { name[name.index(after: $0)...] == host } ?? false

@@ -808,13 +808,18 @@ conforms to. Without a conforming controller the App offers neither:
   tells the page as a closure. The page opens its stream again and catches
   up, on the link. Until 2026-11-28 the view was reloaded instead, at every
   open and every return to the foreground.
-- **The parent domain.** WebKit sends a route's proxy the parent domain of
-  a routed host too (`avibe.bot` for an instance under it; measured
-  2026-11-28). The listener carries exactly that host, on port 443, to the
-  host itself through the public opener and its address policy, under every
-  choice, never over the direct path and in no count of the instance's
-  connections. It refused it before, which only fail-over hid: under
-  「仅直连和中继」 the page's requests to avibe.bot (voice) failed.
+- **The control plane's host.** WebKit sends a route's proxy the parent
+  domain of a routed host too (`avibe.bot` for an instance under it;
+  measured 2026-11-28, and `excludedDomains` cannot keep it off without
+  taking the instance's host off the route). The listener refused it, which
+  only fail-over hid: under 「仅直连和中继」 the page's requests to avibe.bot
+  (voice) failed. Now the listener carries one host that has no route of
+  its own: the control plane's host, only while it is exactly the parent
+  domain of a routed host. It goes to that host itself, on port 443,
+  through the public opener and its address policy, under every choice,
+  never over the direct path, in no count of the instance's connections,
+  and fenced by the selection and account like any other plan. The parent
+  of an instance on any other domain is refused as before.
 - **What does not work under it.** A request the App makes for the instance
   after it left the foreground: the listener is closed there and the route
   has no fail-over. Today that is the Lock Screen card's registration when
