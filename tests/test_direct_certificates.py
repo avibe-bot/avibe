@@ -906,14 +906,27 @@ def test_server_settlement_write_failure_keeps_order_pollable_and_floor(setup, m
     assert not certificates._HostOrders.load(HOST).starts
 
 
-def test_server_floor_survives_repair_and_is_checked_at_final_admission(setup, monkeypatch):
+@pytest.mark.parametrize('fail_suffix', [None, '.floor', '.json'])
+def test_server_floor_survives_repair_and_is_checked_at_final_admission(setup, monkeypatch, fail_suffix):
     env = setup
     queued = env.client.poll(allowed=True)
     fp, = env.backend.orders
     floor = queued.next_poll_at + 8 * 3600
     env.backend.advance_response = dict(status='failed', public_key_fingerprint=fp, certificate_pem=None,
                                         failure_origin='server', retry_at=datetime.fromtimestamp(floor, timezone.utc).isoformat())
-    assert due(env, queued).next_poll_at == floor
+    original = certificates.write_atomic
+    if fail_suffix:
+        target = certificates._HostOrders.path(HOST).with_suffix(fail_suffix)
+        def fail_target(path, data, **kwargs):
+            if path == target:
+                raise OSError('synthetic settlement write failure')
+            return original(path, data, **kwargs)
+        monkeypatch.setattr(certificates, 'write_atomic', fail_target)
+    result = due(env, queued)
+    assert result.next_poll_at == floor
+    assert result.status == ('pending' if fail_suffix else 'failed')
+    monkeypatch.setattr(certificates, 'write_atomic', original)
+    prior_starts = certificates._HostOrders.load(HOST).starts
     discard_direct_certificates()
     env.config.remote_access.vibe_cloud.instance_secret = 'replacement-fixture'
     env.config.save()
@@ -930,7 +943,7 @@ def test_server_floor_survives_repair_and_is_checked_at_final_admission(setup, m
     monkeypatch.setattr(certificates, '_save', rewind_after_intent)
     waiting = env.client.poll(allowed=True)
     assert waiting.next_poll_at >= floor and len(env.backend.calls) == calls
-    assert certificates._HostOrders.load(HOST).starts == []
+    assert certificates._HostOrders.load(HOST).starts == prior_starts
     assert due(env, waiting).status == 'queued' and env.backend.calls[-1][1] == 'certificates/orders'
 
 

@@ -167,12 +167,10 @@ class _HostOrders:
                    self.starts[-1] + _OPAQUE_FAILURE_GAP if self.starts else 0,
                    self.starts[0] + _ORDER_WINDOW if len(self.starts) == _ORDER_LIMIT else 0)
 
-    @classmethod
-    def replacement_floor(cls, hostname: str) -> float:
-        # Separate from pairing/key state, and from the fixed-shape ledger
-        # older clients must still be able to read on downgrade.
+    @staticmethod
+    def _read_floor(path: Path) -> float:
         try:
-            value = json.loads(_read_private(cls.path(hostname).with_suffix('.floor'), 128))
+            value = json.loads(_read_private(path, 128))
         except FileNotFoundError:
             return 0.0
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -180,9 +178,24 @@ class _HostOrders:
         return value
 
     @classmethod
+    def replacement_floor(cls, hostname: str) -> float:
+        # Both files contain only an absolute time. Neither belongs to a key
+        # or pairing; a replacement must honor the later readable floor.
+        path = cls.path(hostname)
+        return max(cls._read_floor(path.with_suffix('.floor')), cls._read_floor(path.with_suffix('.recovery')))
+
+    @classmethod
     def defer_replacement(cls, hostname: str, floor: float) -> None:
-        if floor > cls.replacement_floor(hostname):
-            write_atomic(cls.path(hostname).with_suffix('.floor'), json.dumps(floor))
+        if floor <= cls.replacement_floor(hostname):
+            return
+        path = cls.path(hostname)
+        try:
+            write_atomic(path.with_suffix('.floor'), json.dumps(floor))
+        except OSError:
+            # Leave the order pollable and the reservation intact. The manifest
+            # alone is insufficient: a re-pair can delete it before that poll.
+            write_atomic(path.with_suffix('.recovery'), json.dumps(floor))
+            raise
 
     def start_deadline(self, hostname: str) -> float:
         return max(self.deadline(), self.replacement_floor(hostname))
