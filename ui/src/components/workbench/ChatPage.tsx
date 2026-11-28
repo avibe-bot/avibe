@@ -6942,11 +6942,11 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div data-message-id={message.id} className={rowClass('justify-start')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
-          <div className="flex items-center gap-2 px-0.5">
+          <div className="flex max-w-full min-w-0 items-center gap-2 px-0.5">
             <RoleAvatar tone="cyan"><Clock /></RoleAvatar>
             {/* Label and source title read as one phrase ("From · <title>"), so they
                 sit in a tight cluster; the parent gap only spaces avatar ↔ cluster. */}
-            <span className="inline-flex min-w-0 items-center gap-1">
+            <span className="flex min-w-0 items-center gap-1">
               {triggerLink?.kind === 'harness' ? (
                 // A9b: task/watch label deep-links to the Harness filtered view.
                 <button

@@ -279,6 +279,10 @@ describe('Agent reply Session & Bot mentions in Markdown', () => {
     const headerChip = collapsedContainer.querySelector('a[data-session-mention="ses_product"]');
     expect(headerChip?.getAttribute('href')).toBe('/chat/ses_product');
     expect(headerChip?.textContent).toBe('#产品伙伴');
+    // Header row constrains width so long Session chips truncate inside the bubble column at 320px.
+    const headerRow = headerChip?.closest('div');
+    expect(headerRow?.className).toContain('max-w-full');
+    expect(headerRow?.className).toContain('min-w-0');
     const toggleBtn = collapsedContainer.querySelector('button[aria-expanded="false"]');
     expect(toggleBtn?.textContent).toContain('登录跳转修复');
     expect(toggleBtn?.textContent).toContain('@产品伙伴');
