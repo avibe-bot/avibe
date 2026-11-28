@@ -5107,7 +5107,8 @@ extension NavigationPolicyTests {
     /// The cached page asks the instance for its session once. A signed-in
     /// answer ends the open, and the instance's page as it is now is
     /// compared with the one shown: if it changed, the stored entry is
-    /// dropped (the next launch loads live). An answer that needs sign-in,
+    /// dropped (the next launch loads live) and the live page replaces the
+    /// cached one now. An answer that needs sign-in,
     /// or none, loads the instance live, which signs in natively as any
     /// first load does.
     @MainActor
@@ -5169,6 +5170,11 @@ extension NavigationPolicyTests {
                 try await waitUntil { documents.count >= 1 }
                 if row.drops {
                     try await waitUntil { removed == 1 }
+                    // Another build: the live page replaces the cached one.
+                    try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
+                    let webView = try primaryWebView(of: controller)
+                    let title = try await webView.evaluateJavaScript("document.title") as? String
+                    XCTAssertEqual(title, "new build", row.name)
                 } else {
                     let clock = ContinuousClock()
                     let settled = clock.now.advanced(by: .seconds(2))
@@ -5176,8 +5182,8 @@ extension NavigationPolicyTests {
                         try await Task.sleep(for: .milliseconds(50))
                     }
                     XCTAssertEqual(removed, 0, row.name)
+                    XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
                 }
-                XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
             } else {
                 try await waitUntil { documents.count >= 1 }
                 try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
@@ -5187,17 +5193,197 @@ extension NavigationPolicyTests {
         }
     }
 
+    /// A cached page of another build than the instance's is replaced by the
+    /// live page through the load gate: held while the gate is held, with the
+    /// cached page on screen and nothing failed, then made once when it
+    /// opens. The same build is replaced once a launch: a second runtime of
+    /// that instance showing the same stale page keeps it.
+    @MainActor
+    func testAStaleCachedPageIsReplacedOnceThroughTheLoadGate() async throws {
+        let cached = "<!doctype html><title>cached</title>"
+        let documents = LockedCounter()
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session":
+                return .json(#"{"authenticated":true}"#)
+            case "/":
+                _ = documents.next()
+                return .html("<!doctype html><title>new build</title>")
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let page = RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(cached.utf8),
+            capturedAt: Date()
+        )
+        var gate = DirectLoadGate.open
+        var removed = 0
+        var connected = 0
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            directLoadGate: { gate },
+            runtimeNavigationChanged: { event in
+                events.append(event)
+                // The cached page is up: from here the gate is held (the
+                // listener being bound again, say).
+                if event.stage == .finished, event.fromCache { gate = .held }
+            },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }, remove: { removed += 1 }),
+            cachedPageConnected: { connected += 1 },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+        try await waitUntil { connected == 1 }
+        try await waitUntil { removed == 1 }
+        // Held: the comparison's own fetch only, and the cached page stays.
+        let clock = ContinuousClock()
+        let quiet = clock.now.advanced(by: .seconds(1))
+        while clock.now < quiet {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(documents.count, 1)
+        XCTAssertFalse(events.contains { !$0.fromCache && $0.stage != .finished })
+        let webView = try primaryWebView(of: controller)
+        var title = try await webView.evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "cached")
+
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
+        title = try await webView.evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "new build")
+        // The comparison's fetch, the live load, and the capture of the live
+        // page that follows it (`capturePage`).
+        try await waitUntil { documents.count == 3 }
+        XCTAssertFalse(events.contains { $0.stage == .failed })
+        // Asked again, nothing more is loaded.
+        controller.directAvailabilityDidChange()
+        let after = clock.now.advanced(by: .seconds(1))
+        while clock.now < after {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(documents.count, 3)
+        XCTAssertEqual(events.filter { $0.stage == .started && !$0.fromCache }.count, 1)
+
+        // The same stale build again in this launch: kept.
+        var secondConnected = 0
+        var secondEvents: [RuntimeNavigationEvent] = []
+        var secondRemoved = 0
+        let second = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            runtimeNavigationChanged: { secondEvents.append($0) },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }, remove: { secondRemoved += 1 }),
+            cachedPageConnected: { secondConnected += 1 },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let secondWindow = host(second)
+        defer { secondWindow.isHidden = true }
+        try await waitUntil { secondConnected == 1 }
+        try await waitUntil { secondRemoved == 1 }
+        let settled = clock.now.advanced(by: .seconds(2))
+        while clock.now < settled {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertFalse(secondEvents.contains { $0.stage == .started && !$0.fromCache })
+        title = try await primaryWebView(of: second).evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "cached")
+    }
+
+    /// A replacement held by the gate past its window (15 s from the
+    /// instance's answer) is given up: when the gate opens, the
+    /// cached page stays and nothing more is loaded. Only the window differs
+    /// from `testAStaleCachedPageIsReplacedOnceThroughTheLoadGate`, where the
+    /// same opening replaces the page.
+    @MainActor
+    func testAReplacementHeldPastItsWindowIsGivenUp() async throws {
+        let cached = "<!doctype html><title>cached</title>"
+        let documents = LockedCounter()
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session":
+                return .json(#"{"authenticated":true}"#)
+            case "/":
+                _ = documents.next()
+                return .html("<!doctype html><title>held build</title>")
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let page = RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(cached.utf8),
+            capturedAt: Date()
+        )
+        var gate = DirectLoadGate.open
+        var removed = 0
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            directLoadGate: { gate },
+            runtimeNavigationChanged: { event in
+                events.append(event)
+                if event.stage == .finished, event.fromCache { gate = .held }
+            },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }, remove: { removed += 1 }),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+        try await waitUntil { removed == 1 }
+        // Past the window, the gate opens: nothing is replaced.
+        let clock = ContinuousClock()
+        let past = clock.now.advanced(by: WebViewController.staleReplacementWindow + .milliseconds(500))
+        while clock.now < past {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        gate = .open
+        controller.directAvailabilityDidChange()
+        let settled = clock.now.advanced(by: .seconds(1))
+        while clock.now < settled {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(documents.count, 1, "only the comparison's own fetch")
+        XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache })
+        let title = try await primaryWebView(of: controller).evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "cached")
+    }
+
     /// The Web UI's own declaration that it keeps its shell (a replayable
     /// outcome; ui/src/lib/bootSession.ts), as an inline script.
     private static let replayedShell =
         #"<script>document.documentElement.dataset.avibeReplayedShell = '1'</script>"#
 
+    private static func markedCachedBody(head: String) -> String {
+        #"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#
+            + head + "</head>"
+    }
+
     private static func markedCachedPage(_ origin: WebOrigin, head: String) -> RuntimeCachedPage {
         RuntimeCachedPage(
             url: origin.url,
             headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#.utf8
-                + Data(head.utf8) + Data("</head>".utf8)),
+            body: Data(markedCachedBody(head: head).utf8),
             capturedAt: Date(),
             keepsShellUnreachable: true
         )
@@ -5219,8 +5405,10 @@ extension NavigationPolicyTests {
             case "/api/session":
                 return reachable.value ? .json(#"{"authenticated":true}"#) : .status(530)
             case "/":
+                // The same build as the cached page: once connected, the
+                // currency check finds it current and nothing replaces it.
                 _ = documents.next()
-                return .html("<!doctype html><title>live</title>")
+                return .html(Self.markedCachedBody(head: Self.replayedShell))
             case "/no-content":
                 return LocalHTTPResponse(
                     status: 204,

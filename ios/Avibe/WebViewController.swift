@@ -1,3 +1,4 @@
+import CryptoKit
 import SafariServices
 import UIKit
 import WebKit
@@ -674,6 +675,24 @@ final class WebViewController: UIViewController {
     private var shownCachedPage: RuntimeCachedPage?
     /// The live navigation response's headers, for the capture after it.
     private var liveDocumentHeaders: [String: String]?
+    /// The cached page turned out to be another build than the instance's:
+    /// the live page replaces it once the load gate is open (held meanwhile,
+    /// as `hasPendingAutoLoad` holds a load).
+    private var hasPendingStaleReplacement = false
+    /// Until when a held replacement may still be made: `staleReplacementWindow`
+    /// from the instance's answer. Past it, it is given up for this launch.
+    private var staleReplacementDeadline: ContinuousClock.Instant?
+    /// How long after the instance answered a held replacement may still be
+    /// made (Product, 11-29). A replacement made later would come in the
+    /// middle of use.
+    static let staleReplacementWindow: Duration = .seconds(15)
+    /// The live navigation replacing a stale cached page. Until it commits,
+    /// the cached page stays on screen; a failure leaves it as it was.
+    private var staleReplacementNavigation: WKNavigation?
+    /// Instance builds (origin and the page's digest) whose stale cached page
+    /// this process has replaced once: never twice for the same build in a
+    /// launch, whatever happens to the replacement.
+    private static var replacedStaleBuilds: Set<String> = []
     private var cachedPageProbe: Task<Void, Never>?
     private static let pageCacheWorld = WKContentWorld.world(name: "avibe-page-cache")
     private let accountFallbackVisibilityChanged: (Bool) -> Void
@@ -1414,8 +1433,10 @@ final class WebViewController: UIViewController {
 
     /// Once the instance answered for a cached page: its response to the same
     /// URL now. Anything different from what was shown (bytes, status or a
-    /// security header) drops the entry, so the next launch loads live and
-    /// captures the current page.
+    /// security header) is another build of the instance's page: the entry
+    /// is dropped, so the next launch loads live and captures the current
+    /// page, and the live page replaces the cached one now, once
+    /// (`replaceStaleCachedPage`).
     private func checkCachedPageIsCurrent(in webView: WKWebView) {
         guard let shown = shownCachedPage, let pageCache else { return }
         Task { @MainActor [weak self, weak webView] in
@@ -1426,8 +1447,48 @@ final class WebViewController: UIViewController {
                 shown, status: fresh.status, fetched: fresh.headers, body: fresh.body
             ) {
                 pageCache.remove()
+                let build = self.instanceOrigin.serialized + " "
+                    + SHA256.hash(data: fresh.body).map { String(format: "%02x", $0) }.joined()
+                guard !Self.replacedStaleBuilds.contains(build) else { return }
+                Self.replacedStaleBuilds.insert(build)
+                self.hasPendingStaleReplacement = true
+                self.staleReplacementDeadline = ContinuousClock.now.advanced(by: Self.staleReplacementWindow)
+                self.replaceStaleCachedPage()
             }
         }
+    }
+
+    /// The cached page is another build than the instance's: the live page
+    /// at the same URL replaces it, through the load gate as every load the
+    /// shell starts (held until the gate opens, then made once). No cover
+    /// goes up: the cached page stays on screen until the live document
+    /// commits, and a load that fails leaves it as it was. Not while the
+    /// view shows anything but the instance's own document, nor once a live
+    /// document has replaced the cached one anyway.
+    private func replaceStaleCachedPage() {
+        guard hasPendingStaleReplacement else { return }
+        guard
+            !isInvalidatedForAccountTransition,
+            cachedNavigation != nil,
+            let webView = retainedWebView,
+            let url = instancePageURL
+        else {
+            hasPendingStaleReplacement = false
+            return
+        }
+        guard staleReplacementDeadline.map({ ContinuousClock.now < $0 }) ?? true else {
+            // Held past its window: given up for this launch. The cache entry
+            // is already dropped, so the next launch loads live.
+            hasPendingStaleReplacement = false
+            return
+        }
+        guard (directLoadGate?() ?? .open) == .open else {
+            // Held: decided again when the gate changes, within the window.
+            return
+        }
+        hasPendingStaleReplacement = false
+        directInstanceLoad?()
+        staleReplacementNavigation = webView.load(URLRequest(url: url))
     }
 
     /// The instance's response to its root URL, fetched from the page's own
@@ -1470,6 +1531,7 @@ final class WebViewController: UIViewController {
     /// again from the gate as it is now: loaded once when it is open (the
     /// bit is consumed first), dropped under the fault, kept while held.
     func directAvailabilityDidChange() {
+        replaceStaleCachedPage()
         guard hasPendingAutoLoad else {
             return
         }
@@ -1990,7 +2052,7 @@ final class WebViewController: UIViewController {
         didFinishLoading()
     }
 
-    private func reportLoadFailure(_ error: Error, in webView: WKWebView) {
+    private func reportLoadFailure(_ error: Error, in webView: WKWebView, navigation: WKNavigation?) {
         let error = error as NSError
         guard error.domain != NSURLErrorDomain || error.code != NSURLErrorCancelled else {
             return
@@ -2001,6 +2063,16 @@ final class WebViewController: UIViewController {
         accountFallbackWorkItem?.cancel()
         accountFallbackWorkItem = nil
         accountFallbackVisibilityChanged(false)
+        // The load that was to replace a stale cached page failed before
+        // replacing it: that page stays as it was, with no failure shown (it
+        // works; it is only an older build). Not tried again in this launch.
+        if navigation != nil, navigation === staleReplacementNavigation {
+            staleReplacementNavigation = nil
+            // The cached page stays: its account fallback comes back as
+            // after any load of it.
+            scheduleAccountFallbackIfNeeded()
+            return
+        }
         // A live navigation from an uncovered cached page that failed before
         // replacing it leaves that page as it was.
         if !cachedPageUncovered {
@@ -2783,6 +2855,12 @@ extension WebViewController: WKNavigationDelegate {
                 // A live document replaced the cached page.
                 leaveCachedPage()
             }
+            if navigation !== staleReplacementNavigation {
+                // Another document committed first (the user's own
+                // navigation): nothing is left to replace.
+                hasPendingStaleReplacement = false
+            }
+            staleReplacementNavigation = nil
             if let url = webView.url {
                 primaryNavigationDestination = navigationPolicy.destination(
                     for: url
@@ -2851,7 +2929,7 @@ extension WebViewController: WKNavigationDelegate {
         if isPrimaryWebView(webView) {
             primaryNavigationInProgress = false
         }
-        reportLoadFailure(error, in: webView)
+        reportLoadFailure(error, in: webView, navigation: navigation)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
@@ -2861,7 +2939,7 @@ extension WebViewController: WKNavigationDelegate {
         if isPrimaryWebView(webView) {
             primaryNavigationInProgress = false
         }
-        reportLoadFailure(error, in: webView)
+        reportLoadFailure(error, in: webView, navigation: navigation)
     }
 
     func webView(
@@ -2898,6 +2976,11 @@ extension WebViewController: WKNavigationDelegate {
             // page, not a live load of an instance that may be offline.
             let showsCachedPageAgain = cachedPageUncovered
             leaveCachedPage()
+            // A replacement of a stale cached page went with it too: the
+            // restart below loads live anyway, and a late failure of the
+            // dead load must not take the restart's settlement.
+            hasPendingStaleReplacement = false
+            staleReplacementNavigation = nil
             if showsCachedPageAgain {
                 hasUsedCache = false
             }
