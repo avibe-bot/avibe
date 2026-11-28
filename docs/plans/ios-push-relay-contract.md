@@ -1106,7 +1106,9 @@ against that captured endpoint even if native already reports `off`; a marker
 without an endpoint fails closed rather than choosing from endpoint history. A
 `revoked: false` result is shown as cleanup pending, while a bridge transport
 failure is shown as an unconfirmed cleanup failure; neither result permits
-automatic re-subscription. A later explicit enable clears the opt-out and
+automatic re-subscription. Each later reconcile replays a pending cleanup's
+unfinished parts, so a cleanup that native recovery has finished shows as off
+without a Retry; a failed one waits for the person's Retry. A later explicit enable clears the opt-out and
 re-enters the existing registration flow.
 
 ### 9.6 Logout and account switch
@@ -1115,15 +1117,19 @@ Before local account teardown, native freezes new push mutations, captures all
 active registration IDs and the current bind generation, persists the bounded
 bulk-revoke operation, increments the shared account generation, deletes old
 account key records, and best-effort removes pending and delivered
-notifications whose `kid` is in the captured set.
+notifications whose `kid` is in the captured set or whose `account_id` is the
+account leaving (a retired or revoked key's record may already be gone while
+its decrypted alert remains).
 
 Before sending the bulk revoke, native reconciles every already-sent
 registration create at the captured generation by retrying its persisted ID.
 Only then can a successful bulk response complete remote logout. If execution,
 authorization, or create reconciliation is unavailable, logout continues
 locally and the ordered create-then-revoke work remains pending. A later
-foreground opportunity uses the stable installation credential; it does not
-retain or recreate the old account cookie.
+foreground opportunity, signed in or still signed out, uses the stable
+installation credential; it does not retain or recreate the old account cookie.
+Signed out, that request holds no account operation, so a sign-in is never
+refused as busy because of it, and it turns nothing back on.
 
 For a new account, native persists a higher bind generation before sending the
 account-authenticated bind. The successful transaction changes ownership and

@@ -3881,12 +3881,48 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// A push update or a refresh the App runs on its own (as when the tap
+    /// brings it to the foreground) keeps the selection but holds the
+    /// account. The tap waits for it, as a shortcut does, up to
+    /// `selectionKeepingWait`, then opens once, unless meanwhile a newer open
+    /// was requested or the screen or the runtime changed.
     private func handlePushTap(_ tap: PushNotificationTap) {
         guard !holdsInstanceOpens else {
             pendingInstanceOpen = .pushTap(tap)
             return
         }
         instanceOpenRequest += 1
+        guard sessionCoordinator.isHeldBySelectionKeepingOperation else {
+            openTappedInstance(tap)
+            return
+        }
+        let request = instanceOpenRequest
+        let route = route
+        let identity = runtimeIdentity
+        Task { [weak self] in
+            await self?.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            guard
+                let self,
+                self.instanceOpenRequest == request,
+                self.route == route,
+                self.runtimeIdentity == identity
+            else {
+                return
+            }
+            guard !self.holdsInstanceOpens else {
+                // An open held meanwhile is newer: it stays the one that waits.
+                if self.pendingInstanceOpen == nil {
+                    self.pendingInstanceOpen = .pushTap(tap)
+                }
+                return
+            }
+            self.openTappedInstance(tap)
+        }
+    }
+
+    private func openTappedInstance(_ tap: PushNotificationTap) {
         guard openInstance(
             accountID: tap.accountID,
             instanceOrigin: tap.instanceOrigin,

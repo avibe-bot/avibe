@@ -1254,6 +1254,73 @@ describe('web push recovery', () => {
     expect(disabled.read()?.endpoint).toBe(endpoint);
   });
 
+  it('shows a deferred native cleanup as finished once the shell has completed it', async () => {
+    const localStorage = memoryStorage();
+    const disabled = createNativePushDisabledIntentStore(localStorage.storage);
+    const endpoint = 'https://avibe.bot/api/push/apns/deferred';
+    // The relay revoke is first left pending; the shell's own foreground
+    // recovery then finishes it, so the record is gone when asked again.
+    const nativeRevoke: Array<'pending' | 'not_needed'> = ['pending', 'pending', 'not_needed'];
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return {
+          state: 'on' as const,
+          revokeState: 'active' as const,
+          endpoint,
+          keys: { p256dh: 'key', auth: 'auth' },
+        };
+      }
+      if (method === 'push.unsubscribe') {
+        const revoke = nativeRevoke.shift() ?? 'not_needed';
+        return { revoked: revoke !== 'pending', revoke };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: localStorage.storage,
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      unsubscribeWebPush: vi.fn(async () => ({ ok: true, disabled: true })),
+      subscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(disableWebPush(api, disabled)).resolves.toMatchObject({
+      status: 'pending',
+      instanceCleanup: 'confirmed',
+      nativeRevoked: 'pending',
+    });
+    // Still pending in the shell: the control keeps saying so.
+    await expect(reconcileWebPush(api, pendingRegistrationStore(), disabled))
+      .resolves.toMatchObject({ status: 'disable_pending' });
+    // Finished in the shell: the next reconcile shows it off, without a Retry.
+    await expect(reconcileWebPush(api, pendingRegistrationStore(), disabled))
+      .resolves.toMatchObject({ status: 'disabled' });
+    expect(disabled.read()).toMatchObject({
+      endpoint,
+      instanceCleanup: 'confirmed',
+      nativeRevoke: 'not_needed',
+    });
+    await expect(reconcileWebPush(api, pendingRegistrationStore(), disabled))
+      .resolves.toMatchObject({ status: 'disabled' });
+    expect(api.unsubscribeWebPush).toHaveBeenCalledOnce();
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      'push.status',
+      'push.unsubscribe',
+      'push.unsubscribe',
+      'push.unsubscribe',
+    ]);
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+  });
+
   it('re-posts an existing native subscription when the instance is disabled', async () => {
     vi.stubGlobal('window', {
       avibeNative: {

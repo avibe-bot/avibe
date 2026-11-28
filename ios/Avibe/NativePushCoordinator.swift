@@ -184,6 +184,7 @@ final class NativePushCoordinator {
     private var mutationTask: Task<Void, Never>?
     private var providerPatchTask: Task<Void, Error>?
     private var recoveryTask: Task<Void, Never>?
+    private var signedOutCleanupTask: Task<Void, Never>?
     private var mutationsInFlight = 0
 
     /// The live coordinator, so voice capture can tell whether push work is
@@ -192,7 +193,8 @@ final class NativePushCoordinator {
 
     /// Registration, a provider patch, a recovery or a mutation under way.
     var hasWorkInFlight: Bool {
-        mutationsInFlight > 0 || providerPatchTask != nil || recoveryTask != nil || !tokenWaiters.isEmpty
+        mutationsInFlight > 0 || providerPatchTask != nil || recoveryTask != nil
+            || signedOutCleanupTask != nil || !tokenWaiters.isEmpty
     }
 
     init(
@@ -270,6 +272,7 @@ final class NativePushCoordinator {
         mutationTask?.cancel()
         providerPatchTask?.cancel()
         recoveryTask?.cancel()
+        signedOutCleanupTask?.cancel()
         for waiter in tokenWaiters.values {
             waiter.timeoutTask?.cancel()
             waiter.continuation?.resume(throwing: NativePushError.unavailable)
@@ -308,6 +311,7 @@ final class NativePushCoordinator {
     @objc
     private func applicationDidBecomeActive() {
         guard accountProvider() != nil else {
+            startSignedOutCleanup()
             return
         }
         resumeAfterAccountActivation()
@@ -738,12 +742,15 @@ final class NativePushCoordinator {
         installation.pendingBulkRevokeReason = reason.rawValue
         try? keychain.saveInstallation(installation)
         advanceAccountGeneration()
-        let notificationKids = (try? keychain.listRecords())
-            .map {
-                $0.filter {
-                    $0.bindGeneration <= throughBindGeneration
-                }.map(\.kid)
-            } ?? []
+        let formerRecords = ((try? keychain.listRecords()) ?? []).filter {
+            $0.bindGeneration <= throughBindGeneration
+        }
+        let notificationKids = formerRecords.map(\.kid)
+        // A decrypted alert names its account; its key record may already be
+        // gone (a retired key past its deadline, a confirmed revoke).
+        let notificationAccountIDs = Set(
+            formerRecords.map(\.accountID) + [installation.accountID].compactMap { $0 }
+        )
 
         let createsReconciled =
             (try? await reconcileRegistrationCreates(
@@ -757,6 +764,7 @@ final class NativePushCoordinator {
         )
         await Self.removeNotifications(
             forKids: notificationKids,
+            accountIDs: notificationAccountIDs,
             center: notificationCenter
         )
         if let latest = try? keychain.loadInstallation() {
@@ -1345,6 +1353,52 @@ final class NativePushCoordinator {
         }
     }
 
+    /// Signed out, a return to the foreground still finishes what a sign-out
+    /// or a reinstall left owed to the relay (the installation's bulk revoke,
+    /// an orphaned installation, a pending revoke), with the installation's
+    /// own credential. It turns nothing on: APNs registration, the provider
+    /// and every subscription wait for a sign-in.
+    private func startSignedOutCleanup() {
+        guard signedOutCleanupTask == nil, hasPendingInstallationCleanup() else {
+            return
+        }
+        signedOutCleanupTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            defer { self.signedOutCleanupTask = nil }
+            _ = try? await self.enqueueMutation {
+                guard
+                    self.accountProvider() == nil,
+                    let installation = try? self.loadOrCreateInstallation()
+                else {
+                    return
+                }
+                try? await self.reconcileOrphanedInstallations()
+                try? await self.reconcilePersistedBulkRevoke(for: installation)
+                try? await self.reconcilePendingRevokes(for: installation)
+            }
+        }
+    }
+
+    private func hasPendingInstallationCleanup() -> Bool {
+        if let orphans = try? keychain.loadOrphanedInstallations(), !orphans.isEmpty {
+            return true
+        }
+        guard let installation = try? keychain.loadInstallation() else {
+            return false
+        }
+        // One from before a reinstall becomes an orphan revoke.
+        if installationMarker.installationID != installation.installationID
+            || (installation.pendingBulkRevokeThroughGeneration ?? 0) > 0
+        {
+            return true
+        }
+        return (try? keychain.listRecords().contains {
+            $0.state == .retiring && $0.pendingRevoke
+        }) == true
+    }
+
     private func reconcileOrphanedInstallations() async throws {
         var orphans = try keychain.loadOrphanedInstallations()
         var remaining: [PushOrphanedInstallation] = []
@@ -1470,24 +1524,21 @@ final class NativePushCoordinator {
 
     private static func removeNotifications(
         forKids kids: [String],
+        accountIDs: Set<String>,
         center: PushNotificationCentering
     ) async {
         let kidSet = Set(kids)
-        guard !kidSet.isEmpty else {
+        guard !kidSet.isEmpty || !accountIDs.isEmpty else {
             return
+        }
+        let matches = { (entry: PushNotificationCenterEntry) -> Bool in
+            containsCapturedKid(kidSet, in: entry.userInfo)
+                || (entry.userInfo["account_id"] as? String).map { accountIDs.contains($0) } == true
         }
         let delivered = await center.deliveredNotifications()
         let pending = await center.pendingNotificationRequests()
-        let deliveredIDs = delivered.compactMap { entry in
-            containsCapturedKid(kidSet, in: entry.userInfo)
-                ? entry.identifier
-                : nil
-        }
-        let pendingIDs = pending.compactMap { entry in
-            containsCapturedKid(kidSet, in: entry.userInfo)
-                ? entry.identifier
-                : nil
-        }
+        let deliveredIDs = delivered.filter(matches).map(\.identifier)
+        let pendingIDs = pending.filter(matches).map(\.identifier)
         center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
         center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
     }

@@ -1380,7 +1380,14 @@ async function reconcileWebPushOnce(
       };
       const disabledRecord = intentStore.read();
       if (disabledRecord) {
-        const disabledStatus = nativePushCleanupStatus(disabledRecord);
+        let disabledStatus = nativePushCleanupStatus(disabledRecord);
+        if (disabledStatus === 'pending') {
+          // Cleanup still under way (the shell retries a pending relay revoke on
+          // its own) is asked again, so a finished one does not keep showing as
+          // pending; a failed one waits for the person's Retry.
+          disabledStatus = await disableNativeWebPushOnce(api, intentStore, intent)
+            .then((result) => result.status, () => disabledStatus);
+        }
         return {
           support,
           status: disabledStatus === 'disabled'

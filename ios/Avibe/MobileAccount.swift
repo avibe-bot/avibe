@@ -1733,27 +1733,21 @@ final class MobileSessionCoordinator {
         return .signedOut
     }
 
+    /// A push-management request holds the account as an operation that
+    /// keeps the selection, except in two cases where it holds nothing: in a
+    /// push logout, which already holds it, and signed out with nothing
+    /// running, when only revokes a sign-out left owed are sent (with the
+    /// installation's credential) and a sign-in started meanwhile must not be
+    /// refused as busy. A sign-in that replaces the store ends such a
+    /// request; the revoke stays owed.
     func pushManagementRequest(
         _ request: PushManagementRequest
     ) async throws -> PushManagementResponse {
         if case .pushLogout = phase {
-            let requestGeneration = generation
-            let operationToken = transportOperationToken ?? UUID()
-            let ownsTransport = transportOperationToken == nil
-            ensureTransport()
-            if ownsTransport {
-                transportOperationToken = operationToken
-            }
-            defer {
-                if ownsTransport {
-                    finishTransportOperation(operationToken)
-                }
-            }
-            let response = try await requireTransport().pushManagementRequest(
-                request
-            )
-            try requireCurrentGeneration(requestGeneration)
-            return response
+            return try await pushManagementRequestHoldingNothing(request)
+        }
+        if snapshot == nil, phase == .ready {
+            return try await pushManagementRequestHoldingNothing(request)
         }
         return try await runExclusive(keepingSelection: true) {
             let requestGeneration = self.generation
@@ -1764,6 +1758,28 @@ final class MobileSessionCoordinator {
             try self.requireCurrentGeneration(requestGeneration)
             return response
         }
+    }
+
+    private func pushManagementRequestHoldingNothing(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse {
+        let requestGeneration = generation
+        let operationToken = transportOperationToken ?? UUID()
+        let ownsTransport = transportOperationToken == nil
+        ensureTransport()
+        if ownsTransport {
+            transportOperationToken = operationToken
+        }
+        defer {
+            if ownsTransport {
+                finishTransportOperation(operationToken)
+            }
+        }
+        let response = try await requireTransport().pushManagementRequest(
+            request
+        )
+        try requireCurrentGeneration(requestGeneration)
+        return response
     }
 
     private func completeSecondFactor(
