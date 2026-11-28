@@ -1525,7 +1525,6 @@ def test_opencode_poll_aborts_disabled_question_toolcall():
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -1716,7 +1715,6 @@ def test_opencode_poll_notifies_and_settles_on_assistant_error():
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -1822,7 +1820,6 @@ def test_opencode_poll_settles_error_when_trailing_user_is_last():
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -1944,7 +1941,6 @@ def test_opencode_poll_keeps_accepted_steer_pending_while_native_busy(monkeypatc
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -2047,7 +2043,6 @@ def test_opencode_poll_uses_snapshot_live_flag_instead_of_rereading_status(monke
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -2153,7 +2148,6 @@ def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypat
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -2268,7 +2262,6 @@ def test_opencode_poll_keeps_awaiting_boundary_pending_before_followup_appears(m
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -2343,7 +2336,6 @@ def test_opencode_poll_does_not_settle_error_while_followup_has_parts():
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -2458,7 +2450,6 @@ def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
             request,
             _Server(),
             "oc-session",
-            agent_to_use=None,
             model_dict={"providerID": "glm", "modelID": "glm-5.2"},
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -2470,8 +2461,8 @@ def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
     assert emitted == []
 
 
-def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
-    """A restored poll must emit the backend error, not (No response)."""
+def test_opencode_restored_poll_settles_error_immediately(monkeypatch):
+    """A restored poll fails immediately on an assistant error, not (No response)."""
 
     monkeypatch.setattr(
         "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
@@ -2520,7 +2511,11 @@ def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
             return None
 
     class _Server:
+        def __init__(self):
+            self.list_calls = 0
+
         async def list_messages(self, session_id, directory):
+            self.list_calls += 1
             return [
                 {
                     "info": {
@@ -2578,6 +2573,7 @@ def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
     terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server))
 
     assert terminal is True
+    assert server.list_calls == 1
     assert removed == []
     assert any(item[0] == "result" and item[2] is True for item in emitted)
     assert all("No response from OpenCode" not in str(item) for item in results)
@@ -2954,7 +2950,6 @@ def test_opencode_active_turn_poll_propagates_cancellation_without_settlement():
                 request,
                 _Server(),
                 "oc-cancelled",
-                agent_to_use=None,
                 model_dict=None,
                 reasoning_effort=None,
                 baseline_message_ids=set(),
@@ -3038,7 +3033,6 @@ def test_opencode_prompt_poll_has_no_wall_clock_deadline(monkeypatch):
             request,
             _Server(),
             "oc-no-deadline",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -3139,7 +3133,6 @@ def test_opencode_prompt_poll_settles_after_consecutive_transport_failures(
             request,
             _Server(),
             "oc-transport-dead",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),
@@ -3238,7 +3231,6 @@ def test_opencode_prompt_poll_transport_failure_counter_resets_on_recovery(
             request,
             _Server(),
             "oc-transport-recovered",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),

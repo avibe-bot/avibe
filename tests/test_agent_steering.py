@@ -2543,7 +2543,6 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
                 primary,
                 poll_server,
                 "opencode-session",
-                agent_to_use="build",
                 model_dict={"providerID": "openai", "modelID": "gpt-5"},
                 reasoning_effort="high",
                 baseline_message_ids=set(),
