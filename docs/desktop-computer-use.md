@@ -218,7 +218,7 @@ is stable across observations, and its screenshot or accessibility tree is
 usable. It does not wait a fixed time after launching an application.
 Irreversible external effects, such as sending, paying, or deleting, have the
 agent verify the state, end the Turn and ask the user in ordinary words, then
-verify again and act once they answer.
+verify again and act only if they agree.
 
 `observe window` and `zoom` can write screenshots to a caller-selected path.
 Human output includes accessibility state and element tokens when available;

@@ -975,7 +975,7 @@ export default async ({ subject }) => {
     assert len(server.connection_ids) == 1  # type: ignore[attr-defined]
 
 
-def test_avibe_notify_returns_effect_and_confirm_is_absent(tmp_path: Path) -> None:
+def test_avibe_notify_returns_effect_and_exposes_notify_only(tmp_path: Path) -> None:
     payload, _server, requests = _run_node_script(
         tmp_path,
         """
@@ -983,16 +983,9 @@ import { avibe } from "@avibe/computer";
 
 export default async () => {
   const notify = await avibe.notify("Progress");
-  let confirmError = null;
-  try {
-    await avibe.confirm("Continue?");
-  } catch (error) {
-    confirmError = { name: error.name, message: error.message };
-  }
   return {
     notify,
-    hasConfirm: "confirm" in avibe,
-    confirmError,
+    keys: Object.keys(avibe),
   };
 };
 """,
@@ -1008,9 +1001,7 @@ export default async () => {
             "delivered_count": 1,
         },
     }
-    assert payload["result"]["hasConfirm"] is False
-    assert payload["result"]["confirmError"]["name"] == "TypeError"
-    assert "not a function" in payload["result"]["confirmError"]["message"]
+    assert payload["result"]["keys"] == ["notify"]
     assert [
         request["path"]
         for request in requests

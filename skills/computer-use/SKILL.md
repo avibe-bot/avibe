@@ -32,7 +32,7 @@ JS
    action did not happen. Observe before retrying; never retry blindly.
 5. **Pause before irreversible steps.** Before sending, paying, deleting, or
    anything else that cannot be undone, verify the state, end the Turn, and ask
-   the user in ordinary words, then verify again and act once they answer.
+   the user in ordinary words, then verify again and act only if they agree.
 
 Top-level `let` and `const` may be redeclared across calls in any order: the
 kernel evaluates `const` declarations as `let`, so they can also be reassigned.
@@ -129,7 +129,7 @@ await avibe.notify("Draft is ready");
 ## Saved flows with run
 
 Once a sequence is proven, save it as an ESM file that default-exports one
-async function and run it with `vibe computer run ./send-report.mjs --arg to=ana@example.com --arg body=@/tmp/body.txt`.
+async function and run it with `vibe computer run ./draft-report.mjs --arg to=ana@example.com --arg body=@/tmp/body.txt`.
 The function receives one object of string arguments (`@file` loads UTF-8
 text) and its JSON-serializable return value is the result:
 

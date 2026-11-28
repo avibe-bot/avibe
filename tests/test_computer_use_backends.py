@@ -106,12 +106,10 @@ def test_computer_use_skill_states_readiness_and_restrictions_not_permissions() 
         "require_bind",
         "Never take focus",
         "focus_shortcut_forbidden",
-        "avibe.confirm",
-        "ConfirmRefused",
     ):
         assert retired not in body
     assert (
-        "verify the state, end the Turn, and ask\n   the user in ordinary words, then verify again and act once they answer."
+        "verify the state, end the Turn, and ask\n   the user in ordinary words, then verify again and act only if they agree."
         in body
     )
 

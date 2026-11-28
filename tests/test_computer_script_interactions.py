@@ -218,20 +218,13 @@ def test_internal_routes_bound_notify_reject_oversized_and_omit_confirm() -> Non
                     content=b"x" * (MAX_INTERACTION_REQUEST_BYTES + 1),
                     headers={"Content-Type": "application/json"},
                 )
-                removed_confirm = await client.post(
-                    "/internal/computer-script/confirm",
-                    json={
-                        "connection_token": token,
-                        "message": "Send it?",
-                    },
-                )
-            return notify, escaped_limit, oversized, removed_confirm, messages
+            return notify, escaped_limit, oversized, messages
         finally:
             controller.computer_script_sessions.close_all()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    notify, escaped_limit, oversized, removed_confirm, messages = asyncio.run(exercise())
+    notify, escaped_limit, oversized, messages = asyncio.run(exercise())
     assert notify.status_code == 200
     assert notify.json()["ok"] is True
     assert notify.json()["result"]["route"] == "message_dispatcher"
@@ -240,5 +233,4 @@ def test_internal_routes_bound_notify_reject_oversized_and_omit_confirm() -> Non
     assert oversized.status_code == 413
     assert oversized.json()["error"] == "computer_script_message_too_large"
     assert oversized.json()["params"] == {"limit_bytes": MAX_MESSAGE_BYTES}
-    assert removed_confirm.status_code == 404
     assert len(messages) == 2

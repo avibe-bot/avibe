@@ -574,8 +574,8 @@ class Turn:
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
     computer_use_admission_closed: bool = False
-    #: ``SOURCE_HUMAN`` or ``SOURCE_SCHEDULED``: whether a person launched this
-    #: Turn, so attended-only capabilities such as script confirms can refuse.
+    #: ``SOURCE_HUMAN`` or ``SOURCE_SCHEDULED``: provenance recording whether a
+    #: person launched this Turn.
     source: str = SOURCE_HUMAN
 
 

@@ -112,7 +112,7 @@ Turn's Web or IM surface; an undelivered notify fails with
 
 Irreversible operations do not pause mid-script for an inline reply: the script
 stops before the irreversible step, the Agent ends the Turn and asks the user
-in ordinary words, and once the user answers the Agent verifies the state again
+in ordinary words, and if the user agrees the Agent verifies the state again
 and acts.
 
 ## Execution and runtime
