@@ -9054,7 +9054,8 @@ def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
     plans = []
 
     def explain(_conn, cursor, statement, parameters, *_):
-        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+        if "pragma_index" not in statement:  # the FIFO index key check is not a probe
+            plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
 
     with engine.connect() as conn:
         event.listen(conn, "before_cursor_execute", explain)
@@ -9090,7 +9091,8 @@ def test_fifo_probes_keep_the_ordered_index_when_statistics_favor_session_state(
     plans = []
 
     def explain(_conn, cursor, statement, parameters, *_):
-        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+        if "pragma_index" not in statement:  # the FIFO index key check is not a probe
+            plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
 
     with engine.connect() as conn:
         event.listen(conn, "before_cursor_execute", explain)
@@ -9115,8 +9117,9 @@ def test_fifo_probes_keep_the_ordered_index_when_statistics_favor_session_state(
         "(session_id, submitted_at, id) WHERE state = 'reserved'",
         "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries (session_id, submitted_at, id) "
         "WHERE state in ('reserved', 'Queued', 'claimed', 'pending_steer', 'steering', 'reconciling_steer')",
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries (submitted_at, id)",
     ],
-    ids=["dropped", "same_name_other_predicate", "same_name_other_literal"],
+    ids=["dropped", "same_name_other_predicate", "same_name_other_literal", "same_name_other_keys"],
 )
 def test_fifo_probes_read_an_admitted_layout_without_the_released_fifo_index(managers, replacement):
     """A newer schema may drop or redefine the optional index; the probe must still answer."""
@@ -9128,10 +9131,20 @@ def test_fifo_probes_read_an_admitted_layout_without_the_released_fifo_index(man
         conn.exec_driver_sql("DROP INDEX ix_message_deliveries_session_order")
         if replacement:
             conn.exec_driver_sql(replacement)
+    from sqlalchemy import event
+
+    plans = []
+
+    def explain(_conn, cursor, statement, parameters, *_):
+        if "FROM message_deliveries" in statement:
+            plans.append(" ".join(r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)))
+
     with engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", explain)
         assert delivery_store.ordering_head(conn, "ses_fsm")["id"] == first
         assert delivery_store.claimable_fifo_head(conn, "ses_fsm")["id"] == first
         assert [row["id"] for row in delivery_store.claimable_fifo_prefix(conn, "ses_fsm")] == [first, second]
+    assert plans and all("(session_id=?" in plan for plan in plans), plans  # a session seek, never a scan
     # The refused pinned statement leaves an open write transaction usable.
     with engine.begin() as conn:
         conn.exec_driver_sql("UPDATE message_deliveries SET dispatch_text = 'edited' WHERE id = ?", (second,))

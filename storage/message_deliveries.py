@@ -437,22 +437,39 @@ def _ordering_sql(*, include_claimable: bool, pinned: bool) -> TextualSelect:
     ).columns(*message_deliveries.c)
 
 
+_FIFO_INDEX_KEYS = [("session_id", 0, "BINARY"), ("submitted_at", 0, "BINARY"), ("id", 0, "BINARY")]
+_PIN_REFUSED = {f"no such index: {_FIFO_INDEX}", "no query solution"}
+
+
+def _fifo_index_has_released_keys(conn: Connection) -> bool:
+    # A compatible newer schema may redefine the index under the same name; only
+    # (session_id, submitted_at, id) ascending gives the session-bounded FIFO seek.
+    keys = conn.exec_driver_sql(
+        "SELECT x.name, x.desc, x.coll FROM pragma_index_list('message_deliveries') AS l "
+        "JOIN pragma_index_xinfo(l.name) AS x WHERE l.name = ? AND x.key = 1 ORDER BY x.seqno",
+        (_FIFO_INDEX,),
+    ).all()
+    return [tuple(key) for key in keys] == _FIFO_INDEX_KEYS
+
+
 def _ordering_rows(conn: Connection, session_id: str, *, include_claimable: bool = True) -> CursorResult[Any]:
     """Live rows in FIFO order, streamed from the partial FIFO index.
 
     Pinned because a planner (for example with statistics) can otherwise prefer
     ix_message_deliveries_session_state for the IN terms and sort the whole live
     set. The WHERE repeats the index predicate, which INDEXED BY needs for a
-    partial index. A compatible newer schema may drop or redefine the index; SQLite
-    then refuses the pinned statement while preparing it, before reading any row,
-    and the same query runs unpinned. A missing index costs a sort, never a wrong row.
+    partial index. The pin is used only when the index has the released keys; if
+    SQLite still refuses it while preparing (the index changed since the check, or
+    its predicate is not implied), nothing has been read and the same query runs
+    unpinned. A missing index costs a sort, never a wrong row.
     """
     params = {"session_id": session_id}
-    try:
-        return conn.execute(_ordering_sql(include_claimable=include_claimable, pinned=True), params)
-    except OperationalError as error:
-        if "no such index" not in str(error) and "no query solution" not in str(error):
-            raise
+    if _fifo_index_has_released_keys(conn):
+        try:
+            return conn.execute(_ordering_sql(include_claimable=include_claimable, pinned=True), params)
+        except OperationalError as error:
+            if str(error.orig) not in _PIN_REFUSED:
+                raise
     return conn.execute(_ordering_sql(include_claimable=include_claimable, pinned=False), params)
 
 
