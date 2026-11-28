@@ -22,6 +22,8 @@ const off: SourceFilterStatus = {
     after_search: { found: false, last_failure: null },
     before_fetch: { found: false, last_failure: null },
     after_fetch: { found: false, last_failure: null },
+    after_read: { found: false, last_failure: null },
+    after_bash: { found: false, last_failure: null },
   },
 };
 // On, with each state a script shows: found, not found (skipped), and a last run that failed.
@@ -32,6 +34,8 @@ const on: SourceFilterStatus = {
     before_search: { found: true, last_failure: null },
     after_search: { found: true, last_failure: null },
     before_fetch: { found: false, last_failure: null },
+    after_read: { found: true, last_failure: null },
+    after_bash: { found: false, last_failure: null },
     after_fetch: {
       found: true,
       last_failure: { at: new Date(DESIGN_NOW - 28 * 60_000).toISOString(), reason: 'it timed out after 600 s' },

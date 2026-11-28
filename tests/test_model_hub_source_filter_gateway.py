@@ -73,14 +73,15 @@ async def test_a_hook_key_serves_chat_completions_only_while_its_run_lasts(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["timeout", "cancel"])
-async def test_a_stopped_hook_retires_its_run_key(tmp_path, monkeypatch, stop):
+@pytest.mark.parametrize("name", ["after_search", "after_read", "after_bash"])
+async def test_a_stopped_hook_retires_its_run_key(tmp_path, monkeypatch, stop, name):
     """Longer run budgets must not keep a credential alive after timeout or user cancellation."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     folder = tmp_path / "home" / "hooks" / "source_filter"
     folder.mkdir(parents=True)
     ready = folder / "ready"
-    (folder / "after_search.py").write_text(
+    (folder / f"{name}.py").write_text(
         "import pathlib, time\npathlib.Path('ready').touch()\ntime.sleep(30)\n", encoding="utf-8",
     )
     service, gateway = _gateway(tmp_path)
@@ -96,7 +97,7 @@ async def test_a_stopped_hook_retires_its_run_key(tmp_path, monkeypatch, stop):
     hooks.gateway = capture_env
     if stop == "timeout":
         hooks.timeout = 0.5
-    task = asyncio.create_task(hooks.run("after_search", {"v": 1, "hook": "after_search"}))
+    task = asyncio.create_task(hooks.run(name, {"v": 1, "hook": name}))
     try:
         if stop == "cancel":
             async def wait_ready():

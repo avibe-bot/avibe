@@ -3331,7 +3331,7 @@
       "loadFailed": "Could not load the information cocoon. Try again.",
       "sourceFilter": {
         "title": "Information cocoon",
-        "summary": "Run your own scripts on Vibey's web search and web fetch.",
+        "summary": "Run your scripts on Vibey's web search, web fetch, file reads and command results.",
         "use": "Use information cocoon",
         "guide": "How to write scripts",
         "scripts": "Scripts",

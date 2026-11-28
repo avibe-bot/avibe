@@ -121,6 +121,8 @@ from modules.agents.vibey.native_search_recovery import (
     SEARCH_TOOLS, interrupted_native_searches, response_recovery_metadata, should_switch, turn_recovery_facts,
 )
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
+from modules.agents.vibey.source_filter import LOCAL_TOOL_HOOKS, RECOVERY_MARKER, filter_local_tools, interrupted_local_result
+from core.handlers.model_hub.source_filter import SourceFilterHooks
 from modules.agents.vibey.store import AdapterTranscriptStore
 from modules.agents.vibey.tools import ToolSuite, hosted_tools, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
@@ -203,6 +205,7 @@ class _Run:
     # What dispatch resolved for the Turn, then what its Session asks for at each later request (``_follow_session``).
     route: Optional[_Route] = None
     cwd: str = ""
+    source_filter: bool = False
     instructions_notice: Optional[str] = None
     settled: bool = False
     reason: Optional[str] = None
@@ -1178,9 +1181,11 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool,
         instructions: str = "",
     ) -> None:
+        hooks = self.controller.model_hub_runtime.local_source_filter_hooks(turn.turn_id)
+        turn.source_filter = hooks is not None
         turn.agent = self._build_agent(
             turn.request, turn.session_id, turn.router, cwd, sections, environment,
-            builtin_agent=builtin_agent, instructions=instructions,
+            builtin_agent=builtin_agent, instructions=instructions, source_filter_hooks=hooks,
         )
         turn.cwd = cwd
 
@@ -1195,6 +1200,7 @@ class VibeyAgent(BaseAgent):
         *,
         builtin_agent: bool,
         instructions: str = "",
+        source_filter_hooks: SourceFilterHooks | None = None,
     ) -> Agent:
         """Production construction shared with detached previews; this does not register or start a Turn.
 
@@ -1220,12 +1226,12 @@ class VibeyAgent(BaseAgent):
             ),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
-        tools = mark_skill_loads(
+        tools = mark_skill_loads(filter_local_tools(
             (
                 *hosted_tools(router, self._gateway_client, self.media, language=self._language),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
-            )
-        )
+            ), source_filter_hooks, lambda key, **values: i18n_t(key, self._language(), **values),
+        ))
         agent.set_tools(tools)
         finds_rg = shutil.which("rg", path=environment.get("PATH", "")) is not None
         agent.system = system_prompt(
@@ -1665,7 +1671,7 @@ class VibeyAgent(BaseAgent):
         # A tool result is the Agent's that made the call: its owning response's author, not
         # the Turn writing it now (or none, at startup) or the Session's current selection.
         # Only the last response can hold open calls, so they share one owner.
-        owner_agent, owner_turn = await asyncio.to_thread(self._response_owner, open_calls[0][0].row_id)
+        owner_agent, owner_turn, filtered = await asyncio.to_thread(self._response_owner, open_calls[0][0].row_id)
         work = await asyncio.to_thread(self._work_state, owner_turn)
         if (
             defer_continued
@@ -1685,13 +1691,21 @@ class VibeyAgent(BaseAgent):
             async def wait_running(call: Any, job_id: str) -> Any:
                 return await wait_recovered(call, job_id, stop)
 
+        async def render_recovered(call, job_id, status, watch_id):
+            result = await suite.render_recovered(call, job_id, status, watch_id)
+            if result is not None and filtered and call.name in LOCAL_TOOL_HOOKS:
+                # The original response carries the frozen policy, even if Settings changed or the process died.
+                # T2 stays side-effect-free: no hook/model/command rerun, and never release the unfiltered log.
+                return interrupted_local_result(result, lambda key, **values: i18n_t(key, self._language(), **values))
+            return result
+
         with self.store.writing_as(session_id, owner_agent, turn_id=owner_turn):
             await settle_open_calls(
                 session_id=session_id,
                 store=self.store,
                 jobs=suite.jobs,
                 job_ids=job_ids,
-                render_result=suite.render_recovered,
+                render_result=render_recovered,
                 wait_running=wait_running,
             )
         # Recovery commits results without ToolFinished events. For the live
@@ -1725,14 +1739,15 @@ class VibeyAgent(BaseAgent):
             return "settled"
         return "stopped" if turn.get("terminal_outcome") == "canceled" else "settled"
 
-    def _response_owner(self, row_id: str) -> tuple[Optional[str], Optional[str]]:
+    def _response_owner(self, row_id: str) -> tuple[Optional[str], Optional[str], bool]:
         with self._engine.connect() as conn:
             row = conn.execute(
                 select(messages.c.author_name, messages.c.metadata_json).where(messages.c.id == row_id)
             ).first()
         if row is None:
-            return None, None
-        return row.author_name, _json_object(row.metadata_json).get("turn_id")
+            return None, None, False
+        metadata = _json_object(row.metadata_json)
+        return row.author_name, metadata.get("turn_id"), metadata.get(RECOVERY_MARKER) is True
 
     def _job_route(self, meta: Mapping[str, Any]) -> dict[str, Any]:
         """A job Watch's Agent and authorization, from the job's owning Turn (fail closed).
@@ -2381,6 +2396,7 @@ class VibeyAgent(BaseAgent):
                 tool for tool, route in routes.items()
                 if route.mode == "proxy" and route.route_switch == "native_interrupted"
             )),
+            **({RECOVERY_MARKER: True} if run and run.source_filter else {}),
             "hosted_render_epoch": HOSTED_RENDER_EPOCH,
             **({
                 "hosted_render_rule": HOSTED_RENDER_RULE,

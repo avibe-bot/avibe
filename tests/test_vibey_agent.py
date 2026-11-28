@@ -249,7 +249,8 @@ class _Controller:
             turn_last_reply=turns.turn_last_reply,
         )
         self.model_hub_runtime = SimpleNamespace(
-            resolve=self._resolve, snapshot=lambda: ModelHubConfig(sources=list(self.hub_sources))
+            resolve=self._resolve, snapshot=lambda: ModelHubConfig(sources=list(self.hub_sources)),
+            local_source_filter_hooks=lambda turn_id: None,
         )
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
 
@@ -935,7 +936,7 @@ async def test_a_stop_before_dispatch_settles_the_turn_as_stopped(engine, sessio
         return await resolve(*args, **kwargs)
 
     # Stop arrives while Model Hub is still resolving the route, before anything is dispatched.
-    harness.controller.model_hub_runtime = SimpleNamespace(resolve=slow_route)
+    harness.controller.model_hub_runtime = SimpleNamespace(local_source_filter_hooks=lambda turn_id: None, resolve=slow_route)
     request = harness.request("long question")
     running = asyncio.create_task(harness.agent.handle_message(request))
     await resolving.wait()
@@ -2559,7 +2560,7 @@ async def test_a_route_model_hub_refuses_mid_run_shows_the_hubs_copy(engine, ses
         return await resolve(*args, **kwargs)
 
     # Every model call resolves again; the second one (after the tool batch) is refused.
-    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+    harness.controller.model_hub_runtime = SimpleNamespace(local_source_filter_hooks=lambda turn_id: None, resolve=route)
 
     await harness.agent.handle_message(harness.request("look"))
 
@@ -2587,7 +2588,7 @@ async def test_a_route_refused_mid_run_whose_fix_is_in_models_says_where(engine,
             raise refused
         return await resolve(*args, **kwargs)
 
-    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+    harness.controller.model_hub_runtime = SimpleNamespace(local_source_filter_hooks=lambda turn_id: None, resolve=route)
 
     await harness.agent.handle_message(harness.request("look"))
 
@@ -2605,7 +2606,7 @@ async def test_every_model_hub_resolution_names_its_turn(engine, session, tmp_pa
         turns.append(turn_id)
         return await resolve(*args, turn_id=turn_id, **kwargs)
 
-    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+    harness.controller.model_hub_runtime = SimpleNamespace(local_source_filter_hooks=lambda turn_id: None, resolve=route)
     request = harness.request("look")
 
     await harness.agent.handle_message(request)
@@ -2862,7 +2863,7 @@ async def test_a_failure_while_settling_reaches_the_shared_owner(engine, session
         async def refuse(*_args, **_kwargs):
             raise RuntimeError("no source serves this model")
 
-        harness.controller.model_hub_runtime = SimpleNamespace(resolve=refuse)
+        harness.controller.model_hub_runtime = SimpleNamespace(local_source_filter_hooks=lambda turn_id: None, resolve=refuse)
     emit = harness.controller.emit_agent_message
 
     async def broken_terminal(context, message_type, text, *args, **kwargs):
@@ -2894,7 +2895,7 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
     async def refuse(*_args, **_kwargs):
         raise RuntimeError("no source serves this model")
 
-    harness.controller.model_hub_runtime = SimpleNamespace(resolve=refuse)
+    harness.controller.model_hub_runtime = SimpleNamespace(local_source_filter_hooks=lambda turn_id: None, resolve=refuse)
     hub = config_with_sources([source("src_supply01", ["claude-opus-5-5"])] if has_source else [])
     hub.enabled = gateway_enabled
     harness.controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))

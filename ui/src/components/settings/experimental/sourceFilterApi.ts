@@ -2,7 +2,7 @@
 // (`docs/plans/vibey-source-filter-hooks.md`). Owner-only: the scripts run on this machine.
 import { apiFetch } from '@/lib/apiFetch';
 
-export const SOURCE_FILTER_HOOKS = ['before_search', 'after_search', 'before_fetch', 'after_fetch'] as const;
+export const SOURCE_FILTER_HOOKS = ['before_search', 'after_search', 'before_fetch', 'after_fetch', 'after_read', 'after_bash'] as const;
 export type SourceFilterHookName = (typeof SOURCE_FILTER_HOOKS)[number];
 
 export type SourceFilterHook = {

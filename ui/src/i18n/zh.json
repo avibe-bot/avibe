@@ -3331,7 +3331,7 @@
       "loadFailed": "读取信息茧房失败，请重试。",
       "sourceFilter": {
         "title": "信息茧房",
-        "summary": "用你自己的脚本处理 Vibey 的网页搜索和网页读取。",
+        "summary": "用你自己的脚本处理 Vibey 的网页搜索、网页读取、文件读取和命令结果。",
         "use": "启用信息茧房",
         "guide": "脚本怎么写",
         "scripts": "脚本",
