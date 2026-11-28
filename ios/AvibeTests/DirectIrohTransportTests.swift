@@ -667,6 +667,42 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(connection.streams.count, 3)
     }
 
+    /// A failed probe names its cause in the contract's order: a close the
+    /// instance sent first; then the network change whose probe it was,
+    /// whatever the connection says of its own end; otherwise that end, or
+    /// that nothing answered.
+    func testAFailedProbeNamesItsCauseInTheContractsOrder() async throws {
+        let afterANetworkChange: [(String, DirectLossCause)] = [
+            ("timed out", .networkChange),
+            ("closed by peer: admission ended (code 1)", .revocation),
+        ]
+        for (text, expected) in afterANetworkChange {
+            let harness = Harness()
+            let connection = try await harness.bringUp(
+                generation: "boot:1",
+                answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.refused]
+            )
+            connection.endUnannounced(text)
+            harness.network.change()
+            XCTAssertTrue(harness.scheduler.fire(0.5), text)
+            try await eventually("the loss is reported: \(text)") {
+                harness.reports.last == .lost(expected)
+            }
+        }
+
+        // A probe of a waiting path, on a connection that has timed out.
+        let harness = Harness()
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.refused]
+        )
+        connection.endUnannounced("timed out")
+        harness.transport.probeWaitingPath()
+        try await eventually("the loss is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .lost(.idle)]
+        }
+    }
+
     /// The cause of a loss is the connection's own: a close the instance
     /// sent is told apart from a path that went quiet, also while a probe
     /// of it is under way, and is reported once.
@@ -1356,13 +1392,15 @@ final class DirectIrohTransportTests: XCTestCase {
         _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 3))
         try await relay.write(Data("y".utf8))
 
-        // Run out again, and this time the instance ends the connection.
+        // Run out again, and this time the connection ends. Whatever it
+        // says of its end (here an idle time-out), the lease had run out
+        // first: it did not die of its path.
         harness.clock.now += 300
         XCTAssertTrue(harness.scheduler.fire(300))
         XCTAssertEqual(harness.reports.count, 4)
         connection.drop()
         try await eventually("the loss is reported") {
-            harness.reports.count == 5 && harness.reports.last == .lost(.idle)
+            harness.reports.count == 5 && harness.reports.last == .lost(.leaseExpired)
         }
         await assertCancelled { try await relay.write(Data("z".utf8)) }
     }

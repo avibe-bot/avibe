@@ -734,8 +734,9 @@ final class DirectPathController {
     private var probationPath = DirectPathUse.Path.none
     /// What the store holds, so that it is written only when it changes.
     private var storedProbation: [String: DirectProbationRecord] = [:]
-    /// The wait of a link that is not adopted yet, and the probe it is
-    /// asked once a minute meanwhile.
+    /// The wait of a link that is not adopted yet (then, at a level above
+    /// 0, the time an adopted one must hold to clear it), and the probe a
+    /// waiting link is asked once a minute.
     private var probationWake: Task<Void, Never>?
     private var probationProbe: Task<Void, Never>?
     /// How often a waiting link is asked whether it still answers.
@@ -1888,9 +1889,28 @@ final class DirectPathController {
             probationProbe?.cancel()
             probationProbe = nil
             noteProbation(held: false)
+            clearLevelOnceHeld(link.number, key: link.key)
         }
         storeProbation()
         return probation.isAdopted(link.key)
+    }
+
+    /// An adopted link that holds clears the level, and the rule sees that
+    /// only when it is read. So it is read when the time is up, and what it
+    /// then holds is stored: a launch soon after starts from the cleared
+    /// level, not from the one the link has outlived. Nothing to do at
+    /// level 0.
+    private func clearLevelOnceHeld(_ number: Int, key: String) {
+        guard probation.levelSeconds(key, now: probationClock.now(), wall: probationClock.wall()) > 0 else {
+            return
+        }
+        let clock = probationClock
+        probationWake = Task { [weak self] in
+            do { try await clock.sleep(DirectProbationGuard.heldMs) } catch { return }
+            guard let self, self.probationLink?.number == number else { return }
+            _ = self.probation.levelSeconds(key, now: clock.now(), wall: clock.wall())
+            self.storeProbation()
+        }
     }
 
     /// The wait of a link, and one probe a minute while it lasts: the

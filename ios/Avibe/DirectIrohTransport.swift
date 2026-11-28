@@ -1138,7 +1138,11 @@ final class DirectIrohTransport {
         guard let session, session.id == id else {
             return
         }
-        sessionDidEnd(retryNow: false, cause: DirectLossCause(closeText: text))
+        // Our own lease comes first: a connection this App had no more
+        // right to use did not die of its path, however it ended. The
+        // deadline is read here too, in case its timer has not run yet.
+        let expired = session.isExpired || (lease.map { uptime() >= $0.deadline } ?? false)
+        sessionDidEnd(retryNow: false, cause: expired ? .leaseExpired : DirectLossCause(closeText: text))
     }
 
     /// The path is gone: it is reported with its cause, closed, and the
@@ -1226,14 +1230,22 @@ final class DirectIrohTransport {
         case .passed:
             break
         case .failed:
-            // A probe also fails on a connection that has just closed. Its
-            // own close reason, read now, says more than the probe's
-            // failure: a close the instance sent is not a dead path.
+            // A probe also fails on a connection that has just closed. A
+            // close the instance sent, read now, says more than the probe's
+            // failure and comes first: it is not a dead path. After that, a
+            // loss the network change's own probe found is the network
+            // change's, whatever the connection says of itself; any other
+            // probe's failure is the connection's own end if it has one.
             let closed = session.link.connection.closeReason.map(DirectLossCause.init(closeText:))
-            sessionDidEnd(
-                retryNow: reason == .networkChange,
-                cause: closed ?? (reason == .networkChange ? .networkChange : .probeTimeout)
-            )
+            let cause: DirectLossCause
+            if let closed, closed.isPeerClose {
+                cause = closed
+            } else if reason == .networkChange {
+                cause = .networkChange
+            } else {
+                cause = closed ?? .probeTimeout
+            }
+            sessionDidEnd(retryNow: reason == .networkChange, cause: cause)
             return
         case .refused:
             // The probe was not allowed to finish, and the lease in force

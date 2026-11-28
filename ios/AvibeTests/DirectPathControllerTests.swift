@@ -307,8 +307,9 @@ final class DirectPathControllerTests: XCTestCase {
         try await eventually { harness.status("instance-1").preferred == .direct }
         XCTAssertEqual(harness.status("instance-1").path, .ipv4)
         XCTAssertNotNil(try XCTUnwrap(harness.controller.plan(for: authority)).openDirect)
-        // Adopted: its probe has stopped.
-        try await eventually { harness.probationTime.sleeping == 0 }
+        // Adopted: its probe has stopped. What is left is the time it must
+        // hold to clear the level.
+        try await eventually { harness.probationTime.sleeping == 1 }
 
         // The minute's row: the level, why it rose, and one link held.
         harness.pathUseClock.now += 60
@@ -323,6 +324,16 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(rows.first?["guard_level_s"] as? Int, 30)
         XCTAssertEqual(rows.first?["guard_rose"] as? String, "adopted")
         XCTAssertEqual(rows.first?["held"] as? Int, 1)
+
+        // It holds ten minutes: the level is cleared in the store then, not
+        // at the next event, so a launch soon after does not wait again.
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [1])
+        harness.probationTime.advance(599_000)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [1])
+        harness.probationTime.advance(1_000)
+        try await eventually { harness.probationStore.levels.isEmpty }
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
     }
 
     /// A waiting link carries nothing, so it is asked once a minute whether
@@ -410,10 +421,11 @@ final class DirectPathControllerTests: XCTestCase {
         // An early death under this choice is counted as any other.
         harness.transport.report(.lost(.idle), for: target)
         XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [1])
-        // The next link is used at once all the same.
+        // The next link is used at once all the same: nothing waits but
+        // the time it must hold to clear the level.
         harness.transport.report(.usable(generation: "g1"), for: target)
         try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
-        XCTAssertEqual(harness.probationTime.sleeping, 0)
+        try await eventually { harness.probationTime.sleeping == 1 }
 
         // The tunnel is allowed again: the link's turn starts over, on
         // probation, and the page is on the tunnel until it is adopted.

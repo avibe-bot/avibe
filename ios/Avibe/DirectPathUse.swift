@@ -146,6 +146,8 @@ final class DirectPathUse: @unchecked Sendable {
         case closedByPeer = "closed_by_peer"
         /// The newest rendezvous answer offers no direct path.
         case notReady = "not_ready"
+        /// It ended after this App's lease on it had run out.
+        case leaseExpired = "lease"
         /// A newer rendezvous answer replaced the endpoint they ran on.
         case superseded
         /// The probe that a change of network started failed.
@@ -163,6 +165,7 @@ final class DirectPathUse: @unchecked Sendable {
             case .revocation: self = .revocation
             case .closedByPeer: self = .closedByPeer
             case .notReady: self = .notReady
+            case .leaseExpired: self = .leaseExpired
             case .superseded: self = .superseded
             case .networkChange: self = .networkChange
             case .withdrawn: self = .withdrawn

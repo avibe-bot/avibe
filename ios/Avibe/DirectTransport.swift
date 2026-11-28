@@ -128,6 +128,10 @@ enum DirectLossCause: String, Equatable, Sendable {
     case closedByPeer = "closed_by_peer"
     /// The newest rendezvous answer offers no direct path.
     case notReady = "not_ready"
+    /// The connection ended after this App's lease on it had run out (no
+    /// rendezvous answer renewed it in time): however it ended, the App
+    /// had no more right to use it.
+    case leaseExpired = "lease"
     /// A newer rendezvous answer replaced the endpoint.
     case superseded
     /// The probe that a change of network started failed.
@@ -152,12 +156,17 @@ enum DirectLossCause: String, Equatable, Sendable {
         }
     }
 
+    /// The instance closed the connection itself, whatever its reason.
+    var isPeerClose: Bool {
+        self == .revocation || self == .closedByPeer
+    }
+
     /// What the probation rule is told.
     var linkEnd: DirectLinkEnd {
         switch self {
         case .idle, .connectionEnded, .probeTimeout:
             return .lost
-        case .revocation, .closedByPeer, .notReady, .withdrawn:
+        case .revocation, .closedByPeer, .notReady, .leaseExpired, .withdrawn:
             return .instanceEnded
         case .superseded:
             return .superseded

@@ -380,6 +380,16 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         end(text)
     }
 
+    /// The connection has ended and says why, before whoever waits on
+    /// `closed()` has been told: what a probe that fails just then reads.
+    func endUnannounced(_ text: String) {
+        lock.withLock {
+            if storedCloseText == nil {
+                storedCloseText = text
+            }
+        }
+    }
+
     /// The first end is the connection's; a later one changes nothing.
     private func end(_ text: String) {
         lock.withLock {

@@ -380,13 +380,13 @@ final class DirectPathUseTests: XCTestCase {
     /// report, and each is one the instance accepts for `retired_rule`.
     func testEveryLossCauseIsReportedByItsOwnWord() throws {
         let accepted: Set<String> = [
-            "idle", "connection_ended", "timeout", "revocation", "closed_by_peer", "not_ready", "superseded",
-            "network_change", "other", "background",
+            "idle", "connection_ended", "timeout", "revocation", "closed_by_peer", "not_ready", "lease",
+            "superseded", "network_change", "other", "background",
         ]
         XCTAssertEqual(Set(DirectPathUse.RetiredRule.allCases.map(\.rawValue)), accepted)
         let causes: [DirectLossCause] = [
-            .idle, .connectionEnded, .probeTimeout, .revocation, .closedByPeer, .notReady, .superseded,
-            .networkChange, .withdrawn,
+            .idle, .connectionEnded, .probeTimeout, .revocation, .closedByPeer, .notReady, .leaseExpired,
+            .superseded, .networkChange, .withdrawn,
         ]
         for cause in causes {
             XCTAssertEqual(DirectPathUse.RetiredRule(cause).rawValue, cause.rawValue)
@@ -401,6 +401,7 @@ final class DirectPathUseTests: XCTestCase {
         XCTAssertEqual(DirectLossCause(closeText: "LocallyClosed"), .withdrawn)
         XCTAssertEqual(DirectLossCause(closeText: "reset by peer"), .connectionEnded)
         XCTAssertEqual(DirectLossCause(closeText: ""), .connectionEnded)
+        XCTAssertEqual(causes.filter(\.isPeerClose), [.revocation, .closedByPeer])
         // Only a death of the path is one the probation rule counts.
         XCTAssertEqual(causes.filter { $0.linkEnd == .lost }, [.idle, .connectionEnded, .probeTimeout])
     }
