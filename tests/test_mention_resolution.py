@@ -336,6 +336,16 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
             message_type="result",
             text="好，已经起了一个后台 Agent（#sesworker001），同时同步 @<bot:product>，忽略 #<sesmissing99>。",
         )
+        messages_service.append(
+            conn,
+            scope_id=scope_a,
+            session_id="sesmain00001",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="[Reply truncated; use `vibe data query` to read #<sesworker001>'s transcript in full.] CC @<bot:product> #<sesmissing99>",
+        )
 
     with engine.connect() as conn:
         transcript = messages_service.list_session_messages(
@@ -343,9 +353,8 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
             session_id="sesmain00001",
             authorization_context=_owner_context(),
         )
-        [msg] = transcript["messages"]
-        refs = msg["content"]["references"]
-        assert refs == [
+        [msg, harness_msg] = transcript["messages"]
+        expected_refs = [
             {
                 "kind": "session",
                 "session_id": "sesworker001",
@@ -358,6 +367,16 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
                 "display_name": "产品伙伴",
             },
         ]
+        assert msg["content"]["references"] == expected_refs
+        assert harness_msg["content"]["references"] == expected_refs
+
+        # Restricted viewer gets openable Session ref on Harness rows too, never Bot refs.
+        viewer_transcript = messages_service.list_session_messages(
+            conn,
+            session_id="sesmain00001",
+            authorization_context=_viewer_context("viewer-1"),
+        )
+        assert viewer_transcript["messages"][1]["content"]["references"] == [expected_refs[0]]
 
         inbox = messages_service.list_inbox_sessions(
             conn,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { linkifyMentions, parseMentionHref, referenceToMarker, type MentionReference } from './mentions';
+import { formatMentionsPlainText, linkifyMentions, parseMentionHref, referenceToMarker, type MentionReference } from './mentions';
 
 const REFERENCES: MentionReference[] = [
   { kind: 'agent', name: 'claude' },
@@ -279,5 +279,20 @@ describe('referenceToMarker', () => {
     expect(referenceToMarker({ kind: 'bot', handle: 'cso', display_name: '首席安全官' })).toBe('@<bot:cso>');
     expect(referenceToMarker({ kind: 'agent', name: 'reviewer' })).toBe('@<agent:reviewer>');
     expect(referenceToMarker({ kind: 'session', session_id: 'ses6jr7c5h2q6' })).toBe('#<ses6jr7c5h2q6>');
+  });
+});
+
+describe('formatMentionsPlainText', () => {
+  it('replaces resolved Session and Bot mentions with readable text while preserving code and unresolved ids', () => {
+    const out = formatMentionsPlainText(
+      'Check #<sesw34zgzgcvp>, #sesuntitled01, @<bot:product>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.',
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+        { kind: 'session', session_id: 'sesuntitled01', title: null, openable: true },
+        { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+      ],
+      '未命名会话',
+    );
+    expect(out).toBe('Check 登录跳转修复, 未命名会话, @产品伙伴, #<sesmissing99>, and `#<sesw34zgzgcvp>`.');
   });
 });

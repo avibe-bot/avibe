@@ -169,7 +169,7 @@ def test_receipt_preserves_full_reply_until_shared_cap_and_points_to_history(len
         assert body == reply
     else:
         assert body.startswith(reply[:30_000])
-        assert "vibe data query" in body and "#sesB" in body
+        assert "vibe data query" in body and "#<sesB>" in body
 
 
 @pytest.mark.parametrize("state", [None, "open", "notified", "answered"])

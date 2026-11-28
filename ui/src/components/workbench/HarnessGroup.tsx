@@ -3,7 +3,10 @@ import { ChevronDown, Layers } from 'lucide-react';
 import clsx from 'clsx';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
+import { useBots } from '../../context/BotsContext';
 import { chatTriggerLink, harnessChipLabelKey } from '../../lib/chatTrigger';
+import { useLiveSessionTitle } from '../../lib/liveSessionTitles';
+import { formatMentionsPlainText, type MentionReference } from '../../lib/mentions';
 import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE } from '../../lib/transcriptMotion';
 import { RoleAvatar } from './RoleAvatar';
 
@@ -36,10 +39,23 @@ export function HarnessGroup({
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
+  const { botForSession, displayName: botDisplayName } = useBots();
   const latest = members[members.length - 1];
   const countLabel = t('chat.harnessGroup.count', { count: members.length });
   const link = chatTriggerLink(latest, t('chat.source.agentFallback'));
-  const latestSource = link?.kind === 'source' ? link.label : t(harnessChipLabelKey(latest));
+  const latestSourceBot = latest.source_session_id ? botForSession(latest.source_session_id) : undefined;
+  const liveLatestSourceTitle = useLiveSessionTitle(latest.source_session_id ?? '');
+  const resolvedSourceTitle =
+    liveLatestSourceTitle !== undefined
+      ? (liveLatestSourceTitle?.trim() || (latestSourceBot ? botDisplayName(latestSourceBot) : ''))
+      : (latestSourceBot ? botDisplayName(latestSourceBot) : latest.source_session_title?.trim() || '');
+  const latestSource = link?.kind === 'source'
+    ? (resolvedSourceTitle || t('workbench.untitledSession'))
+    : t(harnessChipLabelKey(latest));
+  const latestRefs = (latest.content as { references?: MentionReference[] } | null)?.references;
+  const latestPreview = latest.text?.trim()
+    ? formatMentionsPlainText(latest.text.trim(), latestRefs, t('workbench.untitledSession'))
+    : '';
 
   const headLine = (hidden = false) => (
     <span className={clsx('flex min-w-0 items-center gap-2 px-0.5 text-left', hidden && 'invisible')}>
@@ -69,7 +85,7 @@ export function HarnessGroup({
             {t('chat.harnessGroup.latest')}
           </span>
           <span className="max-w-[40%] shrink-0 truncate text-[11px] font-medium text-cyan-ink">{latestSource}</span>
-          <span className="min-w-0 flex-1 truncate text-[12px] text-muted">{latest.text?.trim()}</span>
+          <span className="min-w-0 flex-1 truncate text-[12px] text-muted">{latestPreview}</span>
           <span className="inline-flex shrink-0 items-center gap-0.5 text-[11px] font-semibold text-cyan-ink">
             {t('chat.harnessGroup.expand')}
             <ChevronDown className="size-3.5" />

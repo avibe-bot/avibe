@@ -17,6 +17,7 @@ import {
   chatFixtures,
   chatPhone,
   chatRoute,
+  message,
   userSays,
 } from './fixtures';
 
@@ -72,6 +73,63 @@ const mentionChatFixtures = chatFixtures({
   extra: { bots: mentionBots },
 });
 
+const harnessConversation = [
+  message(
+    'harness',
+    'harness',
+    tText(
+      '请跟进 #<sesw34zgzgcvp>，完成后汇报给 @<bot:product>。',
+      'Follow up on #<sesw34zgzgcvp> and report back to @<bot:product>.',
+    ),
+    15,
+    {
+      author_name: 'agent_run',
+      author_id: 'run_bot1',
+      native_message_id: 'agent_run:run_bot1',
+      source_session_id: 'ses_product',
+      source_session_title: null,
+      source_session_agent_name: 'product',
+      content: {
+        references: [
+          { kind: 'session', session_id: 'sesw34zgzgcvp', title: SHORT_TITLE, openable: true },
+          { kind: 'bot', handle: 'product', display_name: BOT_NAME },
+        ],
+      },
+    },
+  ),
+  message(
+    'harness',
+    'harness',
+    tText(
+      '[The dispatched Turn ended without writing back; its last reply is below.]\n已完成复核，长链路清单见 #seslongtitle1，已抄送 @<bot:product>；旧编号 #<sesmissing99> 保留原样。\n\n[Reply truncated; use `vibe data query` to read #<sesw34zgzgcvp>\'s transcript in full.]',
+      '[The dispatched Turn ended without writing back; its last reply is below.]\nAudit complete — see #seslongtitle1, copied @<bot:product>, and stale #<sesmissing99> stays verbatim.\n\n[Reply truncated; use `vibe data query` to read #<sesw34zgzgcvp>\'s transcript in full.]',
+    ),
+    6,
+    {
+      author_name: 'agent_run',
+      author_id: 'run_cb2',
+      native_message_id: 'agent_run:run_cb2',
+      source_session_id: 'sesw34zgzgcvp',
+      source_session_title: SHORT_TITLE,
+      source_session_agent_name: 'claude',
+      content: {
+        references: [
+          { kind: 'session', session_id: 'sesw34zgzgcvp', title: SHORT_TITLE, openable: true },
+          { kind: 'session', session_id: 'seslongtitle1', title: LONG_TITLE, openable: true },
+          { kind: 'bot', handle: 'product', display_name: BOT_NAME },
+        ],
+      },
+    },
+  ),
+];
+
+const harnessChatFixtures = chatFixtures({
+  session: { title: tText('后台任务派发与跟进', 'Background task dispatch') },
+  messages: harnessConversation,
+  api: { '/api/config': { ...settingsConfig, language: undefined } },
+  extra: { bots: mentionBots },
+});
+
 const imFixtures = workbenchFixtures({
   '/api/config': { ...settingsConfig, language: undefined },
 });
@@ -97,6 +155,18 @@ const designFrames = frames([
     themes: ['light'],
     route: chatRoute(),
     fixtures: mentionChatFixtures,
+    render: chatPhone,
+  },
+  {
+    name: 'harness-phone',
+    title: '会话 · Harness 气泡里的 Session 与 Bot 引用 · 手机 390',
+    width: 390,
+    height: 760,
+    status: 'shipped',
+    themes: ['light'],
+    route: chatRoute(),
+    fixtures: harnessChatFixtures,
+    click: ['role=button[name=/The dispatched Turn/]'],
     render: chatPhone,
   },
   {

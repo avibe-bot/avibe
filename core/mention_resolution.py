@@ -636,10 +636,10 @@ def enrich_message_rows_in_conn(
     Runs ONE batch SQLite lookup across the whole page of rows, scoped to the
     caller's ``authorization_context``:
 
-    * Agent-authored rows get resolved Session and Bot references for both
-      bracketed (``#<id>``, ``@<bot:handle>``) and bare (``#ses...``) mentions.
-      Unresolved or inaccessible ids are omitted so the client leaves them as
-      plain text.
+    * Agent- and Harness-authored rows get resolved Session and Bot references
+      for both bracketed (``#<id>``, ``@<bot:handle>``) and bare (``#ses...``)
+      mentions. Unresolved or inaccessible ids are omitted so the client leaves
+      them as plain text.
     * User-authored rows that already carry a composer ``references`` sidecar
       have their Session titles and Bot display names refreshed to current
       values, with ``openable`` set from live access checks.
@@ -657,7 +657,7 @@ def enrich_message_rows_in_conn(
         existing_refs = content.get("references") if content else None
         has_existing = isinstance(existing_refs, list) and len(existing_refs) > 0
 
-        if author == "agent":
+        if author in {"agent", "harness"}:
             if not isinstance(text, str) or not text:
                 continue
             sids, handles = extract_mention_candidates(text, include_bare_sessions=True)

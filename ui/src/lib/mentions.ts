@@ -399,3 +399,62 @@ export function hasMentionMarkers(text: string): boolean {
   MENTION_MARKER_RE.lastIndex = 0;
   return MENTION_MARKER_RE.test(text);
 }
+
+/** Replace resolved Session and Bot mentions with readable plain-text titles
+ *  for single-line previews (such as a collapsed Harness bubble pill). Code
+ *  spans/blocks, autolinks, and unresolved ids stay verbatim. */
+export function formatMentionsPlainText(
+  text: string,
+  references?: MentionReference[],
+  untitledLabel?: string,
+): string {
+  if (!text || !references?.length) return text;
+  const sessionRefs = new Map<string, SessionReference>();
+  const botNames = new Map<string, string>();
+  const botHandles = new Set<string>();
+  for (const ref of references) {
+    if (ref.kind === 'session') {
+      sessionRefs.set(ref.session_id, ref);
+    } else if (ref.kind === 'bot') {
+      botHandles.add(ref.handle);
+      if (ref.display_name) botNames.set(ref.handle, ref.display_name);
+    }
+  }
+  if (!sessionRefs.size && !botHandles.size) return text;
+
+  const replaceSegment = (segment: string): string =>
+    segment.replace(
+      AGENT_MENTION_RE,
+      (full: string, trigger: string | undefined, inner: string | undefined, bareSession: string | undefined) => {
+        if (bareSession) {
+          const ref = sessionRefs.get(bareSession);
+          if (!ref || ref.openable === false) return full;
+          return ref.title?.trim() || untitledLabel || bareSession;
+        }
+        if (!trigger || inner === undefined) return full;
+        if (trigger === '#') {
+          const sid = inner.trim();
+          const ref = sessionRefs.get(sid);
+          if (!ref || ref.openable === false) return full;
+          return ref.title?.trim() || untitledLabel || sid;
+        }
+        const marker = parseAtMarker(inner);
+        if (marker.target === 'bot') {
+          const handle = marker.name.trim();
+          if (botHandles.has(handle)) return `@${botNames.get(handle) || handle}`;
+        }
+        return full;
+      },
+    );
+
+  let out = '';
+  let last = 0;
+  SKIP_SEGMENT_RE.lastIndex = 0;
+  for (let m = SKIP_SEGMENT_RE.exec(text); m; m = SKIP_SEGMENT_RE.exec(text)) {
+    if (m.index > last) out += replaceSegment(text.slice(last, m.index));
+    out += m[0];
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out += replaceSegment(text.slice(last));
+  return out;
+}

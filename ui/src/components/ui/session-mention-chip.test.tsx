@@ -5,7 +5,10 @@ import { MemoryRouter } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
+import type { WorkbenchMessage, WorkbenchSession } from '@/context/ApiContext';
 import { BotsContext, type BotsState } from '@/context/BotsContext';
+import { ToastProvider } from '@/context/ToastProvider';
+import { MessageRow } from '@/components/workbench/ChatPage';
 import { clearLiveSessionTitles, setLiveSessionTitle } from '@/lib/liveSessionTitles';
 import type { MentionReference } from '@/lib/mentions';
 import { Markdown } from './markdown';
@@ -29,7 +32,7 @@ const mockBotsState: BotsState = {
   limit: null,
   atLimit: false,
   statusBySession: {},
-  botForSession: () => undefined,
+  botForSession: (sessionId) => (sessionId === 'ses_product' ? mockBotsState.bots[0] : undefined),
   botForAgent: () => undefined,
   botForHandle: (handle) => (handle === 'product' ? mockBotsState.bots[0] : undefined),
   displayName: (bot) => bot.display_name || bot.handle,
@@ -201,5 +204,102 @@ describe('Agent reply Session & Bot mentions in Markdown', () => {
 
     expect(container.querySelector('a[data-session-mention]')).toBeNull();
     expect(container.querySelector('span[data-session-mention="sesw34zgzgcvp"]')?.textContent).toBe('#Auth Fix');
+  });
+
+  it('renders Harness bubble header, collapsed preview, and expanded body with Session & Bot chips and without SecretRequestCard', () => {
+    const mockSession = {
+      id: 'sesmain00001',
+      scope_id: 'avibe::project::p1',
+      project_id: 'p1',
+      title: 'Main Chat',
+      agent_id: 'agt-1',
+      agent_name: 'claude',
+      agent_backend: 'claude_code',
+      agent_variant: null,
+      model: null,
+      reasoning_effort: null,
+      status: 'active',
+      pinned: false,
+      agent_status: 'idle',
+      workdir: null,
+      native_session_id: null,
+      created_at: '2026-11-29T00:00:00Z',
+      updated_at: '2026-11-29T00:00:00Z',
+      last_active_at: '2026-11-29T00:00:00Z',
+      metadata: {},
+    } as WorkbenchSession;
+
+    const harnessMsg = {
+      id: 'msg_h1',
+      scope_id: 'avibe::project::p1',
+      session_id: 'sesmain00001',
+      platform: 'avibe',
+      author: 'harness',
+      type: 'harness',
+      source: 'harness',
+      author_id: 'run_1',
+      author_name: 'agent_run',
+      native_message_id: 'agent_run:run_1',
+      parent_native_message_id: null,
+      source_session_id: 'ses_product',
+      source_session_title: null,
+      source_session_agent_name: 'product',
+      text:
+        '[Reply truncated; use `vibe data query` to read #<sesw34zgzgcvp>\'s transcript in full.] '
+        + 'See #sesw34zgzgcvp, @<bot:product>, #<sesmissing99>, and $<API_KEY>.',
+      content: {
+        references: [
+          { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+          { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+        ],
+      },
+      metadata: {},
+      created_at: '2026-11-29T00:00:00Z',
+      updated_at: '2026-11-29T00:00:00Z',
+      delivered_at: '2026-11-29T00:00:00Z',
+      read_at: '2026-11-29T00:00:00Z',
+    } as unknown as WorkbenchMessage;
+
+    // Collapsed: header uses SessionMentionChip with Bot display name (no bare id suffix)
+    // and collapsed preview resolves mentions to plain-text titles.
+    const { container: collapsedContainer } = render(
+      <I18nextProvider i18n={i18n}>
+        <ToastProvider>
+          <MemoryRouter>
+            <BotsContext.Provider value={mockBotsState}>
+              <MessageRow message={harnessMsg} session={mockSession} harnessOpen={false} />
+            </BotsContext.Provider>
+          </MemoryRouter>
+        </ToastProvider>
+      </I18nextProvider>,
+    );
+    const headerChip = collapsedContainer.querySelector('a[data-session-mention="ses_product"]');
+    expect(headerChip?.getAttribute('href')).toBe('/chat/ses_product');
+    expect(headerChip?.textContent).toBe('#产品伙伴');
+    const toggleBtn = collapsedContainer.querySelector('button[aria-expanded="false"]');
+    expect(toggleBtn?.textContent).toContain('登录跳转修复');
+    expect(toggleBtn?.textContent).toContain('@产品伙伴');
+    expect(toggleBtn?.textContent).not.toContain('#<sesw34zgzgcvp>');
+
+    // Expanded: body renders clickable Session chips (for both bracketed receipt pointer
+    // and bare #ses...), Bot chip, verbatim unresolved id, and never a SecretRequestCard.
+    const { container: expandedContainer } = render(
+      <I18nextProvider i18n={i18n}>
+        <ToastProvider>
+          <MemoryRouter>
+            <BotsContext.Provider value={mockBotsState}>
+              <MessageRow message={harnessMsg} session={mockSession} harnessOpen />
+            </BotsContext.Provider>
+          </MemoryRouter>
+        </ToastProvider>
+      </I18nextProvider>,
+    );
+    const bodySessionChips = expandedContainer.querySelectorAll('a[data-session-mention="sesw34zgzgcvp"]');
+    expect(bodySessionChips).toHaveLength(2);
+    expect(bodySessionChips[0].getAttribute('href')).toBe('/chat/sesw34zgzgcvp');
+    expect(bodySessionChips[0].textContent).toBe('#登录跳转修复');
+    expect(expandedContainer.textContent).toContain('@产品伙伴');
+    expect(expandedContainer.textContent).toContain('#<sesmissing99>');
+    expect(expandedContainer.querySelector('[data-secret-name]')).toBeNull();
   });
 });
