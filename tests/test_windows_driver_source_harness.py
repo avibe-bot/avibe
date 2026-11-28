@@ -120,6 +120,10 @@ def test_production_capture_is_a_required_parallel_windows_job():
     assert all("continue-on-error" not in step and ("if" not in step or step["if"] == "always()") for step in steps)
     (source,) = (step for step in steps if "test-windows-driver-source.ps1" in step.get("run", ""))
     assert "-CaptureProductionDriver" in source["run"]
+    # The transport child launches the repository-local Python, not the
+    # interpreter used by the source preparation helper.
+    assert any("uv sync --frozen --no-install-project --no-dev" in step.get("run", "")
+               and step.get("working-directory", ".") == "." for step in steps[:steps.index(source)])
     upload = next(step for step in steps if step.get("with", {}).get("name", "").startswith("windows-cua-driver-production-"))
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["path"].strip().endswith("production/**")
@@ -133,12 +137,21 @@ def test_production_capture_is_a_required_parallel_windows_job():
 def test_driver_gate_changes_require_native_execution(path):
     from scripts.ci_docs_only import scope_of
     from scripts.ci_fast_pr import selected
+    from scripts.ci_scope import make_plan
 
-    _, jobs = selected(scope_of([("M", "100644", "100644", path)], True))
+    scope = scope_of([("M", "100644", "100644", path)], True)
+    _, jobs = selected(scope)
     assert "desktop-shell" in jobs
+    assert make_plan("PR", scope)["jobs"]["desktop-shell"] == "run"
 
 
-@pytest.mark.parametrize("fault", [None, "checkout", "provenance", "binary", "receipts"])
+def test_driver_workflow_receives_actionlint_validation():
+    from scripts.ci_manifest_guard import WORKFLOW_NAMES
+
+    assert "windows-driver.yml" in WORKFLOW_NAMES
+
+
+@pytest.mark.parametrize("fault", [None, "checkout", "provenance", "binary", "receipts", "transport"])
 def test_receipt_index_binds_candidate_binary_and_native_results(tmp_path, fault):
     (step,) = (s for s in driver_job()["steps"] if s.get("shell") == "python")
     root = tmp_path / "avibe-windows-driver-security-fixture"
@@ -148,11 +161,14 @@ def test_receipt_index_binds_candidate_binary_and_native_results(tmp_path, fault
     (root / "production/cua-driver.exe").write_bytes(b"binary" if fault != "binary" else b"different")
     (root / "provenance.json").write_text(json.dumps({
         "avibe_head": head if fault != "provenance" else "a" * 40,
+        "expected_test_count": 2,
         "production_binary_sha256": binary_digest,
     }))
-    receipts = {"junit-no-skip-count-guard.xml": b"guard", "junit-case.xml": b"case"}
+    transport = "logs/refusal-transport/junit.xml"
+    (root / transport).parent.mkdir(parents=True)
+    receipts = {"junit-no-skip-count-guard.xml": b"guard", "junit-case.xml": b"case", "junit-next.xml": b"next", transport: b"transport"}
     for name, content in receipts.items():
-        if fault != "receipts" or name != "junit-case.xml":
+        if (fault, name) not in {("receipts", "junit-case.xml"), ("transport", transport)}:
             (root / name).write_bytes(content)
     result = subprocess.run(
         [sys.executable, "-c", step["run"]], cwd=ROOT, capture_output=True, text=True,
@@ -162,7 +178,7 @@ def test_receipt_index_binds_candidate_binary_and_native_results(tmp_path, fault
     if fault:
         expected = {
             "checkout": "candidate checkout", "provenance": "candidate checkout",
-            "binary": "Production binary", "receipts": "Missing native test receipts",
+            "binary": "Production binary", "receipts": "Missing native test receipts", "transport": "junit.xml",
         }
         assert result.returncode != 0 and expected[fault] in result.stderr
         assert not index.exists()

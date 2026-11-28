@@ -24,6 +24,12 @@ jobs:
         run: >-
           python -m pip install --disable-pip-version-check --only-binary=:all: "PyYAML==6.0.3"
 
+      - name: Install locked Runtime dependencies for native transport verification
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv sync --frozen --no-install-project --no-dev
+
       - name: Verify Windows Cua Driver security boundary as ordinary user
         working-directory: desktop
         shell: pwsh
@@ -49,8 +55,11 @@ jobs:
           if provenance['production_binary_sha256'] != production_sha256:
               raise SystemExit('Production binary does not match native verification')
           receipts = {p.name: digest(p) for p in sorted(root.glob('junit-*.xml'))}
-          if 'junit-no-skip-count-guard.xml' not in receipts or len(receipts) < 2:
+          expected = provenance['expected_test_count']
+          if expected < 1 or len(receipts) != expected + 1 or 'junit-no-skip-count-guard.xml' not in receipts:
               raise SystemExit('Missing native test receipts')
+          transport = 'logs/refusal-transport/junit.xml'
+          receipts[transport] = digest(root / transport)
           index = {'candidate_sha': sha, 'production_binary_sha256': production_sha256, 'junit_sha256': receipts}
           (root / 'candidate.json').write_text(json.dumps(index, indent=2) + '\n', encoding='utf-8')
 

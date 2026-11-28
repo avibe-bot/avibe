@@ -121,7 +121,8 @@ def heavy_routes(scope: Scope) -> dict[str, str]:
     return {
         "ui-browser-checks": scope.browser,
         "ios-shell": affected(IOS_CONTRACTS),
-        "desktop-shell": affected(DESKTOP_CONTRACTS),
+        "desktop-shell": ("run" if "tests/test_windows_driver_source_harness.py" in scope.paths
+                          else affected(DESKTOP_CONTRACTS)),
         "install-upgrade-shards": affected((*INSTALL_INPUTS, "vibe/ui_network_access.py", "tests/test_ui_listener_lifecycle.py")),
         "web-fetch-runtime": scope.platform,
         "web-fetch-macos": affected(MAC_FETCH_INPUTS),
