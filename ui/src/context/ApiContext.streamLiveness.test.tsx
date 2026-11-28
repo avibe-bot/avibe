@@ -1500,16 +1500,31 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(await why()).toBe('cap');
   });
 
-  it('names the state that should not last: wanted, held by nothing, and no attempt under way', async () => {
+  it('says a page that has not been told how it arrives waits for that, as every page does at its load', async () => {
     const shell = installDirectShell({ direct: 3 });
     await mountDirectPage();
     // The shell arrives at a direct address before it has answered the
     // page's first question: that arrival starts no hand-over, and a stream
-    // that does not say how it came in asks for none.
+    // that does not say how it came in asks for none. Nothing is wrong.
     shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
     await shell.answer(0, 0);
     emitHandshake(1);
     emitControllerLeg(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(0);
+    expect(await why()).toBe('verdict');
+  });
+
+  it('names the state that should not last: told it arrives another way, held by nothing, and no attempt under way', async () => {
+    const shell = installDirectShell({ direct: 3 });
+    // A page whose stream nobody subscribes to: the hand-over finds nothing
+    // to hand over and makes no attempt.
+    vi.resetModules();
+    const fresh = await import('./ApiContext');
+    render(<fresh.ApiProvider><div /></fresh.ApiProvider>);
+    await shell.answer(0, 0);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await requestSaid('other');
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(0);
     expect(await why()).toBe('idle');

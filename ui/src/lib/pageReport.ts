@@ -31,7 +31,8 @@ export type PageWhy =
   | 'quiet_request'
   | 'quiet_socket'
   | 'quiet_frame'
-  // The last hand-over's stream has not said yet how it came in.
+  // The page has not been told how it arrives: the last hand-over's stream,
+  // or a new page's first one, has not said yet.
   | 'verdict'
   // The last hand-over closed nothing and kept nothing, and the page still
   // arrives another way: its connections are not ones the App can close.
@@ -40,8 +41,8 @@ export type PageWhy =
   | 'cap'
   // Too soon after the last hand-over.
   | 'spacing'
-  // A hand-over is wanted, nothing above holds it, and none is under way.
-  // It should never last.
+  // The page arrives another way, a hand-over is wanted, nothing above holds
+  // it, and none is under way. It should never last.
   | 'idle'
   // The page has asked the App for a hand-over and waits for its answer.
   | 'asked';
