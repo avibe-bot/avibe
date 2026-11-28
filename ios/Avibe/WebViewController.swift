@@ -1155,25 +1155,6 @@ final class WebViewController: UIViewController {
         return url
     }
 
-    /// Loads the instance's page again where it is, through
-    /// the load gate as every load the shell starts: 「仅直连和中继」's link
-    /// has come up, and the page's connections move to it.
-    /// Only while the view shows the instance's own document: a sign-in page
-    /// (or anything else the primary view may show) is never replaced; the
-    /// return to the instance is a fresh load that takes the link anyway.
-    func reloadInstancePage() {
-        guard
-            !isInvalidatedForAccountTransition,
-            let webView = retainedWebView,
-            let url = instancePageURL,
-            (directLoadGate?() ?? .open) == .open
-        else {
-            return
-        }
-        directInstanceLoad?()
-        webView.load(URLRequest(url: url))
-    }
-
     /// The first load's own URL, once: a reopen where the page was (this
     /// instance's origin only). Later loads (a restart) go to the root.
     private func takeStartURL() -> URL? {

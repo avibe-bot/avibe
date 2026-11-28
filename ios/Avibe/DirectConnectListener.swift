@@ -744,7 +744,9 @@ actor DirectConnectListener {
     /// Drains granted tunnels for this host. A CONNECT whose opener is still
     /// racing keeps its client socket: retire only the race so it replans under
     /// the new policy rather than silently closing on WebKit's old route.
-    func drainHost(_ host: String) async {
+    /// The answer is how many granted tunnels it closed.
+    @discardableResult
+    func drainHost(_ host: String) async -> Int {
         // An identified request without an admitted plan has started no opener.
         // Leave it for the rewrite hold; a plan sampled across this snapshot
         // cannot be admitted with its pre-drain stamp.
@@ -761,6 +763,7 @@ actor DirectConnectListener {
             }
         }
         for task in closing { await task.value }
+        return closing.count
     }
 
     private func identify(_ id: UUID, host: String) -> Bool {

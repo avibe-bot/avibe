@@ -2867,7 +2867,7 @@ final class AppModel: ObservableObject {
             revertDirectOnly(runtime, notes: true)
         case .revertWithoutNotice:
             revertDirectOnly(runtime, notes: false)
-        case .keep(let nextCheck, let reloadsForLink):
+        case .keep(let nextCheck):
             if dropped {
                 // The link dropped: the controller only says so (it is not a
                 // fallback). Re-establishing it takes one full reopen (stop,
@@ -2882,9 +2882,6 @@ final class AppModel: ObservableObject {
                 }
                 reopenRuntime(runtime, at: runtimeController?.instancePageURL)
                 return
-            }
-            if reloadsForLink {
-                runtimeController?.reloadInstancePage()
             }
             guard let nextCheck else {
                 return

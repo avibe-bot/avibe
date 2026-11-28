@@ -355,6 +355,12 @@ struct DirectPathTiming: Sendable {
     /// connection attempt.
     let ownCloseSeconds: TimeInterval
     let portProbeSeconds: TimeInterval
+    /// A change of a host's 「仅直连和中继」 policy closes its connections.
+    /// How long that waits for the host's tunnel connections to carry
+    /// nothing for a second, so that what the page is loading right then
+    /// (it has just opened) is not cut; what is still busy after it is
+    /// closed anyway.
+    let cutoverQuietSeconds: TimeInterval
 
     init(
         listenerWaitSeconds: TimeInterval,
@@ -363,8 +369,10 @@ struct DirectPathTiming: Sendable {
         strictOpenSeconds: TimeInterval = 10,
         retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5],
         ownCloseSeconds: TimeInterval = 3,
-        portProbeSeconds: TimeInterval = 0.3
+        portProbeSeconds: TimeInterval = 0.3,
+        cutoverQuietSeconds: TimeInterval = 5
     ) {
+        self.cutoverQuietSeconds = cutoverQuietSeconds
         self.strictOpenSeconds = strictOpenSeconds
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
@@ -653,6 +661,9 @@ final class DirectPathController {
     private var hostsNeedingColdStore: Set<String> = []
     private var armed: Set<String> = []
     private var rewriting: Set<String> = []
+    /// Hosts whose policy is changing: from the wait for their tunnel
+    /// connections to go quiet until the drain and rewrite are done.
+    private var cuttingOver: Set<String> = []
     private var policyGeneration: [String: UInt64] = [:]
     private var strictFailures: [String: UInt64] = [:]
     private var unlinkedAnswers: [String: UInt64] = [:]
@@ -1395,18 +1406,32 @@ final class DirectPathController {
         onAvailabilityChanged()
     }
 
-    /// One drain at a time per host. New plans wait; in-flight plans also
-    /// fail their commit check. Sample the latest choice after the drain so
-    /// a late completion cannot reverse a newer choice or touch another store.
+    /// One change of policy at a time per host. It first lets the host's
+    /// tunnel connections go quiet, for a bounded time, and closes those:
+    /// the page has just opened and may still be loading, and a load cut
+    /// there is not made again. Plans go on as they were meanwhile. Then
+    /// the drain: new plans wait; in-flight plans also fail their commit
+    /// check. Sample the latest choice after the drain so a late completion
+    /// cannot reverse a newer choice or touch another store.
+    ///
+    /// The page is told of what was closed as of any other closure, so it
+    /// opens its stream again and catches up. Nothing is reloaded.
     private func cutover(_ host: String) {
         let store = websiteDataStore.identifier
         guard routeOwner.routes(host, store: store), let listener, let port = listenerPort,
-              rewriting.insert(host).inserted else { return }
+              cuttingOver.insert(host).inserted else { return }
         policyGeneration[host, default: 0] &+= 1
+        let quietWait = timing.cutoverQuietSeconds
         Task { [weak self] in
-            await listener.drainHost(host)
+            let quiet = await listener.closeQuietRelays(
+                host: host, backend: .publicOrigin,
+                quietSeconds: Self.handoverQuietSeconds, waitSeconds: quietWait
+            )
             guard let self else { return }
+            self.rewriting.insert(host)
+            let drained = await listener.drainHost(host)
             self.rewriting.remove(host)
+            self.cuttingOver.remove(host)
             if self.websiteDataStore.identifier == store, self.listener === listener {
                 let strict = self.requestedStrict.contains(host) && !self.hostsNeedingColdStore.contains(host)
                     && self.target?.authority.host == host && self.isUsable && !self.isInBackground
@@ -1417,6 +1442,11 @@ final class DirectPathController {
                                            port: port, allowsFailover: allowsFailover), strict {
                     self.armed.insert(host)
                 } else { self.armed.remove(host) }
+            }
+            // After the policy is in force: the connections the page opens
+            // in answer are planned under it.
+            if quiet.closed + drained > 0 {
+                self.recordClosure(hosts: [host])
             }
             self.onAvailabilityChanged()
         }
