@@ -1186,7 +1186,8 @@
       "blocked": "Blocked by the information cocoon: {reason}",
       "blockedNoReason": "Blocked by the information cocoon.",
       "failed": "The information cocoon script {hook} failed, so this call was blocked: {reason}.",
-      "refused": "The arguments the information cocoon wrote were refused ({code})."
+      "refused": "The arguments the information cocoon wrote were refused ({code}).",
+      "interrupted": "The information cocoon result was interrupted. The original output was withheld; the command was not run again."
     },
     "hostedTools": {
       "noExecutor": {

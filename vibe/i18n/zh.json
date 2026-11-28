@@ -1186,7 +1186,8 @@
       "blocked": "已被信息茧房拦截：{reason}",
       "blockedNoReason": "已被信息茧房拦截。",
       "failed": "信息茧房脚本 {hook} 运行失败，这次调用已拦下：{reason}。",
-      "refused": "信息茧房改写后的参数未通过检查（{code}）。"
+      "refused": "信息茧房改写后的参数未通过检查（{code}）。",
+      "interrupted": "信息茧房的结果处理被中断，原始输出未放行，命令也没有重新执行。"
     },
     "hostedTools": {
       "noExecutor": {

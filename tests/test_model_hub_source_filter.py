@@ -165,7 +165,7 @@ async def test_a_failing_after_hook_never_releases_the_unfiltered_output(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["before_search", "after_search", "before_fetch", "after_fetch"])
+@pytest.mark.parametrize("name", ["before_search", "after_search", "before_fetch", "after_fetch", "after_read", "after_bash"])
 async def test_each_hook_gets_ten_minutes_by_default(hooks, monkeypatch, name):
     """Model-backed hooks need 600 s; short injected budgets in timeout tests cannot guard this default."""
 

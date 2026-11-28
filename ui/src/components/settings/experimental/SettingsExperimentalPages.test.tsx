@@ -27,7 +27,10 @@ const status = (enabled: boolean) => ({
   ok: true,
   enabled,
   dir: '/home/demo/.avibe/hooks/source_filter',
-  hooks: { before_search: hook(true), after_search: hook(false), before_fetch: hook(false), after_fetch: hook(false) },
+  hooks: {
+    before_search: hook(true), after_search: hook(false), before_fetch: hook(false), after_fetch: hook(false),
+    after_read: hook(false), after_bash: hook(false),
+  },
 });
 const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
 
@@ -73,6 +76,10 @@ describe.each([
     const [path, init] = apiFetch.mock.calls[1];
     expect(path).toBe('/api/settings/experimental/source-filter');
     expect(init).toMatchObject({ method: 'PUT', body: JSON.stringify({ enabled: true }) });
-    expect(screen.getAllByText(missing)).toHaveLength(3);
+    await screen.findByText('after_read.py');
+    await screen.findByText('after_bash.py');
+    expect(screen.queryByText('before_read.py')).toBeNull();
+    expect(screen.queryByText('before_bash.py')).toBeNull();
+    expect(screen.getAllByText(missing)).toHaveLength(5);
   });
 });
