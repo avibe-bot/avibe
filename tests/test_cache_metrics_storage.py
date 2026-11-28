@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -246,6 +248,7 @@ def test_documented_upload_aggregate_accepts_only_valid_receipts(state_db):
 async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, monkeypatch, ending, proposal):
     from types import SimpleNamespace
     import httpx
+    from core import bot_handles
     from core.bot_handles import propose_handle_with_model
     from core.agent_core.ai.openai_chat import OpenAIChatAdapter
     from modules.agents.model_hub import ModelHubLaunch
@@ -270,11 +273,30 @@ async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, mon
 
     engine = create_sqlite_engine(state_db)
     store = SimpleNamespace(engine=engine, get_main_bot_agent=lambda: SimpleNamespace(model='m'))
+    # The caller only waits 50ms for audit persistence. Hold the real writer until the proposal
+    # returns so this exercises deferred persistence deterministically, not the runner's speed.
+    allow_record = threading.Event()
+    recorded = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    record_uploads = bot_handles._record_uploads
+
+    def deferred_record(*args):
+        try:
+            assert allow_record.wait(5), 'Test did not release the audit writer'
+            record_uploads(*args)
+        finally:
+            loop.call_soon_threadsafe(recorded.set)
+
+    monkeypatch.setattr(bot_handles, '_record_uploads', deferred_record)
     try:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             monkeypatch.setattr(models, 'registry_providers', lambda **_: lambda _: OpenAIChatAdapter(client, gateway=True))
             assert await propose_handle_with_model(SimpleNamespace(model_hub_runtime=Runtime(), vibe_agent_store=store),
                                                    display_name='小鸟') == proposal
+        assert not recorded.is_set()
+        allow_record.set()
+        if ending != 'partial':
+            await asyncio.wait_for(recorded.wait(), timeout=5)
         rows = run_read_only_query('select session_id, purpose, successful_wires from request_uploads', db_path=state_db,
                                    page_request=PageRequest(), user_context=instance_owner_context()).rows
         assert len(sent) == 1
@@ -284,6 +306,9 @@ async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, mon
         assert [(r['session_id'], r['purpose'], json.loads(r['successful_wires'])) for r in rows] == ([] if ending == 'partial' else [
             (None, 'bot_handle', [{'body_bytes': sent[0], 'source_id': 'src_served0001', 'source_kind': 'relay_key', 'sent_at_us': ANY}])])
     finally:
+        allow_record.set()
+        if ending != 'partial':
+            await asyncio.wait_for(recorded.wait(), timeout=5)
         engine.dispose()
 
 
