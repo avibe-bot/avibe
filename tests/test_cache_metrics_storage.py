@@ -116,14 +116,17 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
         conn.commit()
 
     result = run_read_only_query(
-        "select request_id, purpose, idle_s, classification, data_basis, input_tokens, cache_write_basis, writes_by_ttl, thread_attempts, successful_wires "
+        "select request_id, purpose, idle_s, classification, data_basis, input_tokens, cache_write_basis, writes_by_ttl, thread_attempts "
         "from cache_requests order by request_id",
         db_path=state_db, page_request=PageRequest(), user_context=instance_owner_context(),
     )
     by_id = {row["request_id"]: row for row in result.rows}
     assert json.loads(by_id['m-observed']['thread_attempts']) == cache['thread_attempts']
     assert by_id['m-scalar']['thread_attempts'] is None
-    for row in result.rows:
+    uploads = run_read_only_query('select request_id, successful_wires from request_uploads', db_path=state_db,
+                                  page_request=None, user_context=instance_owner_context()).rows
+    assert {row['request_id'] for row in uploads} == set(by_id)
+    for row in uploads:
         if row['request_id'] in {'m-scalar', 'm-invalid'}:
             assert row['successful_wires'] is None
         else:
@@ -139,10 +142,67 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
     assert purposes == {"attempt", "fork_turn"}
     totals = run_read_only_query(
         "select json_extract(w.value, '$.source_id') as source, sum(json_extract(w.value, '$.body_bytes')) as bytes "
-        "from cache_requests as r, json_each(r.successful_wires) as w group by source",
+        "from request_uploads as r, json_each(r.successful_wires) as w group by source",
         db_path=state_db, page_request=PageRequest(), user_context=instance_owner_context(),
     )
     assert [(row['source'], row['bytes']) for row in totals.rows] == [('src_fixture001', 3 * 450)]
+
+def _audit_fixture(conn, name, event, cache, *, session=None, at='2026-10-01T00:00:01Z'):
+    conn.execute(
+        "insert into agent_events (id, session_id, platform, event_type, visibility, content_json, metadata_json, created_at, updated_at) "
+        "values (?, ?, 'avibe', ?, 'audit', ?, '{}', ?, ?)",
+        (name, session, event, json.dumps({'cache': cache}), at, at),
+    )
+
+
+def test_receipt_only_uploads_do_not_change_report_or_legacy_clock(state_db):
+    from datetime import datetime, timezone
+    from core.handlers.cache_metrics import report
+
+    def summary():
+        return report(since=datetime(2026, 10, 1, tzinfo=timezone.utc), until=datetime(2026, 10, 2, tzinfo=timezone.utc),
+                      session_id=None, model=None, user_context=instance_owner_context(), db_path=state_db)
+
+    with sqlite3.connect(state_db) as conn:
+        _session(conn)
+        for i in (0, 2):
+            _response(conn, f'm-{i}', f'2026-10-01T00:00:0{i}Z', cache=None, usage={'input_tokens': 100}, context_seq=i+1)
+    expected = summary()
+    assert expected['requests'] == 2
+    with sqlite3.connect(state_db) as conn:
+        for i, kind in enumerate(('subscription', 'relay_key')):
+            _audit_fixture(conn, f'bot-{i}', 'bot_handle_request', {'version': 1, 'successful_wires': [
+                {'body_bytes': i+1, 'source_kind': kind, 'source_id': f'src_fixture00{i}'}]})
+        _audit_fixture(conn, 'cancel-cleanup', 'model_attempt', {'version': 1, 'receipt_only': True,
+                       'provider': 'anthropic', 'model': 'claude-test', 'protocol': 'anthropic', 'successful_wires': [
+                           {'body_bytes': 8, 'source_kind': 'unknown', 'source_id': None}]}, session='ses-cache')
+    assert summary() == expected
+    assert len(_documented_upload_totals(state_db)) == 3
+
+
+def _documented_upload_totals(db):
+    doc = Path(__file__).resolve().parents[1] / 'docs/plans/cache-metrics-implementation.md'
+    sql = doc.read_text().split('## Successful request uploads')[1].split('```sql\n')[1].split('```')[0]
+    return run_read_only_query(sql, db_path=db, page_request=None, user_context=instance_owner_context()).rows
+
+
+def test_documented_upload_aggregate_accepts_only_valid_receipts(state_db):
+    valid = {'body_bytes': 31, 'source_kind': 'relay_key', 'source_id': 'src_fixture001'}
+    with sqlite3.connect(state_db) as conn:
+        for i, value in enumerate((None, {}, 'not-json', json.dumps([valid]), [], ['bad'], [
+            valid, 'bad', False, None, {}, {**valid, 'body_bytes': True}, {**valid, 'body_bytes': '2'},
+            {**valid, 'body_bytes': -1}, {**valid, 'body_bytes': 0}, {**valid, 'source_kind': ['wrong']},
+            {**valid, 'source_id': 'not-an-id'}, {**valid, 'body_bytes': 19},
+        ])):
+            _audit_fixture(conn, f'bot-{i}', 'bot_handle_request', {'successful_wires': value})
+    normalized = run_read_only_query('select request_id, successful_wires from request_uploads', db_path=state_db,
+                                     page_request=None, user_context=instance_owner_context()).rows
+    by_id = {r['request_id']: r['successful_wires'] for r in normalized}
+    assert all(by_id[f'bot-{i}'] is None for i in (0, 1, 2, 3, 5))
+    assert by_id['bot-4'] == '[]'
+    assert _documented_upload_totals(state_db) == [
+        {'kind': 'relay_key', 'source': 'src_fixture001', 'completed_posts': 2, 'uploaded_bytes': 50}]
+
 
 @pytest.mark.parametrize('ending,proposal', [('success', 'bird'), ('invalid_handle', None), ('partial', None)])
 async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, monkeypatch, ending, proposal):
@@ -177,7 +237,7 @@ async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, mon
             monkeypatch.setattr(models, 'registry_providers', lambda **_: lambda _: OpenAIChatAdapter(client, gateway=True))
             assert await propose_handle_with_model(SimpleNamespace(model_hub_runtime=Runtime(), vibe_agent_store=store),
                                                    display_name='小鸟') == proposal
-        rows = run_read_only_query('select session_id, purpose, successful_wires from cache_requests', db_path=state_db,
+        rows = run_read_only_query('select session_id, purpose, successful_wires from request_uploads', db_path=state_db,
                                    page_request=PageRequest(), user_context=instance_owner_context()).rows
         assert len(sent) == 1
         assert [(r['session_id'], r['purpose'], json.loads(r['successful_wires'])) for r in rows] == ([] if ending == 'partial' else [
@@ -191,8 +251,9 @@ def test_cache_view_requires_member_access_for_audit_union(state_db: Path) -> No
         _session(conn)
         conn.commit()
     editor = AuthorizationContext(instance_role="editor")
-    with pytest.raises(ReadOnlyQueryError, match="agent_events"):
-        run_read_only_query("select * from cache_requests", db_path=state_db, page_request=PageRequest(), user_context=editor)
+    for view in ('cache_requests', 'request_uploads'):
+        with pytest.raises(ReadOnlyQueryError, match="agent_events"):
+            run_read_only_query(f"select * from {view}", db_path=state_db, page_request=PageRequest(), user_context=editor)
 
 
 def test_cache_attempt_recovery_uses_the_session_type_index_without_sorting_history(state_db: Path) -> None:

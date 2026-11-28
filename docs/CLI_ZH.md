@@ -345,6 +345,7 @@ vibe data query --sql-file query.sql --limit 50
 | `transcript` | `session_id`、`at`、`role`、`kind`、`text`、`turn_id`、`message_id` | 所有有正文的消息，`at` 是送达时间。`role` 为 `user`、`agent` 或 `harness`（Avibe 投递的输入：其他 Agent 的任务说明、回调、Watch 或 Task）；`kind` 是消息类型，例如 Agent 的回复是 `result`。 |
 | `turns` | `session_id`、`turn_id`、`started_at`、`ended_at`、`outcome`、`input`、`reply` | 每个有记录的 Agent 回合一行：它收到的原文和最终回复。没有回合记录的更早历史在 `transcript` 里。 |
 | `_cache_rows` | 内部来源视图 | 把响应、attempt 和 fork-turn 行规范化；稳定的对外查询应使用 `cache_requests`。 |
+| `request_uploads` | `request_id`、`session_id`、`turn_id`、`at`、`purpose`、`successful_wires` | Vibey 适配器已完成的 HTTP POST，包括没有会话的调用。展开 JSON 数组可按实际服务 Source 汇总请求体字节数；`NULL` 表示未知。仅含上传回执的记录不参与缓存统计。 |
 | `cache_requests` | `request_id`、`session_id`、`turn_id`、`at`、`started_at`、`provider`、`protocol`、`model`、`purpose`、分类/事实、估值 | 每个 Vibey 请求的缓存事实和当前价目表估值。缺少 `cache` 对象的旧行会明确标为 `timestamp_inferred`；`valuation` 是 JSON，可能是下限或没有 USD 值。 |
 
 两个函数用来处理长文本。`excerpt(text, 'term')` 返回 `text` 中第一个匹配 `term`

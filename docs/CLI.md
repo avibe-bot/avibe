@@ -436,6 +436,7 @@ views described below; they do not create database tables:
 | `transcript` | `session_id`, `at`, `role`, `kind`, `text`, `turn_id`, `message_id` | Every message with text, in delivery time `at`. `role` is `user`, `agent`, or `harness` (input Avibe delivered: another Agent's brief, a callback, a Watch or Task); `kind` is the message type, such as `result` for an Agent's reply. |
 | `turns` | `session_id`, `turn_id`, `started_at`, `ended_at`, `outcome`, `input`, `reply` | One row per recorded Agent Turn: the text it was given and its final reply. Older history without Turn records is in `transcript`. |
 | `_cache_rows` | Internal source view for cache diagnostics | Response, attempt, and fork-turn rows normalized before `cache_requests`; use `cache_requests` for a stable public shape. |
+| `request_uploads` | `request_id`, `session_id`, `turn_id`, `at`, `purpose`, `successful_wires` | Completed Vibey adapter POSTs, including sessionless calls. Expand the JSON array for measured body bytes and serving Source; `NULL` means unknown. Receipt-only rows do not enter cache statistics. |
 | `cache_requests` | `request_id`, `session_id`, `turn_id`, `at`, `started_at`, `provider`, `protocol`, `model`, `purpose`, classification/facts, valuation | Per-request Vibey cache facts and a current-list cost valuation. Rows with no `cache` object are explicitly `timestamp_inferred`; `valuation` is JSON and may be a lower bound or have no USD value. |
 
 Two functions help with long text. `excerpt(text, 'term')` returns about 300

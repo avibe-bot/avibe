@@ -15,11 +15,11 @@ Owner: `system-prompt-cache-tiers.md`, Metrics. Base: merged PR #3117. Only Vibe
 
 ## Successful request uploads
 
-`cache_requests.successful_wires` is a JSON array with one entry per **completed Vibey adapter HTTP POST**. `body_bytes` is the length of the serialized request body at the adapter's send boundary. It excludes headers and is not a token count, an estimate of an unchanged prefix, or a measurement of what a gateway or engine subsequently sends upstream. No exact cheap unchanged-prefix byte count is available, so none is recorded.
+`request_uploads.successful_wires` is a JSON array with one entry per **completed Vibey adapter HTTP POST**. `body_bytes` is the length of the serialized request body at the adapter's send boundary. It excludes headers and is not a token count, an estimate of an unchanged prefix, or a measurement of what a gateway or engine subsequently sends upstream. No exact cheap unchanged-prefix byte count is available, so none is recorded.
 
-Each receipt has `source_id` and `source_kind` (`official_api_key`, `relay_key`, `subscription`, or `unknown`). Use these fields, not the request's initially selected route. Hub attribution comes from the serving hop at launch, not today's Source configuration. Unverified or unavailable identity is null; missing classification is `unknown`. Receipts contain no body, URL or credential. A completed pause and its completed follow-up are separate entries. Refused requests, partials and attempts stopped before send contribute no receipt. Historical NULL means unmeasured; `[]` means there was no observed completed POST. As with other request diagnostics, this is not a crash-proof billing ledger.
+Each receipt has `source_id` and `source_kind` (`official_api_key`, `relay_key`, `subscription`, or `unknown`). Use these fields, not the request's initially selected route. Hub attribution comes from the serving hop at launch, not today's Source configuration. Unverified or unavailable identity is null; missing classification is `unknown`. Receipts contain no body, URL or credential. A completed pause and its completed follow-up are separate entries. Refused requests, partials and attempts stopped before send contribute no receipt. No upload is inferred from a missing or malformed receipt. The view returns NULL for an invalid container or an array with no valid entries, and keeps valid siblings in a mixed array. An explicitly empty array stays `[]`. As with other request diagnostics, this is not a crash-proof billing ledger.
 
-Sessionless Bot handle proposals are `purpose = 'bot_handle'`, with a null `session_id`; a completed request counts even when its answer is not a valid handle. Their receipts use the existing audit event store, not a synthetic conversation.
+Sessionless Bot handle proposals are `purpose = 'bot_handle'`, with a null `session_id`; a completed request counts even when its answer is not a valid handle. Their receipts use the existing audit event store, not a synthetic conversation. The `request_uploads` view includes them and receipt-only cleanup audits; `cache_requests` excludes both before comparing request times, so neither affects `vibe data cache`.
 
 For upload totals, expand **only** `successful_wires`: `thread_attempts` describes some of the same POSTs plus failed attempts, and `cache_state` is a recovery snapshot, not additional traffic.
 
@@ -27,7 +27,7 @@ For upload totals, expand **only** `successful_wires`: `thread_attempts` describ
 SELECT json_extract(w.value, '$.source_kind') AS kind,
        json_extract(w.value, '$.source_id') AS source,
        count(*) AS completed_posts, sum(json_extract(w.value, '$.body_bytes')) AS uploaded_bytes
-FROM cache_requests AS r, json_each(r.successful_wires) AS w
+FROM request_uploads AS r, json_each(r.successful_wires) AS w
 GROUP BY kind, source;
 ```
 

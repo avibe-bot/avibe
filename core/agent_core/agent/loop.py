@@ -947,7 +947,7 @@ class Agent:
         for facts in dangling.values():
             if facts['successful_wires']:
                 await self._cleanup(lambda facts=facts: self.store.append_audit(
-                    self.session_id, 'attempt', {'version': 1, 'error': None, 'cache': facts,
+                    self.session_id, 'attempt', {'version': 1, 'error': None, 'cache': {**facts, 'receipt_only': True},
                                                  'cache_state': list(self._cache_tracker.latest.values())},
                 ))
         await self._flush_diagnostics(emit)
