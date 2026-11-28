@@ -16,6 +16,10 @@ def victim(rows, profile, size, started):
     match = re.fullmatch(PROFILE, profile)
     if not match or not 0 < size <= LIMIT:
         return None
+    # Pagination is not a snapshot: one repeated ID makes the budget ambiguous,
+    # even if the duplicate rows agree or belong to an unrelated namespace.
+    if len({r['id'] for r in rows}) != len(rows):
+        return None
     platform = PREFIX + match[1] + '-'
     debug = [r for r in rows if r['ref'] == MASTER and r['key'].startswith(PREFIX)]
     own = sum(r['size_in_bytes'] for r in debug if r['key'].startswith(platform))
@@ -29,10 +33,12 @@ def victim(rows, profile, size, started):
         key = r['key']
         if not key.startswith(platform) or not re.fullmatch(PROFILE + r'-[0-9]+-[0-9]+', key):
             continue
-        if datetime.fromisoformat(r['created_at']) >= started:
-            # A new producer for our own profile already won; do not make another slot.
-            if key.startswith(profile + '-'):
-                return None
+        created = datetime.fromisoformat(r['created_at'])
+        # Repeat the producer's freshness check on the live inventory. A lookup
+        # miss is not proof of staleness. Protect later writers as well.
+        if key.startswith(profile + '-') and (started - created).total_seconds() < 86_400:
+            return None
+        if created >= started:
             continue
         if type(r['id']) is int and r['id'] > 0 and r['version'] and r['size_in_bytes'] > 0:
             candidates.append(r)

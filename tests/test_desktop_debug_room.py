@@ -30,6 +30,24 @@ def test_not_this_old_master_generation(updates):
     assert victim([entry(**updates)], PROFILE, 300_000_000, START) is None
 
 
+@pytest.mark.parametrize('created,eligible', [('2026-11-27T22:00:00Z', False),
+                                              ('2026-11-27T00:00:01Z', False),
+                                              ('2026-11-27T00:00:00Z', True),
+                                              ('2026-11-28T01:00:00Z', False)])
+def test_exact_profile_freshness_even_when_producer_lookup_missed(created, eligible):
+    row = entry(key=PROFILE + '-8-1', created_at=created)
+    assert bool(victim([row], PROFILE, 300_000_000, START)) is eligible
+
+
+@pytest.mark.parametrize('change', [{}, {'version': 'changed'}, {'size_in_bytes': 350_000_000}])
+def test_repeated_cache_id_abandons_inventory_even_on_final_recheck(change):
+    old = entry(size_in_bytes=200_000_000)
+    repeated = [old, {**old, **change}]
+    assert victim(repeated, PROFILE, 300_000_000, START) is None
+    snapshots = iter([[entry()], repeated])
+    reconcile(PROFILE, 300_000_000, START, lambda: next(snapshots), lambda _: pytest.fail('unexpected delete'))
+
+
 def test_global_capacity_and_newer_writer_are_rechecked():
     old = entry()
     extra = entry(id=22, key='other', size_in_bytes=8_350_000_001)
