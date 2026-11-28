@@ -163,8 +163,8 @@ def test_undelivered_notify_fails_typed(delivery: str) -> None:
     assert asyncio.run(exercise()) == "computer_script_notify_failed"
 
 
-def test_internal_routes_bound_notify_reject_oversized_and_omit_confirm() -> None:
-    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response, list[str]]:
+def test_internal_routes_bound_notify_and_reject_oversized() -> None:
+    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response, list[str]]:
         from tests.test_internal_server import _build_controller_double
 
         controller = _build_controller_double()
