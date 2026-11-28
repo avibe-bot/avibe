@@ -272,6 +272,33 @@ describe('linkifyMentions', () => {
       ['#<sesw34zgzgcvp>', '[#Check \\<https://evil.test\\> \\`code\\`](avibe-mention:session:sesw34zgzgcvp)'],
     ]);
   });
+
+  it('in agentReply mode, renders @<agent:name> and marker-destination links [label](#<id>) as mentions while keeping ordinary links and images untouched', () => {
+    const input =
+      'See [3.2.9 发版前检查](#<sesw34zgzgcvp>), [伙伴](@<bot:product>), @<agent:vibey>, [v](@<agent:vibey>), '
+      + '@<agent:ghost>, [missing](#<sesmissing99>), ![img](#<sesw34zgzgcvp>), and [anchor](#sesw34zgzgcvp).';
+    const { text, edits } = linkifyMentions(
+      input,
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+        { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+        { kind: 'agent', name: 'vibey' },
+      ],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['[3.2.9 发版前检查](#<sesw34zgzgcvp>)', '[#登录跳转修复](avibe-mention:session:sesw34zgzgcvp)'],
+      ['[伙伴](@<bot:product>)', '[@产品伙伴](avibe-mention:bot:product)'],
+      ['@<agent:vibey>', '[@vibey](avibe-mention:agent:vibey)'],
+      ['[v](@<agent:vibey>)', '[@vibey](avibe-mention:agent:vibey)'],
+      ['@<agent:ghost>', '@\\<agent:ghost>'],
+    ]);
+    expect(text).toContain('[missing](#<sesmissing99>)');
+    expect(text).toContain('![img](#<sesw34zgzgcvp>)');
+    expect(text).toContain('[anchor](#sesw34zgzgcvp)');
+  });
 });
 
 describe('referenceToMarker', () => {
@@ -283,16 +310,17 @@ describe('referenceToMarker', () => {
 });
 
 describe('formatMentionsPlainText', () => {
-  it('replaces resolved Session and Bot mentions with readable text while preserving code and unresolved ids', () => {
+  it('replaces resolved Session, Bot, Agent, and marker-destination link mentions while preserving code and unresolved ids', () => {
     const out = formatMentionsPlainText(
-      'Check #<sesw34zgzgcvp>, #sesuntitled01, @<bot:product>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.',
+      'Check [发版检查](#<sesw34zgzgcvp>), #sesuntitled01, @<bot:product>, @<agent:vibey>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.',
       [
         { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
         { kind: 'session', session_id: 'sesuntitled01', title: null, openable: true },
         { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+        { kind: 'agent', name: 'vibey' },
       ],
       '未命名会话',
     );
-    expect(out).toBe('Check 登录跳转修复, 未命名会话, @产品伙伴, #<sesmissing99>, and `#<sesw34zgzgcvp>`.');
+    expect(out).toBe('Check 登录跳转修复, 未命名会话, @产品伙伴, @vibey, #<sesmissing99>, and `#<sesw34zgzgcvp>`.');
   });
 });

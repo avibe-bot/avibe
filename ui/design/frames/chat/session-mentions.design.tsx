@@ -50,8 +50,8 @@ const conversation = [
   ),
   agentSays(
     tText(
-      '好，已经起了一个后台 Agent（#<sesw34zgzgcvp>），并把长链路排查交给了 #seslongtitle1，同时抄送 @<bot:product> 跟进验收。另外日志里提到的旧编号 #<sesmissing99> 在当前工作区找不到，所以保留原样；文档里的示例 `#<sesw34zgzgcvp>` 也不会被改写。',
-      'Done — I started a background Agent (#<sesw34zgzgcvp>), handed the reconnect audit to #seslongtitle1, and looped in @<bot:product> for review. The stale id #<sesmissing99> from the log does not resolve here so it stays plain text, and inline code `#<sesw34zgzgcvp>` is left untouched.',
+      '好，已经起了一个后台 @<agent:vibey>（[发版前检查](#<sesw34zgzgcvp>)），并把长链路排查交给了 #seslongtitle1，同时抄送 @<bot:product> 跟进验收。另外日志里提到的旧编号 #<sesmissing99> 在当前工作区找不到，所以保留原样；文档里的示例 `#<sesw34zgzgcvp>` 也不会被改写。',
+      'Done — I started a background @<agent:vibey> ([release check](#<sesw34zgzgcvp>)), handed the reconnect audit to #seslongtitle1, and looped in @<bot:product> for review. The stale id #<sesmissing99> from the log does not resolve here so it stays plain text, and inline code `#<sesw34zgzgcvp>` is left untouched.',
     ),
     8,
     {
@@ -60,6 +60,7 @@ const conversation = [
           { kind: 'session', session_id: 'sesw34zgzgcvp', title: SHORT_TITLE, openable: true },
           { kind: 'session', session_id: 'seslongtitle1', title: LONG_TITLE, openable: true },
           { kind: 'bot', handle: 'product', display_name: BOT_NAME },
+          { kind: 'agent', name: 'vibey' },
         ],
       },
     },

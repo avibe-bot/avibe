@@ -121,10 +121,11 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "\t#sesindent002\n"
         "\n"
         "URL fragment https://example.com/page#sesurl000001, [see #seslabel0001](https://example.com), "
-        "[link](#seslink00001), and <https://example.com/#sesauto00001> stay untouched.\n"
+        "[link](#seslink00001), ![img](#<sesimg000001>), and <https://example.com/#sesauto00001> stay untouched.\n"
+        "Marker-dest links [3.2.9 检查](#<sesmlink0001>), [产品](@<bot:product>), and @<agent:vibey> / [v](@<agent:antigravity>) are extracted.\n"
         "```ts\n#sesstreaming1\n"
     )
-    sids, bots = extract_mention_candidates(text_body, include_bare_sessions=True)
+    sids, bots, agent_names = extract_mention_candidates(text_body, include_bare_sessions=True)
     assert sids == [
         "sesw34zgzgcvp",
         "ses6jr7c5h2q6",
@@ -137,11 +138,13 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "sesemptyf001",
         "sescrlf00001",
         "seslistmid01",
+        "sesmlink0001",
     ]
     assert bots == ["product"]
+    assert agent_names == ["vibey", "antigravity"]
 
     # Without bare mode (e.g. non-agent messages), bare #ses... is ignored.
-    sids_bracket_only, bots_bracket_only = extract_mention_candidates(
+    sids_bracket_only, bots_bracket_only, agents_bracket_only = extract_mention_candidates(
         text_body, include_bare_sessions=False
     )
     assert sids_bracket_only == [
@@ -153,8 +156,10 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "sesemptyf001",
         "sescrlf00001",
         "seslistmid01",
+        "sesmlink0001",
     ]
     assert bots_bracket_only == ["product"]
+    assert agents_bracket_only == ["vibey", "antigravity"]
 
 
 def test_resolve_mentions_uses_live_titles_enforces_access_and_uses_pk_index(tmp_path, monkeypatch):
@@ -325,6 +330,7 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
         handle="product",
         authorization_context=_owner_context(),
     )
+    VibeAgentStore(db_path).create(name="vibey", backend="vibey")
     with engine.begin() as conn:
         messages_service.append(
             conn,
@@ -334,7 +340,7 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
             author="agent",
             source="agent",
             message_type="result",
-            text="好，已经起了一个后台 Agent（#sesworker001），同时同步 @<bot:product>，忽略 #<sesmissing99>。",
+            text="好，已经起了一个后台 @<agent:vibey>（[发版检查](#<sesworker001>)），同时同步 @<bot:product>，忽略 #<sesmissing99> 和 @<agent:ghost>。",
         )
         messages_service.append(
             conn,
@@ -344,7 +350,7 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
             author="harness",
             source="harness",
             message_type="harness",
-            text="[Reply truncated; use `vibe data query` to read #<sesworker001>'s transcript in full.] CC @<bot:product> #<sesmissing99>",
+            text="[Reply truncated; use `vibe data query` to read #<sesworker001>'s transcript in full.] CC @<bot:product> @<agent:vibey> #<sesmissing99>",
         )
 
     with engine.connect() as conn:
@@ -366,17 +372,23 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
                 "handle": "product",
                 "display_name": "产品伙伴",
             },
+            {
+                "kind": "agent",
+                "name": "vibey",
+            },
         ]
         assert msg["content"]["references"] == expected_refs
         assert harness_msg["content"]["references"] == expected_refs
 
-        # Restricted viewer gets openable Session ref on Harness rows too, never Bot refs.
+        # Restricted viewer gets only openable Session refs; Bot refs and unshared Agent refs are omitted.
         viewer_transcript = messages_service.list_session_messages(
             conn,
             session_id="sesmain00001",
             authorization_context=_viewer_context("viewer-1"),
         )
-        assert viewer_transcript["messages"][1]["content"]["references"] == [expected_refs[0]]
+        assert viewer_transcript["messages"][1]["content"]["references"] == [
+            expected_refs[0],
+        ]
 
         inbox = messages_service.list_inbox_sessions(
             conn,
@@ -386,7 +398,7 @@ def test_transcript_and_inbox_previews_enrich_mentions_per_reader(tmp_path, monk
         )
         [row] = inbox["sessions"]
         assert row["preview_text"] == (
-            "好，已经起了一个后台 Agent（登录跳转修复），同时同步 @产品伙伴，忽略 #<sesmissing99>。"
+            "好，已经起了一个后台 @vibey（登录跳转修复），同时同步 @产品伙伴，忽略 #<sesmissing99> 和 @<agent:ghost>。"
         )
 
 
@@ -461,6 +473,30 @@ def test_im_delivery_formats_links_per_platform_and_public_url(tmp_path, monkeyp
             session_id="sesmarkup001",
             title="*[phish](https://evil.test)*",
         )
+    VibeAgentStore(db_path).create(name="vibey", backend="vibey")
+    VibeAgentStore(db_path).create(name="disabled-agt", backend="vibey", enabled=False)
+
+    # Marker-destination links `[label](#<id>)` / `[label](@<bot:…>)` / `@<agent:name>`
+    # resolve to the live title/link on IM and never emit dead `#<ses…>` links.
+    link_form_src = (
+        "Check [3.2.9 检查](#<sesw34zgzgcvp>), [伙伴](@<bot:product>), @<agent:vibey>, "
+        "@<agent:disabled-agt>, @<agent:ghost>, and [missing](#<sesmissing99>)."
+    )
+    slack_link_form = render_im_mentions(
+        link_form_src, platform="slack", config=public_cfg, db_path=db_path
+    )
+    assert slack_link_form == (
+        f"Check {expected_link}, @产品伙伴, @vibey, "
+        "@<agent:disabled-agt>, @<agent:ghost>, and [missing](#<sesmissing99>)."
+    )
+    wechat_link_form = render_im_mentions(
+        link_form_src, platform="wechat", config=public_cfg, db_path=db_path
+    )
+    assert wechat_link_form == (
+        f"Check {expected_plain}, @产品伙伴, @vibey, "
+        "@<agent:disabled-agt>, @<agent:ghost>, and [missing](#<sesmissing99>)."
+    )
+
     plain_markup_tg = TelegramFormatter().render(
         render_im_mentions(
             "See #<sesmarkup001> and [outer #sesw34zgzgcvp](https://example.com).",

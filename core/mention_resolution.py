@@ -32,9 +32,10 @@ from config.platform_registry import get_platform_descriptor
 from config.v2_config import V2Config
 from core.avibe_cloud import workbench_url
 from core.bots import bot_display_name, bot_handle_for_session_id, list_bots_in
+from core.vibe_agents import normalize_agent_name
 from storage.agent_session_rows import is_bot_session, session_openable_in_chat
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions, scopes
+from storage.models import agent_sessions, agents, scopes
 from vibe.authorization import AuthorizationContext, require_instance_role
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,14 @@ _SKIP_SEGMENT_RE = re.compile(
     r"|(?P<fence>(?P<f_tilde>~{3,})(?:(?!\r?\n\r?\n)[\s\S])*?(?P=f_tilde))"
     r"|(?P<code_span>(?<!`)(?P<bt>`+)(?!`)(?:(?!\r?\n\r?\n)[\s\S])*?(?<!`)(?P=bt)(?!`))"
     r"|(?P<autolink><https?://[^>\s]+>)"
-    r"|(?P<md_link>\[[^\]\n]*\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))"
+    r"|(?P<md_link>(?P<md_label>\[[^\]\n]*\])(?P<md_dest>\((?:[^()\s]|(?:\([^()\s]*\)))*\)))"
     r"|(?P<link_dest>\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))",
 )
+
+# Exact bracketed mention marker used as a Markdown link destination, e.g.
+# `[3.2.9 checklist](#<ses...>)`, `[Product](@<bot:product>)`, or `[vibey](@<agent:vibey>)`.
+# Ordinary destinations (URLs, `#heading` anchors, URL fragments) never match.
+_MARKER_LINK_DEST_RE = re.compile(r"^\((?P<trigger>[#@])<(?P<inner>[^>\n]+)>\)$")
 
 _LIST_ITEM_LINE_RE = re.compile(r"^ {0,3}(?:[-*+]|\d+[.)])[ \t]")
 _LIST_MARKER_RE = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]")
@@ -114,14 +120,22 @@ class ResolvedBot:
 
 
 @dataclass(frozen=True)
+class ResolvedAgent:
+    """One enabled, accessible Agent."""
+
+    name: str
+
+
+@dataclass(frozen=True)
 class ResolvedMentions:
-    """Resolved Session and Bot lookups for one batch."""
+    """Resolved Session, Bot, and Agent lookups for one batch."""
 
     sessions: dict[str, ResolvedSession] = field(default_factory=dict)
     bots: dict[str, ResolvedBot] = field(default_factory=dict)
+    agents: dict[str, ResolvedAgent] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
-        return not self.sessions and not self.bots
+        return not self.sessions and not self.bots and not self.agents
 
 
 def _clean_title(value: Any) -> str:
@@ -168,13 +182,39 @@ def _has_runtime_management_access(context: AuthorizationContext) -> bool:
     return not context.is_remote or context.can_manage_instance
 
 
-def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
-    """Yield ``(start, end, is_prose)`` partitioning *text* around code/URLs.
+def _parse_marker_link_dest(dest: str) -> tuple[str, str] | None:
+    """If *dest* is literally ``(#<id>)``, ``(@<bot:handle>)``, or ``(@<agent:name>)``,
+    return ``(kind, value)``; otherwise return None so ordinary links stay untouched."""
+    m = _MARKER_LINK_DEST_RE.match(dest)
+    if m is None:
+        return None
+    trigger = m.group("trigger")
+    inner = (m.group("inner") or "").strip()
+    if not inner:
+        return None
+    if trigger == "#":
+        return ("session", inner)
+    if trigger == "@" and inner.startswith("bot:"):
+        handle = inner[4:].strip()
+        return ("bot", handle) if handle else None
+    if trigger == "@" and inner.startswith("agent:"):
+        name = inner[6:].strip()
+        return ("agent", name) if name else None
+    return None
 
-    Skips fenced code blocks, inline code spans, autolinks, Markdown links, and
-    CommonMark indented code blocks (4+ spaces or a leading tab following a
-    blank line or start of text whose preceding non-blank line is not a list
-    item/continuation, and whose content does not start with a list marker).
+
+def _normalize_agent_lookup(name: str) -> str | None:
+    try:
+        return normalize_agent_name(name)
+    except ValueError:
+        return None
+
+
+def _iter_slices(text: str) -> Iterable[tuple[int, int, str, tuple[str, str] | None]]:
+    """Yield ``(start, end, kind, marker_target)`` partitioning *text*.
+
+    ``kind`` is ``"prose"``, ``"marker_link"`` (a non-image Markdown link outside
+    code whose destination is an exact bracketed mention marker), or ``"skip"``.
     """
 
     def _is_blank_physical_line(line_start: int) -> bool:
@@ -187,7 +227,9 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
     last_non_blank_was_list = False
     current_line_is_code = False
 
-    def _split_indented_lines(seg_start: int, seg_end: int) -> Iterable[tuple[int, int, bool]]:
+    def _split_indented_lines(
+        seg_start: int, seg_end: int
+    ) -> Iterable[tuple[int, int, str, tuple[str, str] | None]]:
         nonlocal after_blank, in_indented_code, last_non_blank_was_list, current_line_is_code
         cursor = seg_start
         while cursor < seg_end:
@@ -198,7 +240,7 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
                 if _is_blank_physical_line(cursor):
                     after_blank = True
                     current_line_is_code = False
-                    yield cursor, line_end, True
+                    yield cursor, line_end, "prose", None
                     cursor = line_end
                     continue
                 line = text[cursor:line_end]
@@ -221,14 +263,24 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
                     after_blank = False
                     last_non_blank_was_list = bool(_LIST_ITEM_LINE_RE.match(line))
                     current_line_is_code = False
-            yield cursor, line_end, not current_line_is_code
+            yield cursor, line_end, "skip" if current_line_is_code else "prose", None
             cursor = line_end
 
     pos = 0
     for match in _SKIP_SEGMENT_RE.finditer(text):
         if match.start() > pos:
             yield from _split_indented_lines(pos, match.start())
-        yield match.start(), match.end(), False
+        md_dest = match.group("md_dest")
+        is_image = match.start() > 0 and text[match.start() - 1] == "!"
+        marker_target = (
+            _parse_marker_link_dest(md_dest)
+            if md_dest is not None and not is_image and not current_line_is_code
+            else None
+        )
+        if marker_target is not None:
+            yield match.start(), match.end(), "marker_link", marker_target
+        else:
+            yield match.start(), match.end(), "skip", None
         if match.group("line_fence") is not None:
             seg = match.group(0)
             fence_line = seg[1:] if seg.startswith("\n") else seg
@@ -250,7 +302,7 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
 def _might_contain_mentions(text: str, *, include_bare_sessions: bool) -> bool:
     if not text:
         return False
-    if "#<" in text or "@<bot:" in text:
+    if "#<" in text or "@<bot:" in text or "@<agent:" in text:
         return True
     return include_bare_sessions and "#ses" in text
 
@@ -259,40 +311,57 @@ def extract_mention_candidates(
     text: str,
     *,
     include_bare_sessions: bool = False,
-) -> tuple[list[str], list[str]]:
-    """Return deduplicated ``(session_ids, bot_handles)`` referenced in prose."""
+) -> tuple[list[str], list[str], list[str]]:
+    """Return deduplicated ``(session_ids, bot_handles, agent_names)`` referenced in prose."""
     if not _might_contain_mentions(text, include_bare_sessions=include_bare_sessions):
-        return [], []
+        return [], [], []
     pattern = _AGENT_MENTION_RE if include_bare_sessions else _BRACKETED_MENTION_RE
     session_ids: list[str] = []
     seen_sessions: set[str] = set()
     bot_handles: list[str] = []
     seen_bots: set[str] = set()
-    for start, end, is_prose in _iter_prose_slices(text):
-        if not is_prose:
+    agent_names: list[str] = []
+    seen_agents: set[str] = set()
+
+    def _add(kind: str, value: str) -> None:
+        if not value:
+            return
+        if kind == "session":
+            if value not in seen_sessions:
+                seen_sessions.add(value)
+                session_ids.append(value)
+        elif kind == "bot":
+            if value not in seen_bots:
+                seen_bots.add(value)
+                bot_handles.append(value)
+        elif kind == "agent":
+            if value not in seen_agents:
+                seen_agents.add(value)
+                agent_names.append(value)
+
+    for start, end, kind, marker_target in _iter_slices(text):
+        if kind == "marker_link" and marker_target is not None:
+            _add(marker_target[0], marker_target[1])
+            continue
+        if kind != "prose":
             continue
         segment = text[start:end]
         for match in pattern.finditer(segment):
             bare = match.groupdict().get("bare_session")
             if bare:
-                if bare not in seen_sessions:
-                    seen_sessions.add(bare)
-                    session_ids.append(bare)
+                _add("session", bare)
                 continue
             trigger = match.group("trigger")
             inner = (match.group("inner") or "").strip()
             if not inner:
                 continue
             if trigger == "#":
-                if inner not in seen_sessions:
-                    seen_sessions.add(inner)
-                    session_ids.append(inner)
+                _add("session", inner)
             elif trigger == "@" and inner.startswith("bot:"):
-                handle = inner[4:].strip()
-                if handle and handle not in seen_bots:
-                    seen_bots.add(handle)
-                    bot_handles.append(handle)
-    return session_ids, bot_handles
+                _add("bot", inner[4:].strip())
+            elif trigger == "@" and inner.startswith("agent:"):
+                _add("agent", inner[6:].strip())
+    return session_ids, bot_handles, agent_names
 
 
 def resolve_mentions_in_conn(
@@ -300,14 +369,16 @@ def resolve_mentions_in_conn(
     *,
     session_ids: Iterable[str] = (),
     bot_handles: Iterable[str] = (),
+    agent_names: Iterable[str] = (),
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     language: str | None = None,
     config: V2Config | None = None,
 ) -> ResolvedMentions:
-    """Batch-resolve openable Sessions and active Bots in one indexed query."""
+    """Batch-resolve openable Sessions, active Bots, and enabled Agents."""
     unique_sessions = list(dict.fromkeys(str(sid).strip() for sid in session_ids if str(sid or "").strip()))
     unique_bots = list(dict.fromkeys(str(h).strip() for h in bot_handles if str(h or "").strip()))
-    if not unique_sessions and not unique_bots:
+    unique_agents = list(dict.fromkeys(str(a).strip() for a in agent_names if str(a or "").strip()))
+    if not unique_sessions and not unique_bots and not unique_agents:
         return ResolvedMentions()
 
     ctx: AuthorizationContext | None = None
@@ -403,7 +474,46 @@ def resolve_mentions_in_conn(
                     display_title=display_title,
                 )
 
-    return ResolvedMentions(sessions=resolved_sessions, bots=resolved_bots)
+    resolved_agents: dict[str, ResolvedAgent] = {}
+    if unique_agents:
+        normalized_by_input: dict[str, str] = {}
+        for raw_name in unique_agents:
+            norm = _normalize_agent_lookup(raw_name)
+            if norm:
+                normalized_by_input[raw_name] = norm
+        unique_norms = list(dict.fromkeys(normalized_by_input.values()))
+        if unique_norms:
+            matched_rows: list[dict[str, Any]] = []
+            for offset in range(0, len(unique_norms), _SQL_IN_CHUNK_SIZE):
+                chunk = unique_norms[offset : offset + _SQL_IN_CHUNK_SIZE]
+                rows = conn.execute(
+                    select(agents.c.id, agents.c.name, agents.c.normalized_name)
+                    .where(
+                        agents.c.normalized_name.in_(chunk),
+                        agents.c.enabled == 1,
+                        agents.c.archived_at.is_(None),
+                    )
+                ).mappings().all()
+                matched_rows.extend(dict(r) for r in rows)
+            if ctx is not None and matched_rows:
+                from storage import resource_access_service
+
+                matched_rows = resource_access_service.filter_accessible_resources(
+                    ctx,
+                    "agent",
+                    matched_rows,
+                    connection=conn,
+                )
+            for row in matched_rows:
+                canonical = _clean_title(row["name"]) or str(row["normalized_name"])
+                norm = str(row["normalized_name"])
+                resolved_agents[norm] = ResolvedAgent(name=canonical)
+
+    return ResolvedMentions(
+        sessions=resolved_sessions,
+        bots=resolved_bots,
+        agents=resolved_agents,
+    )
 
 
 def render_mentions_as_text(
@@ -417,8 +527,11 @@ def render_mentions_as_text(
     """Replace resolved mention markers in *text* with readable titles or links.
 
     Unresolved markers, code spans, fenced/indented code blocks, autolinks, and
-    Markdown links stay verbatim. When *escape_markdown* is True (IM delivery),
-    untrusted titles and display names have Markdown metacharacters escaped.
+    ordinary Markdown links stay verbatim. A Markdown link whose destination is
+    literally a resolved mention marker (``[label](#<id>)``) is rendered as that
+    mention so it never becomes a dead link. When *escape_markdown* is True (IM
+    delivery), untrusted titles and display names have Markdown metacharacters
+    escaped.
     """
     if not text or resolved.is_empty():
         return text
@@ -426,37 +539,57 @@ def render_mentions_as_text(
         return text
     pattern = _AGENT_MENTION_RE if include_bare_sessions else _BRACKETED_MENTION_RE
 
+    def _format_target(kind: str, value: str) -> str | None:
+        if kind == "session":
+            session = resolved.sessions.get(value)
+            if session is None:
+                return None
+            return _format_session_mention(
+                session, link_session_url, escape_markdown=escape_markdown
+            )
+        if kind == "bot":
+            bot = resolved.bots.get(value)
+            if bot is None:
+                return None
+            name = _escape_markdown_text(bot.display_name) if escape_markdown else bot.display_name
+            return f"@{name}"
+        if kind == "agent":
+            norm = _normalize_agent_lookup(value)
+            agent = resolved.agents.get(norm) if norm else None
+            if agent is None:
+                return None
+            name = _escape_markdown_text(agent.name) if escape_markdown else agent.name
+            return f"@{name}"
+        return None
+
     def _replace(match: re.Match[str]) -> str:
         bare = match.groupdict().get("bare_session")
         if bare:
-            session = resolved.sessions.get(bare)
-            if session is None:
-                return match.group(0)
-            return _format_session_mention(
-                session, link_session_url, escape_markdown=escape_markdown
-            )
+            formatted = _format_target("session", bare)
+            return formatted if formatted is not None else match.group(0)
         trigger = match.group("trigger")
         inner = (match.group("inner") or "").strip()
         if trigger == "#":
-            session = resolved.sessions.get(inner)
-            if session is None:
-                return match.group(0)
-            return _format_session_mention(
-                session, link_session_url, escape_markdown=escape_markdown
-            )
+            formatted = _format_target("session", inner)
+            return formatted if formatted is not None else match.group(0)
         if trigger == "@" and inner.startswith("bot:"):
-            handle = inner[4:].strip()
-            bot = resolved.bots.get(handle)
-            if bot is None:
-                return match.group(0)
-            name = _escape_markdown_text(bot.display_name) if escape_markdown else bot.display_name
-            return f"@{name}"
+            formatted = _format_target("bot", inner[4:].strip())
+            return formatted if formatted is not None else match.group(0)
+        if trigger == "@" and inner.startswith("agent:"):
+            formatted = _format_target("agent", inner[6:].strip())
+            return formatted if formatted is not None else match.group(0)
         return match.group(0)
 
     parts: list[str] = []
-    for start, end, is_prose in _iter_prose_slices(text):
+    for start, end, kind, marker_target in _iter_slices(text):
         segment = text[start:end]
-        parts.append(pattern.sub(_replace, segment) if is_prose else segment)
+        if kind == "prose":
+            parts.append(pattern.sub(_replace, segment))
+        elif kind == "marker_link" and marker_target is not None:
+            formatted = _format_target(marker_target[0], marker_target[1])
+            parts.append(formatted if formatted is not None else segment)
+        else:
+            parts.append(segment)
     return "".join(parts)
 
 
@@ -495,8 +628,10 @@ def render_im_mentions(
     """
     if not text or not _might_contain_mentions(text, include_bare_sessions=True):
         return text
-    session_ids, bot_handles = extract_mention_candidates(text, include_bare_sessions=True)
-    if not session_ids and not bot_handles:
+    session_ids, bot_handles, agent_names = extract_mention_candidates(
+        text, include_bare_sessions=True
+    )
+    if not session_ids and not bot_handles and not agent_names:
         return text
 
     try:
@@ -519,6 +654,7 @@ def render_im_mentions(
                 conn,
                 session_ids=session_ids,
                 bot_handles=bot_handles,
+                agent_names=agent_names,
                 authorization_context=None,
                 language=language,
                 config=resolved_config,
@@ -558,15 +694,16 @@ def render_plain_mentions_in_conn(
     """Resolve mentions in one preview/notification string to plain text."""
     if not text or not _might_contain_mentions(text, include_bare_sessions=include_bare_sessions):
         return text
-    session_ids, bot_handles = extract_mention_candidates(
+    session_ids, bot_handles, agent_names = extract_mention_candidates(
         text, include_bare_sessions=include_bare_sessions
     )
-    if not session_ids and not bot_handles:
+    if not session_ids and not bot_handles and not agent_names:
         return text
     resolved = resolve_mentions_in_conn(
         conn,
         session_ids=session_ids,
         bot_handles=bot_handles,
+        agent_names=agent_names,
         authorization_context=authorization_context,
         language=language,
         config=config,
@@ -591,6 +728,7 @@ def enrich_inbox_previews_in_conn(
         return
     all_sessions: list[str] = []
     all_bots: list[str] = []
+    all_agents: list[str] = []
     candidate_rows: list[dict[str, Any]] = []
     for row in inbox_rows:
         preview = row.get("preview_text")
@@ -598,18 +736,22 @@ def enrich_inbox_previews_in_conn(
             continue
         if not _might_contain_mentions(preview, include_bare_sessions=True):
             continue
-        sids, handles = extract_mention_candidates(preview, include_bare_sessions=True)
-        if not sids and not handles:
+        sids, handles, agents_list = extract_mention_candidates(
+            preview, include_bare_sessions=True
+        )
+        if not sids and not handles and not agents_list:
             continue
         candidate_rows.append(row)
         all_sessions.extend(sids)
         all_bots.extend(handles)
+        all_agents.extend(agents_list)
     if not candidate_rows:
         return
     resolved = resolve_mentions_in_conn(
         conn,
         session_ids=all_sessions,
         bot_handles=all_bots,
+        agent_names=all_agents,
         authorization_context=authorization_context,
         language=language,
     )
@@ -636,8 +778,9 @@ def enrich_message_rows_in_conn(
     Runs ONE batch SQLite lookup across the whole page of rows, scoped to the
     caller's ``authorization_context``:
 
-    * Agent- and Harness-authored rows get resolved Session and Bot references
-      for both bracketed (``#<id>``, ``@<bot:handle>``) and bare (``#ses...``)
+    * Agent- and Harness-authored rows get resolved Session, Bot, and Agent
+      references for bracketed (``#<id>``, ``@<bot:handle>``, ``@<agent:name>``),
+      marker-destination link (``[label](#<id>)``), and bare (``#ses...``)
       mentions. Unresolved or inaccessible ids are omitted so the client leaves
       them as plain text.
     * User-authored rows that already carry a composer ``references`` sidecar
@@ -648,7 +791,8 @@ def enrich_message_rows_in_conn(
         return
     all_sessions: list[str] = []
     all_bots: list[str] = []
-    row_candidates: list[tuple[dict[str, Any], bool, list[str], list[str]]] = []
+    all_agents: list[str] = []
+    row_candidates: list[tuple[dict[str, Any], bool, list[str], list[str], list[str]]] = []
 
     for row in rows:
         author = str(row.get("author") or "").strip()
@@ -660,12 +804,15 @@ def enrich_message_rows_in_conn(
         if author in {"agent", "harness"}:
             if not isinstance(text, str) or not text:
                 continue
-            sids, handles = extract_mention_candidates(text, include_bare_sessions=True)
-            if not sids and not handles:
+            sids, handles, agents_list = extract_mention_candidates(
+                text, include_bare_sessions=True
+            )
+            if not sids and not handles and not agents_list:
                 continue
-            row_candidates.append((row, True, sids, handles))
+            row_candidates.append((row, True, sids, handles, agents_list))
             all_sessions.extend(sids)
             all_bots.extend(handles)
+            all_agents.extend(agents_list)
         elif has_existing:
             sids = [
                 str(ref.get("session_id")).strip()
@@ -679,7 +826,7 @@ def enrich_message_rows_in_conn(
             ]
             if not sids and not handles:
                 continue
-            row_candidates.append((row, False, sids, handles))
+            row_candidates.append((row, False, sids, handles, []))
             all_sessions.extend(sids)
             all_bots.extend(handles)
 
@@ -690,11 +837,12 @@ def enrich_message_rows_in_conn(
         conn,
         session_ids=all_sessions,
         bot_handles=all_bots,
+        agent_names=all_agents,
         authorization_context=authorization_context,
         language=language,
     )
 
-    for row, is_agent, sids, handles in row_candidates:
+    for row, is_agent, sids, handles, agents_list in row_candidates:
         content = dict(row.get("content")) if isinstance(row.get("content"), dict) else {}
         if is_agent:
             refs: list[dict[str, Any]] = []
@@ -721,6 +869,14 @@ def enrich_message_rows_in_conn(
                         "display_name": bot.display_name,
                     }
                 )
+            seen_agent_names: set[str] = set()
+            for raw_agent in agents_list:
+                norm = _normalize_agent_lookup(raw_agent)
+                agent = resolved.agents.get(norm) if norm else None
+                if agent is None or agent.name in seen_agent_names:
+                    continue
+                seen_agent_names.add(agent.name)
+                refs.append({"kind": "agent", "name": agent.name})
             if refs:
                 content["references"] = refs
                 row["content"] = content

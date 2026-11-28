@@ -54,10 +54,11 @@ describe('Agent reply Session & Bot mentions in Markdown', () => {
       { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
       { kind: 'session', session_id: 'seslongtitle1', title: '一个非常非常长的后台会话标题用于验证芯片内的省略号截断效果', openable: true },
       { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+      { kind: 'agent', name: 'vibey' },
     ];
     const content =
-      '好，已经起了一个后台 Agent（#sesw34zgzgcvp），并同步 #<seslongtitle1> 给 @<bot:product>。'
-      + '不存在的 #<sesunknown123> 和 #sesunknown456 保持原样，代码里的 `#<sesw34zgzgcvp>` 也不动。';
+      '好，已经起了一个后台 @<agent:vibey>（[发版检查](#<sesw34zgzgcvp>)），并同步 #<seslongtitle1> 给 @<bot:product>。'
+      + '不存在的 #<sesunknown123>、#sesunknown456 和 @<agent:ghost> 保持原样，代码里的 `#<sesw34zgzgcvp>` 也不动。';
 
     const { container } = render(
       <I18nextProvider i18n={i18n}>
@@ -87,8 +88,10 @@ describe('Agent reply Session & Bot mentions in Markdown', () => {
     // Code span stays literal.
     expect(container.querySelector('code')?.textContent).toBe('#<sesw34zgzgcvp>');
 
-    // Bot mention renders as BotMentionChip with its display name.
+    // Bot and Agent mentions render as chips; unresolved @<agent:ghost> stays literal.
     expect(container.textContent).toContain('@产品伙伴');
+    expect(container.textContent).toContain('@vibey');
+    expect(container.textContent).toContain('@<agent:ghost>');
   });
 
   it('shows localized untitled label for an existing untitled session and updates live on title change', () => {

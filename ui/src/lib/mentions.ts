@@ -115,6 +115,29 @@ const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
 const LIST_ITEM_LINE_RE = /^ {0,3}(?:[-*+]|\d+[.)])[ \t]/;
 const LIST_MARKER_RE = /^(?:[-*+]|\d+[.)])[ \t]/;
 const INLINE_CODE_SPAN_RE = /(?<!`)(`+)(?!`)(?:(?!\r?\n\r?\n)[\s\S])*?(?<!`)\1(?!`)/g;
+const MARKER_LINK_DEST_RE = /^\(([#@])<([^>\n]+)>\)$/;
+
+function parseMarkerLinkDestination(linkDest: string): { kind: MentionTarget; value: string } | null {
+  const m = MARKER_LINK_DEST_RE.exec(linkDest);
+  if (!m) return null;
+  const trigger = m[1];
+  const inner = m[2].trim();
+  if (!inner) return null;
+  if (trigger === '#') return { kind: 'session', value: inner };
+  if (trigger === '@' && inner.startsWith('bot:')) {
+    const handle = inner.slice(4).trim();
+    return handle ? { kind: 'bot', value: handle } : null;
+  }
+  if (trigger === '@' && inner.startsWith('agent:')) {
+    const name = inner.slice(6).trim();
+    return name ? { kind: 'agent', value: name } : null;
+  }
+  return null;
+}
+
+function normalizeAgentKey(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+}
 
 // Segments skipped during mention rewriting:
 // 1. Line-start fenced code blocks (any leading indentation so code blocks
@@ -155,7 +178,7 @@ export function linkifyMentions(
   const sessionRefs = new Map<string, SessionReference>();
   const botNames = new Map<string, string>();
   const botRefHandles = new Set<string>();
-  const agentRefNames = new Set<string>();
+  const agentRefNames = new Map<string, string>();
   for (const ref of references ?? []) {
     if (ref.kind === 'session') {
       sessionRefs.set(ref.session_id, ref);
@@ -163,9 +186,13 @@ export function linkifyMentions(
       botRefHandles.add(ref.handle);
       if (ref.display_name) botNames.set(ref.handle, ref.display_name);
     } else if (ref.kind === 'agent') {
-      agentRefNames.add(ref.name);
+      agentRefNames.set(ref.name, ref.name);
+      const norm = normalizeAgentKey(ref.name);
+      if (norm) agentRefNames.set(norm, ref.name);
     }
   }
+  const resolveAgentName = (raw: string): string | undefined =>
+    agentRefNames.get(raw) ?? agentRefNames.get(normalizeAgentKey(raw));
   const edits: TextEdit[] = [];
 
   const rewriteLegacy = (segment: string, base: number): string =>
@@ -227,11 +254,14 @@ export function linkifyMentions(
             edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
             return link;
           }
-        } else if (agentRefNames.has(marker.name)) {
-          const label = escapeMarkdownLabel(`@${marker.name}`);
-          const link = `[${label}](${MENTION_LINK_SCHEME}:agent:${encodeURIComponent(marker.name)})`;
-          edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
-          return link;
+        } else if (inner.startsWith('agent:')) {
+          const agentName = resolveAgentName(marker.name.trim());
+          if (agentName) {
+            const label = escapeMarkdownLabel(`@${agentName}`);
+            const link = `[${label}](${MENTION_LINK_SCHEME}:agent:${encodeURIComponent(agentName)})`;
+            edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
+            return link;
+          }
         }
         const escaped = `${trigger}\\<${inner}>`;
         edits.push({ start: base + at, end: base + at + full.length, inserted: escaped.length });
@@ -343,8 +373,36 @@ export function linkifyMentions(
     const seg = m[0];
     const linkLabel = m.groups?.linkLabel;
     const linkDest = m.groups?.linkDest;
+    const isImage = m.index > 0 && text[m.index - 1] === '!';
     if (agentReply && linkLabel !== undefined && linkDest !== undefined && !currentLineIsCode) {
-      result += escapeLinkLabel(linkLabel, m.index) + linkDest;
+      let replacedLink: string | null = null;
+      if (!isImage) {
+        const destTarget = parseMarkerLinkDestination(linkDest);
+        if (destTarget?.kind === 'session') {
+          const ref = sessionRefs.get(destTarget.value);
+          if (ref && ref.openable !== false) {
+            const label = escapeMarkdownLabel(`#${ref.title || destTarget.value}`);
+            replacedLink = `[${label}](${MENTION_LINK_SCHEME}:session:${encodeURIComponent(destTarget.value)})`;
+          }
+        } else if (destTarget?.kind === 'bot') {
+          if (botRefHandles.has(destTarget.value)) {
+            const label = escapeMarkdownLabel(`@${botNames.get(destTarget.value) || destTarget.value}`);
+            replacedLink = `[${label}](${MENTION_LINK_SCHEME}:bot:${encodeURIComponent(destTarget.value)})`;
+          }
+        } else if (destTarget?.kind === 'agent') {
+          const agentName = resolveAgentName(destTarget.value);
+          if (agentName) {
+            const label = escapeMarkdownLabel(`@${agentName}`);
+            replacedLink = `[${label}](${MENTION_LINK_SCHEME}:agent:${encodeURIComponent(agentName)})`;
+          }
+        }
+      }
+      if (replacedLink !== null) {
+        edits.push({ start: m.index, end: m.index + seg.length, inserted: replacedLink.length });
+        result += replacedLink;
+      } else {
+        result += escapeLinkLabel(linkLabel, m.index) + linkDest;
+      }
     } else {
       result += seg;
     }
@@ -412,38 +470,50 @@ export function formatMentionsPlainText(
   const sessionRefs = new Map<string, SessionReference>();
   const botNames = new Map<string, string>();
   const botHandles = new Set<string>();
+  const agentNames = new Map<string, string>();
   for (const ref of references) {
     if (ref.kind === 'session') {
       sessionRefs.set(ref.session_id, ref);
     } else if (ref.kind === 'bot') {
       botHandles.add(ref.handle);
       if (ref.display_name) botNames.set(ref.handle, ref.display_name);
+    } else if (ref.kind === 'agent') {
+      agentNames.set(ref.name, ref.name);
+      const norm = normalizeAgentKey(ref.name);
+      if (norm) agentNames.set(norm, ref.name);
     }
   }
-  if (!sessionRefs.size && !botHandles.size) return text;
+  if (!sessionRefs.size && !botHandles.size && !agentNames.size) return text;
+
+  const formatTarget = (kind: MentionTarget, value: string): string | null => {
+    if (kind === 'session') {
+      const ref = sessionRefs.get(value);
+      if (!ref || ref.openable === false) return null;
+      return ref.title?.trim() || untitledLabel || value;
+    }
+    if (kind === 'bot') {
+      return botHandles.has(value) ? `@${botNames.get(value) || value}` : null;
+    }
+    const agent = agentNames.get(value) ?? agentNames.get(normalizeAgentKey(value));
+    return agent ? `@${agent}` : null;
+  };
 
   const replaceSegment = (segment: string): string =>
     segment.replace(
       AGENT_MENTION_RE,
       (full: string, trigger: string | undefined, inner: string | undefined, bareSession: string | undefined) => {
         if (bareSession) {
-          const ref = sessionRefs.get(bareSession);
-          if (!ref || ref.openable === false) return full;
-          return ref.title?.trim() || untitledLabel || bareSession;
+          return formatTarget('session', bareSession) ?? full;
         }
         if (!trigger || inner === undefined) return full;
         if (trigger === '#') {
-          const sid = inner.trim();
-          const ref = sessionRefs.get(sid);
-          if (!ref || ref.openable === false) return full;
-          return ref.title?.trim() || untitledLabel || sid;
+          return formatTarget('session', inner.trim()) ?? full;
         }
         const marker = parseAtMarker(inner);
         if (marker.target === 'bot') {
-          const handle = marker.name.trim();
-          if (botHandles.has(handle)) return `@${botNames.get(handle) || handle}`;
+          return formatTarget('bot', marker.name.trim()) ?? full;
         }
-        return full;
+        return formatTarget('agent', marker.name.trim()) ?? full;
       },
     );
 
@@ -452,7 +522,11 @@ export function formatMentionsPlainText(
   SKIP_SEGMENT_RE.lastIndex = 0;
   for (let m = SKIP_SEGMENT_RE.exec(text); m; m = SKIP_SEGMENT_RE.exec(text)) {
     if (m.index > last) out += replaceSegment(text.slice(last, m.index));
-    out += m[0];
+    const linkDest = m.groups?.linkDest;
+    const isImage = m.index > 0 && text[m.index - 1] === '!';
+    const destTarget = linkDest && !isImage ? parseMarkerLinkDestination(linkDest) : null;
+    const formatted = destTarget ? formatTarget(destTarget.kind, destTarget.value) : null;
+    out += formatted ?? m[0];
     last = m.index + m[0].length;
   }
   if (last < text.length) out += replaceSegment(text.slice(last));
