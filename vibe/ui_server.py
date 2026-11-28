@@ -16933,7 +16933,7 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
         content = data.get("content") if isinstance(data.get("content"), dict) else None
         has_refs = bool(content and isinstance(content.get("references"), list) and content["references"])
         needs_resolve = (
-            author == "agent"
+            author in {"agent", "harness"}
             and isinstance(text, str)
             and any(extract_mention_candidates(text, include_bare_sessions=True))
         ) or has_refs

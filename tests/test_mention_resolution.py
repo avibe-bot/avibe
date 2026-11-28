@@ -659,6 +659,61 @@ def test_web_push_resolves_mentions_before_truncation(tmp_path):
         )
         assert viewer_inbox["data"]["preview_text"] == "See #sessecret001 and @<bot:product>."
 
+        # Live Harness message.new rows are enriched per reader too (owner sees openable
+        # Session + Bot refs; restricted viewer sees only openable Session refs).
+        harness_sse = json.dumps(
+            {
+                "type": "message.new",
+                "data": {
+                    "id": "msg_h_live",
+                    "session_id": "sesmain00001",
+                    "author": "harness",
+                    "text": "[Reply truncated; read #<sesw34zgzgcvp>'s transcript.] #<sessecret001> @<bot:product>",
+                    "content": {},
+                    "metadata": {},
+                },
+            }
+        )
+        owner_harness = json.loads(
+            ui_server._workbench_event_payload_for_context(
+                _owner_context(), "message.new", harness_sse
+            )
+            or "{}"
+        )
+        assert owner_harness["data"]["content"]["references"] == [
+            {
+                "kind": "session",
+                "session_id": "sesw34zgzgcvp",
+                "title": "登录跳转修复",
+                "openable": True,
+            },
+            {
+                "kind": "session",
+                "session_id": "sessecret001",
+                "title": "Top Secret",
+                "openable": True,
+            },
+            {
+                "kind": "bot",
+                "handle": "product",
+                "display_name": "产品伙伴",
+            },
+        ]
+        viewer_harness = json.loads(
+            ui_server._workbench_event_payload_for_context(
+                _viewer_context("viewer-1"), "message.new", harness_sse
+            )
+            or "{}"
+        )
+        assert viewer_harness["data"]["content"]["references"] == [
+            {
+                "kind": "session",
+                "session_id": "sesw34zgzgcvp",
+                "title": "登录跳转修复",
+                "openable": True,
+            }
+        ]
+
 
 @pytest.mark.asyncio
 async def test_dispatcher_resolve_im_mentions_keeps_avibe_canonical(tmp_path):
