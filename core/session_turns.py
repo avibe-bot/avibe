@@ -574,9 +574,6 @@ class Turn:
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
     computer_use_admission_closed: bool = False
-    #: ``SOURCE_HUMAN`` or ``SOURCE_SCHEDULED``: provenance recording whether a
-    #: person launched this Turn.
-    source: str = SOURCE_HUMAN
 
 
 @dataclass(frozen=True)
@@ -8816,7 +8813,6 @@ class SessionTurnManager:
                 started_at=_utc_now_iso(),
                 logical_turn_id=logical_turn_id,
                 delivery_id=delivery_id,
-                source=source,
             )
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside

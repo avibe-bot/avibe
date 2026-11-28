@@ -3405,8 +3405,6 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
         assert live_turn["state"] == "active"
         assert session_id in manager.in_flight
         assert not manager.in_flight[session_id].task.done()
-        # Scheduled turns record their non-human launch provenance on the Turn.
-        assert manager.in_flight[session_id].source == SOURCE_SCHEDULED
         await service.stop()
         assert service._service_teardown_task is not None
 
