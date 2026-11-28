@@ -289,8 +289,7 @@ def controller_pending_question(controller, session_id: str) -> bool:
         handler = getattr(agent, "_question_handler", None)
         if handler is not None and handler.get_pending(request.base_session_id) is not None:
             return True
-    interactions = getattr(controller, "computer_script_interactions", None)
-    return bool(interactions and interactions.has_pending_question(session_id))
+    return False
 
 
 def controller_service(controller) -> LiveActivityService:

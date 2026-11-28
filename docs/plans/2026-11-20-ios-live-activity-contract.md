@@ -232,7 +232,7 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
 - **Phase:**
   - A Turn in `session_turns` that has reached `terminal` maps through `phase_map`.
   - A Turn still running is `needsYou` while that session's Turn is blocked on a pending owner decision that the person answers in the App. Otherwise it is `working`.
-  - The definition is this property, not a list of sources. Today the sources are: a pending `vault_requests` row whose requester or delivery `session_id` is the session; a pending agent question held by any registered agent question handler (`PendingQuestion`, keyed by its gate's `base_session_id`); and a pending Computer Use confirmation (`ComputerScriptInteractionManager`).
+  - The definition is this property, not a list of sources. Today the sources are: a pending `vault_requests` row whose requester or delivery `session_id` is the session; and a pending agent question held by any registered agent question handler (`PendingQuestion`, keyed by its gate's `base_session_id`).
   - The lane reads all of these through one chokepoint, so a source added later is covered by registering it there. A test seeds one pending request of every kind that exists and asserts `needsYou` for each.
 - **Sends:**
   - A phase change sends priority 10. Only entering `needsYou` adds `alert: "needsYou"`.

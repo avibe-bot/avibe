@@ -30,9 +30,9 @@ JS
    purpose and never closes apps.
 4. **Unexpected result? Observe again.** An action error does not prove the
    action did not happen. Observe before retrying; never retry blindly.
-5. **Confirm irreversible steps.** Before sending, paying, deleting, or any
-   other step that cannot be undone: verify, `await avibe.confirm(...)`, verify
-   again, then act. If confirmation is unavailable, stop before that step.
+5. **Pause before irreversible steps.** Before sending, paying, deleting, or
+   anything else that cannot be undone, verify the state, end the Turn, and ask
+   the user in ordinary words, then verify again and act only if they agree.
 
 Top-level `let` and `const` may be redeclared across calls in any order: the
 kernel evaluates `const` declarations as `let`, so they can also be reassigned.
@@ -107,7 +107,6 @@ await win.press("return");                 // also type, hotkey, scroll, drag
 await win.click({ x: 120, y: 80, delivery_mode: "foreground" }); // front, act, restore
 await win.activate();                      // bring this window to the front and keep it there
 await avibe.notify("Draft is ready");
-await avibe.confirm("Send this message to Ana?");    // throws ConfirmRefused on no
 ```
 
 - Background delivery leaves the owner's frontmost window and pointer alone.
@@ -120,7 +119,7 @@ await avibe.confirm("Send this message to Ana?");    // throws ConfirmRefused on
   and `within` (another element selector). Element actions re-resolve the
   selector on every call, so they survive re-renders.
 - Errors are typed: `NotFound`, `Ambiguous`, `Timeout`, `TargetBusy`,
-  `ConfirmRefused`, `Unavailable`, each with `code`, `params`, and `ambiguous`.
+  `Unavailable`, each with `code`, `params`, and `ambiguous`.
 - Handles are fixed process descriptors: on a stale or `observe_first` error,
   observe again; after an app relaunches, resolve fresh handles.
 - Calls time out after 30 seconds by default (`--timeout-ms`, at most 300000)
@@ -130,7 +129,7 @@ await avibe.confirm("Send this message to Ana?");    // throws ConfirmRefused on
 ## Saved flows with run
 
 Once a sequence is proven, save it as an ESM file that default-exports one
-async function and run it with `vibe computer run ./send-report.mjs --arg to=ana@example.com --arg body=@/tmp/body.txt`.
+async function and run it with `vibe computer run ./draft-report.mjs --arg to=ana@example.com --arg body=@/tmp/body.txt`.
 The function receives one object of string arguments (`@file` loads UTF-8
 text) and its JSON-serializable return value is the result:
 
@@ -143,10 +142,8 @@ export default async ({ to, body }) => {
   await draft.element({ role: "textbox", label: "To" }).fill(to);
   await draft.element({ role: "textbox", labelContains: "Message" }).fill(body);
   await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
-  await avibe.confirm(`Send this message to ${to}?`);
-  await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
-  await draft.element({ role: "button", label: "Send" }).click();
-  return { to };
+  await avibe.notify(`Draft is ready for ${to}`);
+  return { to, ready: true };
 };
 ```
 

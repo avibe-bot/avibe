@@ -1375,15 +1375,15 @@ describe('ChatPage transcript hydration', () => {
     });
   });
 
-  describe.each([false, true])('Computer Use script prompt with Activity enabled=%s', (activityEnabled) => {
-    it('MESSAGE-DELIVERY-035 draws the confirm prompt as a visible Agent message while the Turn runs', async () => {
-      // The prompt lands mid-Turn over message.new; the owner must notice it and
-      // reply, so it is the Agent's bubble rather than a compact status pill.
+  describe.each([false, true])('Computer Use script notify with Activity enabled=%s', (activityEnabled) => {
+    it('MESSAGE-DELIVERY-035 draws the script notify as a visible Agent message while the Turn runs', async () => {
+      // The notify lands mid-Turn over message.new; the owner must notice it,
+      // so it is the Agent's bubble rather than a compact status pill.
       const prompt = {
-        ...projectedMessage('confirm-prompt', '计算器里已输入 6 × 7，下一步要按「=」。请回复“是”或“否”。'),
+        ...projectedMessage('script-notify', '计算器里已输入 6 × 7，结果是 42。'),
         author: 'agent', source: 'agent', type: 'notify',
         created_at: '2026-08-15T00:00:30Z',
-        metadata: { event: 'computer_script_confirm', turn_id: 'current-turn', detached: false },
+        metadata: { event: 'computer_script_notify', turn_id: 'current-turn', detached: false },
       };
       mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
       mocks.api.getSessionBootstrap.mockResolvedValue({
@@ -1411,7 +1411,7 @@ describe('ChatPage transcript hydration', () => {
       }
       act(() => mocks.events?.onMessageNew(prompt));
 
-      const row = document.querySelector('[data-message-id="confirm-prompt"]');
+      const row = document.querySelector('[data-message-id="script-notify"]');
       expect(row).not.toBeNull();
       expect(row!.textContent).toContain(prompt.text);
       // The Agent's bubble, not the gold notify pill.

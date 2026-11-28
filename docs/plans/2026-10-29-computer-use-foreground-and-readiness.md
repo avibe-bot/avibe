@@ -40,8 +40,8 @@ Unchanged safeguards:
 - Exact window targets, observe-first for input, stale-handle refusal, and
   target-scoped locks. Activation takes the same exact-window lock as other
   window mutations; it is not input and needs no prior observation.
-- Irreversible external effects: verify, `avibe.confirm`, verify again, act;
-  an unavailable or refused confirmation stops the step.
+- Irreversible external effects: verify, end the Turn and ask the user in
+  ordinary words, then verify again and act only if they agree.
 - Driver managed policy, snapshot digest checks, native permission and
   lifecycle checks, and truthful effect reporting.
 - Generic IM `require_bind` behavior in the shared auth pipeline.

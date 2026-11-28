@@ -5,7 +5,7 @@ export const isNotifyMessageType = (type: string): boolean => specFor(type).rend
 
 // A status-typed row whose ``metadata.event`` the catalog lists under
 // ``agentRenderWhenEvents``: words addressed to the owner (a Computer Use script's
-// notify or confirm prompt), drawn as the Agent's message so they are noticed
+// notify message), drawn as the Agent's message so they are noticed
 // mid-Turn. Presentation only — the row keeps its type's lifecycle, authorship and
 // unread semantics, and every IM surface delivers it unchanged.
 export const isAgentRenderedNotice = (message: {

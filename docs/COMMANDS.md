@@ -810,7 +810,7 @@ commands accept `--arg delivery_mode=foreground` for one foreground action.
 Computer Use guidance is a built-in managed Skill named `computer-use`, loaded
 on demand. It tells Agents to treat screen and clipboard data as untrusted,
 observe the exact target before input, judge readiness from observable window
-state, confirm irreversible steps, and observe again before retrying an action. Backend-specific Computer Use MCP
+state, pause and ask the user in conversation before irreversible steps, and observe again before retrying an action. Backend-specific Computer Use MCP
 configuration is not part of this command surface.
 
 ### `vibe version`

@@ -106,12 +106,8 @@ def _fake_controller(
             )
             if self.path == "/internal/computer-script/close":
                 body = {"ok": True, "closed": True}
-            elif self.path in {
-                "/internal/computer-script/notify",
-                "/internal/computer-script/confirm",
-            }:
-                operation = self.path.rsplit("/", 1)[-1]
-                error = (interaction_errors or {}).get(operation)
+            elif self.path == "/internal/computer-script/notify":
+                error = (interaction_errors or {}).get("notify")
                 if error == _GARBLED_RESPONSE:
                     body = None
                 elif error is not None:
@@ -128,11 +124,7 @@ def _fake_controller(
                         "result": {
                             "status": "confirmed",
                             "effect": "confirmed",
-                            "route": (
-                                "owner_confirm"
-                                if operation == "confirm"
-                                else "message_dispatcher"
-                            ),
+                            "route": "message_dispatcher",
                             "delivery": {
                                 "mode": "foreground",
                                 "delivered_count": 1,
@@ -983,116 +975,66 @@ export default async ({ subject }) => {
     assert len(server.connection_ids) == 1  # type: ignore[attr-defined]
 
 
-def test_avibe_notify_and_confirm_return_effects(tmp_path: Path) -> None:
+def test_avibe_notify_returns_effect_and_exposes_notify_only(tmp_path: Path) -> None:
     payload, _server, requests = _run_node_script(
         tmp_path,
         """
 import { avibe } from "@avibe/computer";
 
-export default async () => ({
-  notify: await avibe.notify("Progress"),
-  confirm: await avibe.confirm("Continue?"),
-});
+export default async () => {
+  const notify = await avibe.notify("Progress");
+  return {
+    notify,
+    keys: Object.keys(avibe),
+  };
+};
 """,
     )
 
-    assert payload == {
-        "ok": True,
-        "result": {
-            "notify": {
-                "status": "confirmed",
-                "effect": "confirmed",
-                "route": "message_dispatcher",
-                "delivery": {
-                    "mode": "foreground",
-                    "delivered_count": 1,
-                },
-            },
-            "confirm": {
-                "status": "confirmed",
-                "effect": "confirmed",
-                "route": "owner_confirm",
-                "delivery": {
-                    "mode": "foreground",
-                    "delivered_count": 1,
-                },
-            },
+    assert payload["ok"] is True
+    assert payload["result"]["notify"] == {
+        "status": "confirmed",
+        "effect": "confirmed",
+        "route": "message_dispatcher",
+        "delivery": {
+            "mode": "foreground",
+            "delivered_count": 1,
         },
     }
+    assert payload["result"]["keys"] == ["notify"]
     assert [
         request["path"]
         for request in requests
         if request["path"].startswith("/internal/computer-script/")
     ] == [
         "/internal/computer-script/notify",
-        "/internal/computer-script/confirm",
         "/internal/computer-script/close",
     ]
 
 
-def test_avibe_confirm_refusal_is_typed_and_unambiguous(tmp_path: Path) -> None:
+def test_avibe_notify_lost_response_is_ambiguous(tmp_path: Path) -> None:
+    """A lost notify response is ambiguous because the message may already be delivered."""
+
     payload, _server, _requests = _run_node_script(
         tmp_path,
         """
-import { ConfirmRefused, avibe } from "@avibe/computer";
+import { avibe } from "@avibe/computer";
 
 export default async () => {
   try {
-    await avibe.confirm("Continue?");
+    await avibe.notify("Progress");
   } catch (error) {
-    return {
-      instance: error instanceof ConfirmRefused,
-      code: error.code,
-      ambiguous: error.ambiguous,
-      step: error.step,
-    };
+    return { code: error.code, ambiguous: error.ambiguous };
   }
-  throw new Error("confirmation unexpectedly succeeded");
+  throw new Error("lost response was not raised");
 };
 """,
-        interaction_errors={"confirm": "confirm_refused"},
+        interaction_errors={"notify": _GARBLED_RESPONSE},
     )
 
     assert payload == {
         "ok": True,
-        "result": {
-            "instance": True,
-            "code": "confirm_refused",
-            "ambiguous": False,
-            "step": "avibe.confirm",
-        },
-    }
-
-
-@pytest.mark.parametrize(
-    ("operation", "ambiguous"),
-    [("notify", True), ("confirm", False)],
-)
-def test_avibe_interaction_lost_response_ambiguity(
-    tmp_path: Path, operation: str, ambiguous: bool
-) -> None:
-    """A notify may already be delivered; a lost confirm never approved anything."""
-
-    payload, _server, _requests = _run_node_script(
-        tmp_path,
-        f"""
-import {{ avibe }} from "@avibe/computer";
-
-export default async () => {{
-  try {{
-    await avibe.{operation}("Continue?");
-  }} catch (error) {{
-    return {{ code: error.code, ambiguous: error.ambiguous }};
-  }}
-  throw new Error("lost response was not raised");
-}};
-""",
-        interaction_errors={operation: _GARBLED_RESPONSE},
-    )
-
-    assert payload == {
-        "ok": True,
-        "result": {"code": "invalid_computer_use_response", "ambiguous": ambiguous},
+        "result": {"code": "invalid_computer_use_response", "ambiguous": True},
     }
 
 

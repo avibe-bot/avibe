@@ -218,12 +218,11 @@ async def test_terminal_race_has_ended_state_and_no_start_push(state, outcome, p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["vault_requester", "vault_delivery", "question", "computer_confirm"])
+@pytest.mark.parametrize("source", ["vault_requester", "vault_delivery", "question"])
 async def test_every_owner_request_source_uses_the_same_phase_projection(state, source):
     import json
     from types import SimpleNamespace
     from core.live_activities import controller_pending_question
-    from core.computer_script_interactions import ComputerScriptInteractionManager, _PendingConfirm
     from modules.agents.question_ui import QuestionUIHandler, PendingQuestion
     from storage.models import vault_requests
     from tests.test_session_delivery_fsm import _context
@@ -231,7 +230,7 @@ async def test_every_owner_request_source_uses_the_same_phase_projection(state, 
     service, _, sent = service_for(state)
     await service.handle("put", "local", "activity-1", BODY)
     controller = SimpleNamespace(
-        agent_service=SimpleNamespace(agents={}, _turn_gates={}), computer_script_interactions=None
+        agent_service=SimpleNamespace(agents={}, _turn_gates={})
     )
     clear = lambda: None
     if source.startswith("vault_"):
@@ -249,7 +248,7 @@ async def test_every_owner_request_source_uses_the_same_phase_projection(state, 
         def clear():
             with state.begin() as conn:
                 conn.execute(vault_requests.update().values(status="approved"))
-    elif source == "question":
+    else:
         # The backend's key differs from the durable Session id.
         handler = QuestionUIHandler(controller, None, None, "test")
         handler.set_pending(
@@ -267,20 +266,6 @@ async def test_every_owner_request_source_uses_the_same_phase_projection(state, 
             )
         }
         clear = lambda: handler.pop_pending("backend-key")
-    else:
-        manager = ComputerScriptInteractionManager(controller, None)
-        question = PendingQuestion(questions=[], prompt_text="Continue?", option_labels=[], base_session_id=SESSION)
-        record = _PendingConfirm(
-            token="test",
-            turn=None,
-            context=_context(SESSION),
-            question=question,
-            future=asyncio.get_running_loop().create_future(),
-            armed=True,
-        )
-        manager._pending["confirm"] = record
-        controller.computer_script_interactions = manager
-        clear = lambda: record.future.set_result(True)
     service.pending_question = lambda sid: controller_pending_question(controller, sid)
     await service.tick()
     assert sent[-1]["phase"] == "needsYou"

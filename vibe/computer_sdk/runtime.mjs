@@ -246,20 +246,10 @@ export async function callTool(tool, argumentsValue, options = {}) {
   );
 }
 
-export async function callScriptInteraction(operation, message) {
-  let body;
-  try {
-    body = await postJson(`/internal/computer-script/${operation}`, {
-      message,
-    });
-  } catch (error) {
-    // Confirm has no desktop side effect, and a lost confirm never approved
-    // anything, so it is never ambiguous. A notify may already be delivered.
-    if (operation === "confirm" && error instanceof ControllerFault) {
-      error.ambiguous = false;
-    }
-    throw error;
-  }
+export async function callScriptNotify(message) {
+  const body = await postJson("/internal/computer-script/notify", {
+    message,
+  });
   if (body?.ok === false) {
     const code =
       typeof body.error === "string"

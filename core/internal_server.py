@@ -229,9 +229,6 @@ def create_app(
             computer_script_sessions,
         )
         controller.computer_script_interactions = computer_script_interactions
-    computer_script_sessions.add_invalidation_listener(
-        computer_script_interactions.invalidate_token,
-    )
     from core.computer_js_kernels import MAX_CODE_BYTES, ComputerJsKernelManager
 
     computer_js_kernels = getattr(controller, "computer_js_kernels", None)
@@ -1128,10 +1125,8 @@ def create_app(
             "result": result,
         }
 
-    async def _computer_script_interaction(
-        request: Request,
-        operation: str,
-    ) -> Any:
+    @app.post("/internal/computer-script/notify")
+    async def _computer_script_notify(request: Request) -> Any:
         try:
             payload = await _bounded_json_object(
                 request,
@@ -1180,27 +1175,13 @@ def create_app(
                 },
             )
         try:
-            if operation == "notify":
-                result = await computer_script_interactions.notify(
-                    connection_token,
-                    message,
-                )
-            else:
-                result = await computer_script_interactions.confirm(
-                    connection_token,
-                    message,
-                )
+            result = await computer_script_interactions.notify(
+                connection_token,
+                message,
+            )
         except (ComputerScriptSessionError, ComputerScriptInteractionError) as exc:
             return _computer_script_interaction_error(exc)
         return {"ok": True, "result": result}
-
-    @app.post("/internal/computer-script/notify")
-    async def _computer_script_notify(request: Request) -> Any:
-        return await _computer_script_interaction(request, "notify")
-
-    @app.post("/internal/computer-script/confirm")
-    async def _computer_script_confirm(request: Request) -> Any:
-        return await _computer_script_interaction(request, "confirm")
 
     @app.post("/internal/computer-script/close")
     async def _computer_script_close(request: Request) -> Any:
