@@ -3,7 +3,7 @@ name: WebKit proxy change measurement
 on:
   push:
     branches:
-      - experiment/webkit-late-route
+      - experiment/webkit-return-closed
 
 permissions:
   contents: read
@@ -19,7 +19,8 @@ jobs:
         runtime: ["newest"]
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      # This branch measures the late-route cells only (late-cases.json).
+      # This branch measures the return cells only (late-cases.json): a request
+      # made while the listener's port is closed, and what follows it.
       MEASURE_ONLY: late
     steps:
       - name: Check out experiment

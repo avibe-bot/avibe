@@ -1,8 +1,6 @@
 [
-  {"id":"late-close-h1","origin":"h1","proxy":"h1","action":"lateClose"},
-  {"id":"late-close-h2","origin":"h2","proxy":"h2","action":"lateClose"},
-  {"id":"late-goaway-h2","origin":"h2","proxy":"h2","action":"lateGoaway"},
-  {"id":"late-close-live-h2","origin":"h2","proxy":"h2","action":"lateCloseLive"},
-  {"id":"late-421-h2","origin":"h2","proxy":"h2","action":"late421"},
-  {"id":"late-421-live-h2","origin":"h2","proxy":"h2","action":"late421Live"}
+  {"id":"return-closed-h2","origin":"h2","proxy":"h2","action":"returnClosed","allowFailover":true},
+  {"id":"return-closed-h1","origin":"h1","proxy":"h1","action":"returnClosed","allowFailover":true},
+  {"id":"return-held-h2","origin":"h2","proxy":"h2","action":"returnHeld","allowFailover":true},
+  {"id":"return-strict-h2","origin":"h2","proxy":"h2","action":"returnClosed","allowFailover":false}
 ]

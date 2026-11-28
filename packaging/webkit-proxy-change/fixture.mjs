@@ -249,8 +249,12 @@ const servers = [
   makeOrigin('proxy-backend', 'h1', '127.0.0.1', 18443),
   makeOrigin('proxy-backend', 'h2', '127.0.0.1', 18444),
 ];
-const proxy = http.createServer((req,res) => { res.writeHead(405); res.end(); });
-proxy.on('connect', (req, client, head) => {
+// The CONNECT proxy's listener can be closed and opened again on its port,
+// as the App closes its own in the background and binds it again on return
+// (`/proxy-listener`): a new server each time, with the same handler.
+function makeProxy() {
+ const proxy = http.createServer((req,res) => { res.writeHead(405); res.end(); });
+ proxy.on('connect', (req, client, head) => {
   const target = req.url;
   const host = target.endsWith(':443') ? target.slice(0,-4) : '';
   const c = byHost.get(host);
@@ -275,8 +279,20 @@ proxy.on('connect', (req, client, head) => {
     if (head.length) upstream.write(head);
     client.pipe(upstream); upstream.pipe(client);
   });
-});
+ });
+ return proxy;
+}
+let proxy = makeProxy();
 proxy.listen(18080, '127.0.0.1', () => log('proxy_listening', {port:18080}));
+function portState(port) {
+  return new Promise(resolve => {
+    const socket = net.connect({host:'127.0.0.1', port});
+    const done = value => { socket.destroy(); resolve(value); };
+    socket.setTimeout(1000, () => done('timeout'));
+    socket.on('connect', () => done('listening'));
+    socket.on('error', error => done(error.code === 'ECONNREFUSED' ? 'refused' : String(error)));
+  });
+}
 function failureListener(kind, port) {
   return net.createServer(client => {
     const connection = `${kind}-${++connectionID}`;
@@ -350,6 +366,28 @@ const control = http.createServer(async (req,res) => {
         socket.on('error', error => done(error.code === 'ECONNREFUSED' ? 'refused' : String(error)));
       });
       result = log('absent_listener_check', {ok:state === 'refused', host, case:c.id, port:18081, state});
+    } else if (url.pathname === '/proxy-listener') {
+      // `closed`: nothing listens on 18080 and the host's tunnels are ended,
+      // as when the App goes to the background. `open`: bound again.
+      const state = url.searchParams.get('state'); const host = url.searchParams.get('host');
+      if (!byHost.has(host) || !['closed','open'].includes(state)) throw new Error('invalid proxy-listener request');
+      const connections = [];
+      if (state === 'closed') {
+        // Not waited for: the port stops accepting at once, and the check
+        // below says when it refuses.
+        if (proxy.listening) proxy.close();
+        proxy.closeAllConnections?.();
+        for (const [id, entry] of [...proxyConnections]) { connections.push(id); entry.client.destroy(); entry.upstream.destroy(); }
+      } else if (!proxy.listening) {
+        proxy = makeProxy();
+        await new Promise((resolve, reject) => { proxy.once('error', reject); proxy.listen(18080, '127.0.0.1', resolve); });
+      }
+      let status = await portState(18080);
+      for (let n = 0; n < 20 && status !== (state === 'closed' ? 'refused' : 'listening'); n += 1) {
+        await new Promise(resolve => setTimeout(resolve, 50)); status = await portState(18080);
+      }
+      result = log('proxy_listener', {ok:status === (state === 'closed' ? 'refused' : 'listening'), host, mode:state, status,
+        closed:connections.length, connections});
     } else if (url.pathname === '/proxy-mode') {
       const host = url.searchParams.get('host'); const mode = url.searchParams.get('mode');
       if (!byHost.has(host) || !['origin','transport'].includes(mode)) throw new Error('invalid mode');

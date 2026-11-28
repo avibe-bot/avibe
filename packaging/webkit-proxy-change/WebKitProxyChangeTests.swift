@@ -542,6 +542,58 @@ final class WebKitProxyChangeTests: XCTestCase {
             _ = try await browser.observe("misdirected",
                 expression:"window.probe.fetch('\(fixture.id)-misdirected', '/misdirected')")
             try await afterLateRoute(browser, live: live)
+        case "returnClosed", "returnHeld":
+            // The App's own route, written before the store's first load of
+            // the host: the working CONNECT proxy, with fail-over allowed
+            // for an ordinary host and not for a 「仅直连和中继」 one.
+            let failover = fixture.allowFailover ?? false
+            await browser.route("direct", allowFailover: failover)
+            try await browser.load("\(fixture.id)-navigation")
+            _ = try await browser.observe("page", expression:"window.probe.page")
+            let first = try await browser.fetch("warm-1")
+            let second = try await browser.fetch("warm-2")
+            guard first["route"] as? String == "proxy-backend", second["route"] as? String == "proxy-backend",
+                  let connection = first["connection"] as? String, second["connection"] as? String == connection
+            else { throw ProbeError("warm proxy precondition failed: \(first) / \(second)") }
+            await browser.record("pool_precondition", ["ok":true, "route":"proxy-backend", "connection":connection])
+            // The background: nothing listens on the port, and the tunnels
+            // through it are ended.
+            let closed = try await control("/proxy-listener?state=closed&host=\(fixture.host)")
+            await browser.record("listener-closed", closed)
+            // The return. `returnClosed`: the page asks before the port is
+            // open again, as a page does on `visibilitychange`.
+            // `returnHeld`: it asks nothing until the port is open.
+            var failure: Error?
+            do {
+                guard closed["ok"] as? Bool == true, (closed["closed"] as? Int ?? 0) > 0
+                else { throw ProbeError("the port was not closed with its tunnels: \(closed)") }
+                if fixture.action == "returnClosed" {
+                    _ = try await browser.fetch("while-closed-1")
+                    try await Task.sleep(for: .milliseconds(300))
+                    _ = try await browser.fetch("while-closed-2")
+                }
+            } catch { failure = error }
+            // Opened again whatever happened above: the next cell needs it.
+            let opened = try await control("/proxy-listener?state=open&host=\(fixture.host)")
+            await browser.record("listener-open", opened)
+            if let failure { throw failure }
+            guard opened["ok"] as? Bool == true else { throw ProbeError("the port was not opened again: \(opened)") }
+            // The port is open: where do the page's requests go now, at
+            // once, after a second, and after five?
+            try await afterMutation(browser)
+            try await Task.sleep(for: .seconds(4))
+            _ = try await browser.fetch("after-5s")
+            // New connections of the same page.
+            _ = try await browser.observe("new-websocket", expression:"window.probe.webSocket('\(fixture.id)-new-websocket')")
+            _ = try await browser.observe("new-sse", expression:"window.probe.openEvents('\(fixture.id)-new-sse')")
+            _ = try await browser.observe("new-sse-close", expression:"window.probe.closeEvents('\(fixture.id)-new-sse')")
+            // The page loads again, as it does by itself after an upgrade.
+            try await browser.load("\(fixture.id)-reload")
+            _ = try await browser.observe("reload-page", expression:"window.probe.page")
+            _ = try await browser.fetch("after-reload")
+            // And left alone for a while: does anything end by itself?
+            try await Task.sleep(for: .seconds(20))
+            _ = try await browser.fetch("after-idle-20s")
         default: throw ProbeError("unknown action")
         }
     }

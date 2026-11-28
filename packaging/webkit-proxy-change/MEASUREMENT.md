@@ -139,6 +139,32 @@ cannot qualify real-device Local Network permission, suspension, radio changes,
 real Cloudflare behavior, or future OS transports. No iOS version is qualified by
 API availability, compilation, or this harness's synthetic tests.
 
+## Return cells (branch `experiment/webkit-return-closed`, 2026-11-28)
+
+Question, from the owner's phone on 2026-11-28: after a return from the
+background the page's requests stayed on the public path for minutes while
+the App's listener carried no public connection at all. In the background
+the App closes its listening port and its tunnels; the store's route stays
+and allows fail-over; on return the port is bound again. Does a request
+the page makes before the port is open take WebKit's own path, and do the
+requests after it stay there?
+
+`late-cases.json` on this branch holds these four cells and nothing else:
+
+| Cell | Route | While the port is closed |
+| --- | --- | --- |
+| `return-closed-h2`, `return-closed-h1` | fail-over allowed | two fetches |
+| `return-held-h2` | fail-over allowed | nothing (the page holds its requests) |
+| `return-strict-h2` | fail-over not allowed | two fetches |
+
+Each cell writes the route before the first load, warms the connection
+through the proxy, closes the proxy's port and tunnels (`/proxy-listener`),
+makes its fetches or none, opens the port again, then observes: a fetch at
+once, after a second and after five, a new WebSocket, a new EventSource, the
+page loaded again and a fetch from it, and a fetch after twenty idle seconds.
+`route` says which server answered: `origin` (WebKit's own path) or
+`proxy-backend` (through the port). Nothing is asserted about routes.
+
 ## Late-route cells (branch `experiment/webkit-late-route`, 2026-11-27)
 
 Question: the App's listener was not ready at an instance's first load, so
