@@ -92,8 +92,13 @@ protocol DirectIrohConnection: AnyObject, Sendable {
 
     func openStream() async throws -> DirectIrohStreamHalves
 
-    /// Returns once the connection has closed, for any reason.
-    func closed() async
+    /// Returns once the connection has closed, with the cause as the
+    /// binding words it (`DirectLossCause.init(closeText:)`).
+    func closed() async -> String
+
+    /// The same cause, if the connection has closed already; nil while it
+    /// is open.
+    var closeReason: String? { get }
 
     /// Closes the connection and every stream on it, at once.
     func close()

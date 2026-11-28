@@ -83,6 +83,67 @@ struct DirectStreamTag: Equatable, Sendable {
     let pathGeneration: Int
 }
 
+/// Why a usable path was lost, as far as the transport can tell. The raw
+/// value is the word the App reports (`DirectPathUse.RetiredRule`).
+///
+/// A decision of our own, or a close the instance sent, is not a death of
+/// the path: `linkEnd` says which of these raise the probation level
+/// (docs/plans/remote-direct-probation.md section 2).
+enum DirectLossCause: String, Equatable, Sendable {
+    /// The connection timed out idle: nothing came from the instance.
+    case idle
+    /// The connection ended some other way with no close from the instance
+    /// (a reset, or a cause this build does not know).
+    case connectionEnded = "connection_ended"
+    /// A probe got no answer on a connection still open: after a direct
+    /// candidate failed, after a renewed answer, or on probation.
+    case probeTimeout = "timeout"
+    /// The instance closed the connection, saying the admission ended.
+    case revocation
+    /// The instance closed the connection for another reason of its own
+    /// (it is stopping, or the connection carried nothing for too long).
+    case closedByPeer = "closed_by_peer"
+    /// The newest rendezvous answer offers no direct path.
+    case notReady = "not_ready"
+    /// A newer rendezvous answer replaced the endpoint.
+    case superseded
+    /// The probe that a change of network started failed.
+    case networkChange = "network_change"
+    /// This App closed the connection itself.
+    case withdrawn = "other"
+
+    /// The cause a connection's own close text gives. Both forms the
+    /// binding may hand over are read: the error's display text ("timed
+    /// out", "closed by peer: admission ended (code 1)", "closed") and its
+    /// debug form ("TimedOut", "ApplicationClosed(…)", "LocallyClosed").
+    /// Only a typed application close counts as the instance's own.
+    init(closeText text: String) {
+        if text.hasPrefix("closed by peer") || text.contains("ApplicationClosed") {
+            self = text.contains("admission") ? .revocation : .closedByPeer
+        } else if text == "timed out" || text.contains("TimedOut") {
+            self = .idle
+        } else if text == "closed" || text.contains("LocallyClosed") {
+            self = .withdrawn
+        } else {
+            self = .connectionEnded
+        }
+    }
+
+    /// What the probation rule is told.
+    var linkEnd: DirectLinkEnd {
+        switch self {
+        case .idle, .connectionEnded, .probeTimeout:
+            return .lost
+        case .revocation, .closedByPeer, .notReady, .withdrawn:
+            return .instanceEnded
+        case .superseded:
+            return .superseded
+        case .networkChange:
+            return .networkChange
+        }
+    }
+}
+
 enum DirectPathReport: Equatable, Sendable {
     /// A validated answer from the selected instance ended without an admitted link.
     case answeredWithoutLink
@@ -96,7 +157,7 @@ enum DirectPathReport: Equatable, Sendable {
     /// relays the path carried and counts them as one closure per host. A
     /// stream that failed on its own before this report is not counted: its
     /// page already saw that connection fail, and no event closed it.
-    case lost
+    case lost(DirectLossCause)
     /// The App went to the background: the transport stopped, and the path
     /// it reported usable is gone. The App handles it as its own background
     /// (`remote-direct-ios.md` section 9), whichever of the two heard the
@@ -491,6 +552,12 @@ protocol DirectTransporting: AnyObject, Sendable {
     /// origin. The transport decides when to probe again.
     @MainActor
     func pathDidFail(for tag: DirectStreamTag)
+
+    /// The path reported usable is waiting on probation and carries
+    /// nothing: ask it once whether it still answers. A failure is reported
+    /// as `lost`; a pass reports nothing.
+    @MainActor
+    func probeWaitingPath()
 
     /// Opens one stream over the path reported usable for `tag`. Throws when
     /// that path is gone, and promptly when its task is cancelled.

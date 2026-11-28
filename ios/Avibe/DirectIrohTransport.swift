@@ -44,7 +44,7 @@ enum DirectIrohReport: Equatable, Sendable {
     /// The network changed and the path is being probed again.
     case verifying
     /// The path is gone, or its probe failed.
-    case lost
+    case lost(DirectLossCause)
     /// The App went to the background: everything stopped, and the path is
     /// gone.
     case lostToBackground
@@ -225,6 +225,9 @@ final class DirectIrohTransport {
         case candidateFailure
         /// An answer that had run out was renewed.
         case renewal
+        /// The path is waiting on probation and carries nothing: it is
+        /// asked once a minute whether it still answers.
+        case probation
     }
 
     /// Which path a connection was last found to have selected, and how
@@ -502,6 +505,22 @@ final class DirectIrohTransport {
         startProbe(.candidateFailure)
     }
 
+    /// The usable path is waiting on probation and carries nothing: one
+    /// probe, the same single stream and CONNECT as any other, bounded by
+    /// `probeSeconds` and closed at once. It keeps the instance from closing
+    /// a connection that has had no stream, and shows the path still
+    /// carries something, which keep-alives do not. Never two at a time. A
+    /// pass reports nothing; a failure is a loss, with the connection's own
+    /// close reason if it has one. The lease is neither read as renewed nor
+    /// extended by it.
+    func probeWaitingPath() {
+        reconcileLease()
+        guard let session, session.isUsable, probeStamp == nil else {
+            return
+        }
+        startProbe(.probation)
+    }
+
     /// Opens one stream over the path reported usable for `tag`. Throws
     /// when that path is gone or the tag is stale, and at once when the
     /// caller's task is cancelled. A stream that opens after either is
@@ -690,7 +709,7 @@ final class DirectIrohTransport {
             // The newest accepted answer speaks for the instance: whatever
             // an earlier one started, a dial under way included, ends.
             cancelDial()
-            guard endSessionReportingLoss() else {
+            guard endSessionReportingLoss(.lost(.notReady)) else {
                 return
             }
             scheduleFetch(after: TimeInterval(retryAfterSeconds))
@@ -749,7 +768,7 @@ final class DirectIrohTransport {
             // A new endpoint key, address set or relay. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
-            guard endSessionReportingLoss() else {
+            guard endSessionReportingLoss(.lost(.superseded)) else {
                 return
             }
             startDial(under: accepted, key: key, host: selection.host)
@@ -1110,23 +1129,23 @@ final class DirectIrohTransport {
         let connection = session.link.connection
         let id = session.id
         Task { @MainActor [weak self] in
-            await connection.closed()
-            self?.connectionDidClose(id)
+            let text = await connection.closed()
+            self?.connectionDidClose(id, text)
         }
     }
 
-    private func connectionDidClose(_ id: Int) {
+    private func connectionDidClose(_ id: Int, _ text: String) {
         guard let session, session.id == id else {
             return
         }
-        sessionDidEnd(retryNow: false)
+        sessionDidEnd(retryNow: false, cause: DirectLossCause(closeText: text))
     }
 
-    /// The path is gone: it is reported, closed, and the next attempt is
-    /// arranged.
-    private func sessionDidEnd(retryNow: Bool) {
-        Self.logger.info("Direct transport: lost")
-        guard endSessionReportingLoss() else {
+    /// The path is gone: it is reported with its cause, closed, and the
+    /// next attempt is arranged.
+    private func sessionDidEnd(retryNow: Bool, cause: DirectLossCause) {
+        Self.logger.info("Direct transport: lost (\(cause.rawValue, privacy: .public))")
+        guard endSessionReportingLoss(.lost(cause)) else {
             return
         }
         cancelFetch()
@@ -1168,6 +1187,9 @@ final class DirectIrohTransport {
             counts.probesAfterCandidateFailure += 1
         case .renewal:
             counts.probesAfterRenewal += 1
+        case .probation:
+            // Not a check of a path in use: it is in no count.
+            break
         }
         probeTask = Task { @MainActor [weak self] in
             let verdict: ProbeVerdict
@@ -1204,7 +1226,14 @@ final class DirectIrohTransport {
         case .passed:
             break
         case .failed:
-            sessionDidEnd(retryNow: reason == .networkChange)
+            // A probe also fails on a connection that has just closed. Its
+            // own close reason, read now, says more than the probe's
+            // failure: a close the instance sent is not a dead path.
+            let closed = session.link.connection.closeReason.map(DirectLossCause.init(closeText:))
+            sessionDidEnd(
+                retryNow: reason == .networkChange,
+                cause: closed ?? (reason == .networkChange ? .networkChange : .probeTimeout)
+            )
             return
         case .refused:
             // The probe was not allowed to finish, and the lease in force
@@ -1231,6 +1260,9 @@ final class DirectIrohTransport {
         case .renewal:
             session.isUsable = true
             emit(.usable(generation: session.offer.generation))
+        case .probation:
+            // It answers: nothing changes, and nothing is reported.
+            break
         }
     }
 
@@ -1287,7 +1319,7 @@ final class DirectIrohTransport {
     /// report led to. `false` when the report led to new work here (another
     /// selection, a return to the foreground, a new attempt): that work is
     /// its owner's, and the caller does nothing more.
-    private func endSessionReportingLoss(_ report: DirectIrohReport = .lost) -> Bool {
+    private func endSessionReportingLoss(_ report: DirectIrohReport) -> Bool {
         guard let ending = detachSession() else {
             return true
         }
@@ -1473,8 +1505,8 @@ extension DirectPathReport {
             self = .usable(generation: generation)
         case .verifying:
             self = .verifying
-        case .lost:
-            self = .lost
+        case .lost(let cause):
+            self = .lost(cause)
         case .lostToBackground:
             self = .lostToBackground
         case .pathChanged(let kind):
