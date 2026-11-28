@@ -20,7 +20,7 @@ from core.mobile_health_contract import (
 )
 from storage.lock import MigrationFileLock, probe_lock_holder
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE devices (
@@ -65,6 +65,20 @@ CREATE TABLE push_attempts (
 );
 CREATE INDEX push_budget ON push_attempts(device_key, at);
 """
+
+
+def owner_unavailable(reason):
+    return MobileError("instance_eligibility_unavailable", 503, details={"reason": reason})
+
+
+def owner_matches(row, identity):
+    row = dict(row)
+    subject = identity.get("owner_subject")
+    if bool(row.get("owner_subject")) != bool(subject):
+        return False
+    return row["instance_id"] == identity["id"] and (
+        row["owner_subject"] == subject if subject else row["owner"] == identity["owner"]
+    )
 
 
 def _now() -> str:
@@ -147,10 +161,14 @@ class MobileStore:
                         if statement.strip():
                             conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                # Compatible with released v1 writers, which name every audit column.
+                if version < 2:
+                    for table in ("devices", "pairings", "requests"):
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_subject TEXT")
+                    conn.execute("PRAGMA user_version=2")
+                # Preserve released audit rows; schema v2 separately fences old binaries.
                 if not any(col[1] == "device_id" for col in conn.execute("PRAGMA table_info(accesses)")):
                     conn.execute("ALTER TABLE accesses ADD COLUMN device_id TEXT")
-                # Nullable additive column: released writers explicitly name request columns.
+                # Preserve the consent extension introduced before schema v2.
                 if not any(col[1] == "consent_device_id" for col in conn.execute("PRAGMA table_info(requests)")):
                     conn.execute("ALTER TABLE requests ADD COLUMN consent_device_id TEXT")
 
@@ -226,17 +244,19 @@ class MobileStore:
         now = _now()
         with self.transaction() as conn:
             self._expire(conn, now)
+            device = self.active_device(conn)
+            if device and not owner_matches(device, identity):
+                raise owner_unavailable("cloud_unavailable")
             if operation == "health.connect":
                 existing = conn.execute(
-                    "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner=? "
+                    "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner_subject IS ? AND (owner_subject IS NOT NULL OR owner=?) "
                     "AND state IN ('queued','claimed') ORDER BY created_at LIMIT 1",
-                    (identity["id"], identity["owner"]),
+                    (identity["id"], identity.get("owner_subject"), identity["owner"]),
                 ).fetchone()
                 if existing:
                     # Pairing/consent is not completion: retain the original
                     # continuation until upload ACK and the request result.
                     return self._request(existing), False
-            device = self.active_device(conn)
             confirmed = json.loads(device["metrics"]) if device else []
             expand = operation == "health.connect" and device is not None
             if operation == "health.connect":
@@ -257,9 +277,9 @@ class MobileStore:
                 selected = confirmed
                 required = set(names) & set(confirmed)
                 candidates = conn.execute(
-                    "SELECT * FROM requests WHERE operation='health.refresh' AND instance_id=? AND owner=? "
+                    "SELECT * FROM requests WHERE operation='health.refresh' AND instance_id=? AND owner_subject IS ? AND (owner_subject IS NOT NULL OR owner=?) "
                     "AND device_id=? AND state IN ('queued','claimed') ORDER BY created_at",
-                    (identity["id"], identity["owner"], device["id"]),
+                    (identity["id"], identity.get("owner_subject"), identity["owner"], device["id"]),
                 ).fetchall()
                 existing = next((row for row in candidates if required <= set(json.loads(row["metrics"]))), None)
                 if existing:
@@ -269,10 +289,10 @@ class MobileStore:
             device_id = device["id"] if operation == "health.refresh" else None
             request_id = "mreq_" + secrets.token_hex(16)
             conn.execute(
-                "INSERT INTO requests(id,operation,device_id,instance_id,owner,metrics,state,created_at,"
+                "INSERT INTO requests(id,operation,device_id,instance_id,owner,owner_subject,metrics,state,created_at,"
                 "expires_at,callback_session,callback_run,waiter_id,waiter_until,caller) "
-                "VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?,?,?)",
-                (request_id, operation, device_id, identity["id"], identity["owner"], _json(selected),
+                "VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?)",
+                (request_id, operation, device_id, identity["id"], identity["owner"], identity.get("owner_subject"), _json(selected),
                  now, _after(now, hours=24) if operation == "health.connect" else _after(now, minutes=15),
                  callback_session, secrets.token_hex(16), waiter_id,
                  _after(now, seconds=wait_seconds) if waiter_id else None, caller),
@@ -294,13 +314,13 @@ class MobileStore:
                 raise MobileError("request_not_found", 404)
             if row["operation"] != "health.connect" or row["state"] in TERMINAL or row["device_id"]:
                 raise MobileError("request_terminal", 410)
-            if (row["instance_id"], row["owner"]) != (identity["id"], identity["owner"]):
+            if not owner_matches(row, identity):
                 raise MobileError("instance_not_eligible", 403)
             code = secrets.token_urlsafe(16)
             expiry = _after(now, minutes=5)
             conn.execute(
-                "INSERT INTO pairings VALUES(?,?,?,?,?)",
-                (_hash(code), request_id, identity["id"], identity["owner"], expiry),
+                "INSERT INTO pairings(code_hash,request_id,instance_id,owner,expires_at,owner_subject) VALUES(?,?,?,?,?,?)",
+                (_hash(code), request_id, identity["id"], identity["owner"], expiry, identity.get("owner_subject")),
             )
             return {"pairing_code": code, "expires_at": expiry,
                     "supported_metrics": list(METRICS), "metrics": json.loads(row["metrics"]),
@@ -336,7 +356,7 @@ class MobileStore:
             pairing = conn.execute("SELECT * FROM pairings WHERE code_hash=?", (_hash(code),)).fetchone()
             if not pairing or pairing["expires_at"] <= now:
                 raise MobileError("device_unauthorized", 401)
-            if (pairing["instance_id"], pairing["owner"]) != (identity["id"], identity["owner"]):
+            if not owner_matches(pairing, identity):
                 raise MobileError("instance_not_eligible", 403)
             request = conn.execute("SELECT * FROM requests WHERE id=?", (pairing["request_id"],)).fetchone()
             if not request or request["state"] in TERMINAL or request["device_id"]:
@@ -352,9 +372,9 @@ class MobileStore:
             device_id = reserved_device_id or 'mdev_' + secrets.token_hex(16)
             credential = secrets.token_urlsafe(32)
             conn.execute(
-                "INSERT INTO devices(id,credential_hash,installation_hash,instance_id,owner,name,"
-                "app_version,metrics,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (device_id, _hash(credential), installation, identity["id"], identity["owner"],
+                "INSERT INTO devices(id,credential_hash,installation_hash,instance_id,owner,owner_subject,name,"
+                "app_version,metrics,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (device_id, _hash(credential), installation, identity["id"], identity["owner"], identity.get("owner_subject"),
                  name, payload["app_version"], _json(names), now, now),
             )
             conn.execute("UPDATE requests SET device_id=?,metrics=? WHERE id=?",
@@ -373,9 +393,9 @@ class MobileStore:
         request still follows the existing query/upload/ACK/result lifecycle.
         """
         rows = conn.execute(
-            "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner=? "
+            "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner_subject IS ? AND (owner_subject IS NOT NULL OR owner=?) "
             "AND id<>? AND state IN ('queued','claimed')",
-            (identity["id"], identity["owner"], winner_id),
+            (identity["id"], identity.get("owner_subject"), identity["owner"], winner_id),
         ).fetchall()
         for row in rows:
             covered = (row["consent_device_id"] in (None, device_id)
@@ -406,10 +426,12 @@ class MobileStore:
                 refusal = MobileError("device_unauthorized", 401)
             elif row["revoked_at"]:
                 refusal = MobileError("device_revoked", 403)
+            elif bool(row["owner_subject"]) != bool(identity.get("owner_subject")):
+                raise owner_unavailable("legacy_owner_unproven" if identity.get("owner_subject") else "cloud_owner_subject_unsupported")
             elif row["last_seen"] <= _after(now, days=-60):
                 self._revoke_device(conn, row["id"], now)
                 refusal = MobileError("device_revoked", 403)
-            elif (row["instance_id"], row["owner"]) != (identity["id"], identity["owner"]):
+            elif not owner_matches(row, identity):
                 self._revoke_device(conn, row["id"], now)
                 refusal = MobileError("instance_not_eligible", 403)
             else:
@@ -453,7 +475,7 @@ class MobileStore:
                 request_id = text(payload.get("request_id"), limit=100)
                 row = conn.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
                 if (not row or row["consent_device_id"] != device["id"]
-                        or (row["instance_id"], row["owner"]) != (device["instance_id"], device["owner"])):
+                        or not owner_matches(row, {**device, "id": device["instance_id"]})):
                     raise MobileError("request_not_found", 404)
                 if row["device_id"] is None:
                     pairing = conn.execute("SELECT * FROM pairings WHERE code_hash=? AND request_id=?",
@@ -469,7 +491,7 @@ class MobileStore:
                     conn.execute("UPDATE devices SET metrics=? WHERE id=?", (_json(confirmed), device["id"]))
                     conn.execute("UPDATE requests SET device_id=? WHERE id=?", (device["id"], request_id))
                     conn.execute("DELETE FROM pairings WHERE request_id=?", (request_id,))
-                    self._settle_other_connects(conn, {"id": device["instance_id"], "owner": device["owner"]},
+                    self._settle_other_connects(conn, {"id": device["instance_id"], "owner": device["owner"], "owner_subject": device.get("owner_subject")},
                                                 device["id"], confirmed, request_id, now)
                     consent_changed = True
                 # Bound requests already consumed consent; retries do not expand it further.
@@ -611,8 +633,8 @@ class MobileStore:
         with self.transaction() as conn:
             self._expire(conn, _now())
             row = conn.execute(
-                "SELECT * FROM requests WHERE id=? AND instance_id=? AND owner=?",
-                (request_id, identity["id"], identity["owner"]),
+                "SELECT * FROM requests WHERE id=? AND instance_id=? AND owner_subject IS ? AND (owner_subject IS NOT NULL OR owner=?)",
+                (request_id, identity["id"], identity.get("owner_subject"), identity["owner"]),
             ).fetchone()
             if row is None:
                 raise MobileError("request_not_found", 404)
@@ -703,15 +725,65 @@ class MobileStore:
             conn.execute("INSERT INTO push_attempts VALUES(?,?)", (device_key, now))
             return True
 
-    def retire_other_identities(self, *, instance: str, owner: str, expected_device: str | None) -> None:
-        """Apply a live owner proof, never a delayed answer over a new enrollment."""
+    def has_subject(self, conn=None) -> bool:
+        if conn is None:
+            with self.transaction() as connection:
+                return self.has_subject(connection)
+        return any(conn.execute(f"SELECT 1 FROM {table} WHERE owner_subject IS NOT NULL LIMIT 1").fetchone()
+                   for table in ("devices", "pairings", "requests"))
+
+    @staticmethod
+    def _migrate_owner(conn, identity, proofs):
+        """Only exact registry links can promote legacy provenance to an identity."""
+        subject = identity["owner_subject"]
+        instance = identity["id"]
+        valid = [p for p in proofs if p["subject"] == subject and p["device_id"]
+                 and p["linked_at"] and not p["cleanup_pending"]]
+        device_proofs = {p["mobile_id"] for p in valid}
+        code_proofs = {p["code_hash"] for p in valid if p["code_hash"]}
+        proven_devices = set()
+        for row in conn.execute("SELECT * FROM devices WHERE owner_subject IS NULL"):
+            if row["instance_id"] == instance and row["id"] in device_proofs:
+                proven_devices.add(row["id"])
+            elif row["revoked_at"] is None:
+                raise owner_unavailable("legacy_owner_unproven")
+        proven_requests = set()
+        for row in conn.execute("SELECT * FROM requests WHERE owner_subject IS NULL"):
+            codes = [r[0] for r in conn.execute("SELECT code_hash FROM pairings WHERE request_id=?", (row["id"],))]
+            if row["instance_id"] == instance and (
+                row["device_id"] in proven_devices or row["consent_device_id"] in proven_devices
+                or any(code in code_proofs for code in codes)
+            ):
+                proven_requests.add(row["id"])
+            elif row["state"] not in TERMINAL:
+                raise owner_unavailable("legacy_owner_unproven")
+        for row in conn.execute("SELECT * FROM pairings WHERE owner_subject IS NULL"):
+            if row["request_id"] not in proven_requests and row["expires_at"] > _now():
+                raise owner_unavailable("legacy_owner_unproven")
+        conn.executemany("UPDATE devices SET owner_subject=? WHERE id=?", [(subject, key) for key in proven_devices])
+        conn.executemany("UPDATE requests SET owner_subject=? WHERE id=?", [(subject, key) for key in proven_requests])
+        conn.executemany("UPDATE pairings SET owner_subject=? WHERE request_id=? AND instance_id=?",
+                         [(subject, key, instance) for key in proven_requests])
+
+    def retire_other_identities(self, *, instance: str, owner: str, expected_device: str | None,
+                                owner_subject=None, proofs=(), retire=True) -> None:
+        """Migrate before comparing, under registry-before-private-store lock order."""
         now = _now()
         with self.transaction() as conn:
             current = self.active_device(conn)
             if (current['id'] if current else None) != expected_device:
-                raise MobileError('instance_eligibility_unavailable', 503)
-            other = '(instance_id != ? OR owner != ?)'
-            args = (instance, owner)
+                raise owner_unavailable("cloud_unavailable")
+            if owner_subject is None and self.has_subject(conn):
+                raise owner_unavailable("cloud_owner_subject_unsupported")
+            if owner_subject is not None:
+                self._migrate_owner(conn, {"id": instance, "owner_subject": owner_subject}, proofs)
+                other = '(owner_subject IS NOT NULL AND (instance_id != ? OR owner_subject != ?))'
+                args = (instance, owner_subject)
+            else:
+                other = '(instance_id != ? OR owner != ?)'
+                args = (instance, owner)
+            if not retire:
+                return
             devices = conn.execute(f'SELECT id FROM devices WHERE revoked_at IS NULL AND {other}', args).fetchall()
             for row in devices:
                 self._revoke_device(conn, row['id'], now)
@@ -723,11 +795,18 @@ class MobileStore:
             self._audit(conn, 'health.revoke', caller='instance-policy')
         publish_mobile_schedule_changed()
 
-    def revoke_confirmed_pairing(self, device_id: str, *, instance: str, owner: str) -> None:
+    def revoke_confirmed_pairing(self, device_id: str, *, instance: str, owner: str, owner_subject=None,
+                                 legacy_subject_proven=False) -> None:
         """Recheck the exact private enrollment in the same transaction that erases it."""
         with self.transaction() as conn:
-            if not conn.execute('SELECT 1 FROM devices WHERE id=? AND instance_id=? AND owner=? AND revoked_at IS NULL',
-                                (device_id, instance, owner)).fetchone():
+            row = conn.execute('SELECT * FROM devices WHERE id=? AND revoked_at IS NULL', (device_id,)).fetchone()
+            if row is None:
+                return
+            # The deferred worker holds the registry lock and proved this exact
+            # legacy enrollment against the live subject, including its link timestamp.
+            legacy_match = (legacy_subject_proven and owner_subject is not None
+                            and row["owner_subject"] is None and row["instance_id"] == instance)
+            if not legacy_match and not owner_matches(row, {"id": instance, "owner": owner, "owner_subject": owner_subject}):
                 return
             self._revoke_device(conn, device_id, _now())
             self._audit(conn, 'health.revoke', caller='device_sign_out')
@@ -763,7 +842,7 @@ class MobileStore:
                 conn.execute("DELETE FROM health_days WHERE device_id=? AND metric=? AND day=?",
                              (row["device_id"], row["metric"], row["day"]))
 
-    def cleanup(self) -> None:
+    def cleanup(self, *, include_days=True) -> None:
         now = _now()
         with self.transaction() as conn:
             self._expire(conn, now)
@@ -771,7 +850,8 @@ class MobileStore:
                                    (_after(now, days=-60),)).fetchall()
             for row in expired:
                 self._revoke_device(conn, row["id"], now)
-            self._trim_days(conn, now)
+            if include_days:
+                self._trim_days(conn, now)
             conn.execute("DELETE FROM pairings WHERE expires_at<=?", (now,))
             conn.execute("DELETE FROM pairings WHERE request_id IN "
                          "(SELECT id FROM requests WHERE ended_at<=?)", (_after(now, days=-7),))
@@ -782,7 +862,9 @@ class MobileStore:
             publish_mobile_schedule_changed()
 
     def status(self) -> dict:
-        self.cleanup()
+        # Daily retention reads payload timezones; metadata status must not query values.
+        # Upload/read/maintenance still perform the ordinary daily retention pass.
+        self.cleanup(include_days=False)
         with self.transaction() as conn:
             device = self.active_device(conn)
             if device is None:

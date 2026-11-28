@@ -12,50 +12,98 @@ from storage.mobile_store import MobileStore, mobile_store_path, publish_mobile_
 logger = logging.getLogger(__name__)
 
 
-def current_identity(store: MobileStore) -> dict:
-    """The instance owner, from a live control-plane answer.
-
-    Any instance kind and any sharing state qualifies: who may reach this
-    instance, and therefore its Agents and synced health data, is the owner's
-    own access setting. Health only binds the phone to the current owner.
-    An answer that cannot confirm the owner pauses this call; only a live,
-    confirmed owner change revokes and purges (explicit revoke/unpair aside).
-    """
-    from config.v2_config import V2Config, config_file_lock
+def live_owner(config=None):
+    """Fetch owner authority without opening private Health storage."""
+    from config.v2_config import V2Config
     from vibe import permissions
+    from vibe.binding_admission import reset_in_progress
+    from storage.mobile_store import owner_unavailable
+
+    try:
+        config = config or V2Config.load()
+        cloud = config.remote_access.vibe_cloud
+        if reset_in_progress() or cloud.runtime_credentials() is None:
+            raise owner_unavailable("cloud_unavailable")
+        result = permissions.get_current_permissions(config)
+    except (permissions.PermissionsError, FileNotFoundError, OSError, ValueError):
+        raise owner_unavailable("cloud_unavailable") from None
+    if result.source != "live":
+        raise owner_unavailable("cloud_unavailable")
+    instance = result.projection["instance"]
+    record = result.projection["access"].get("owner")
+    if not cloud.instance_id or instance["id"] != cloud.instance_id:
+        raise owner_unavailable("cloud_unavailable")
+    if not isinstance(record, dict):
+        raise owner_unavailable("owner_record_missing")
+    subject = record.get("user_id")
+    if "user_id" in record and (not isinstance(subject, str) or not subject.strip() or subject != subject.strip()):
+        raise owner_unavailable("owner_record_missing")
+    email = (record.get("email") or "").strip().casefold()
+    if subject is None and not email:
+        raise owner_unavailable("cloud_owner_subject_unsupported")
+    return {"id": instance["id"], "name": instance.get("name") or instance["id"],
+            "owner": email, "owner_subject": subject}
+
+
+def current_identity(store: MobileStore, *, retire=True) -> dict:
+    """Only live owner proof can migrate or retire an enrollment."""
+    from config.v2_config import V2Config, config_file_lock
     from vibe.account_session_revoke import pairing_epoch
     from vibe.binding_admission import reset_in_progress
     from vibe.remote_access import device_binding
+    from storage.mobile_store import owner_unavailable
 
-    unavailable = MobileError("instance_eligibility_unavailable", 503)
     try:
         config = V2Config.load()
-        cloud = config.remote_access.vibe_cloud
-        if reset_in_progress() or cloud.runtime_credentials() is None:
-            raise unavailable
-        observed = store.active_device()
-        result = permissions.get_current_permissions(config)
-    except permissions.PermissionsError:
-        raise unavailable from None
-    except (FileNotFoundError, OSError, ValueError):
-        raise unavailable from None
-    if result.source != "live":
-        raise unavailable
-    instance = result.projection["instance"]
-    owner = (result.projection["access"]["owner"].get("email") or "").strip().casefold()
-    if not owner or not cloud.instance_id or instance["id"] != cloud.instance_id:
-        raise unavailable
-    identity = {"id": instance["id"], "name": instance.get("name") or instance["id"], "owner": owner}
-    # Network I/O holds no local lock. Only the generation that asked for
-    # this answer may use it to read or purge; reset and publication use the
-    # same config lock. A stale answer is unavailability, not an owner change.
+    except (OSError, ValueError):
+        raise owner_unavailable("cloud_unavailable") from None
+    observed = store.active_device()
+    identity = live_owner(config)
+    # External I/O never owns local locks. Preserve both epoch and enrollment fences.
     with config_file_lock():
         current = V2Config.load()
         if (reset_in_progress() or current.remote_access.vibe_cloud.runtime_credentials() is None
                 or pairing_epoch(current) != pairing_epoch(config) or device_binding(current) != device_binding(config)):
-            raise unavailable
-        store.retire_other_identities(instance=identity['id'], owner=owner, expected_device=observed['id'] if observed else None)
+            raise owner_unavailable("cloud_unavailable")
+        kwargs = dict(instance=identity["id"], owner=identity["owner"], owner_subject=identity["owner_subject"],
+                      expected_device=observed["id"] if observed else None, retire=retire)
+        if identity["owner_subject"] is not None:
+            from storage.db import get_cached_sqlite_engine
+            from storage.importer import ensure_sqlite_state
+            from storage.models import device_health_links
+            from sqlalchemy import select
+            ensure_sqlite_state()
+            with get_cached_sqlite_engine().begin() as conn:
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+                proofs = conn.execute(select(device_health_links).where(
+                    device_health_links.c.binding == device_binding(current))).mappings().all()
+                store.retire_other_identities(**kwargs, proofs=proofs)
+        else:
+            store.retire_other_identities(**kwargs)
     return identity
+
+
+def context_is_owner(context, identity):
+    if not context or not context.is_instance_owner or context.instance_id != identity["id"]:
+        return False
+    subject = identity.get("owner_subject")
+    return (context.subject == subject if subject else
+            bool(context.email and context.email.casefold() == identity["owner"]))
+
+
+def owner_error_details(error):
+    """Stable code, localized facts and a cause-specific next action."""
+    from config.v2_config import V2Config
+    from vibe.i18n import t
+    reason = (error.details or {}).get("reason")
+    if error.code != "instance_eligibility_unavailable" or not reason:
+        return {"code": error.code, "error": error.code}
+    try:
+        language = V2Config.load().language
+    except (OSError, ValueError):
+        language = "en"
+    return {"code": error.code, "error": t(f"mobile.health.owner.{reason}", language),
+            "details": error.details}
 
 
 def request_metadata(request: dict) -> dict:
@@ -116,12 +164,8 @@ def notify_phone(store: MobileStore, request: dict, identity: dict, *, caller: s
         )
         if not record or record["authorization_state"] != "current":
             continue
-        context = context_from_session_payload(record["claims"])
-        if not (
-            context.is_instance_owner and context.email
-            and context.email.casefold() == identity["owner"]
-            and context.instance_id == identity["id"]
-        ):
+        context = context_from_session_payload({**record["claims"], "sub": record["subject"], "email": record["email"]})
+        if not context_is_owner(context, identity):
             continue
         # Device IDs survive subscription rotation; endpoint hashes cover older rows.
         import hashlib

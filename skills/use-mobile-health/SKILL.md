@@ -24,6 +24,13 @@ vibe mobile requests await mreq_0123456789abcdef0123456789abcdef --timeout 20
 vibe mobile health revoke
 ```
 
+`status` can report `read_allowed: false` and `sync_state: unknown` when the
+instance cannot verify its owner. Follow the localized `diagnostic.error` and
+`diagnostic.details.reason`; this is not evidence that data was deleted or the
+phone denied access. Stored data is preserved while verification is unavailable.
+Do not reconnect an unproven legacy connection automatically. A verified owner
+subject survives email changes; an actual owner transfer revokes the prior sync.
+
 If reading returns `not_connected`, run `connect`. Its conversation card and
 notification let the user authorize on iPhone. An explicit native confirmation and iOS Health permission request precede synchronization;
 the browser receives no health values or device credential. If a metric reports

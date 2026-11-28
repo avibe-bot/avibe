@@ -323,7 +323,8 @@ def test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account(b
 
 
 @pytest.mark.parametrize("instance_kind", ["personal", "organization"])
-def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path, instance_kind):
+@pytest.mark.parametrize("stable_owner", [False, True], ids=["email-cloud", "subject-cloud"])
+def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path, instance_kind, stable_owner):
     """AUTH-SETUP-186: real producers/consumers; fake phone, policy and push only.
 
     Personal and shared organization instances follow the same closed loop: who may reach
@@ -351,6 +352,8 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
             {"kind": "email", "value": "colleague@example.test", "role": "member"},
         ] if organization else []},
     }
+    if stable_owner:
+        projection["access"]["owner"] = {"user_id": "synthetic-owner", "email": None}
     monkeypatch.setattr(permissions, "get_current_permissions", lambda *_a: SimpleNamespace(
         source="live", projection=projection,
     ))
@@ -445,6 +448,9 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
         assert response.status_code == 200
         status = client.get(f"/api/mobile/requests/{h.request['id']}").get_json()
         assert status["state"] == "succeeded" and "987654321" not in json.dumps(status)
+        if stable_owner:
+            projection["access"]["owner"]["email"] = "changed@example.test"
+            assert cli_mobile.execute(cli.build_parser().parse_args(["mobile", "health", "status"]))["read_allowed"]
 
     def confirm_heart_metrics_without_replacing_device(h):
         # AUTH-SETUP-186: CLI -> owner card/code -> authenticated manifest ->

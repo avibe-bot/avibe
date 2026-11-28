@@ -1946,6 +1946,12 @@
   "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。",
   "mobile": {
     "health": {
+      "owner": {
+        "cloud_unavailable": "无法通过云端确认实例所有者，健康读取与同步已暂停，已存数据会保留。请检查实例的云端连接，然后再次运行 `vibe mobile health status`。",
+        "cloud_owner_subject_unsupported": "云端响应未包含此健康连接所需的所有者标识，健康读取与同步已暂停，已存数据会保留。请更新 Avibe Cloud 或联系管理员，然后再次运行 `vibe mobile health status`。",
+        "legacy_owner_unproven": "此健康连接创建时尚未记录所有者标识，设备记录无法证明它属于当前所有者。健康读取与同步已暂停，已存数据会保留。请联系 Avibe 支持核实此连接后再重新连接。",
+        "owner_record_missing": "云端未提供此健康连接所需的有效所有者标识，健康读取与同步已暂停，已存数据会保留。请联系 Avibe 支持修复实例的所有者记录，然后再次运行 `vibe mobile health status`。"
+      },
       "requestCreated": "已向 iPhone 发起健康数据请求。",
       "connectTitle": "{name} 请求读取你的健康数据",
       "refreshTitle": "{name} 请求更新健康数据",

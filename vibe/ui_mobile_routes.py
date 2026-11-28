@@ -10,7 +10,7 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from core.handlers.mobile_health import current_identity, request_metadata
+from core.handlers.mobile_health import current_identity, request_metadata, context_is_owner, owner_error_details
 from core.mobile_health_contract import (
     MAX_BODY_BYTES, MobileError, integer, object_fields, text,
 )
@@ -47,7 +47,7 @@ def mobile_error_response(error: MobileError) -> JSONResponse:
     headers = {"Cache-Control": "no-store"}
     if error.status in {429, 503}:
         headers["Retry-After"] = "30"
-    return JSONResponse({"ok": False, "code": error.code, "error": error.code},
+    return JSONResponse({"ok": False, **owner_error_details(error)},
                         status_code=error.status, headers=headers)
 
 
@@ -165,10 +165,7 @@ def register_mobile_routes(app) -> None:
                 object_fields(payload, {"request_id"})
                 store = await asyncio.to_thread(MobileStore)
                 identity = await asyncio.to_thread(current_identity, store)
-                if context.is_remote and (
-                    not context.email or context.email.casefold() != identity["owner"]
-                    or context.instance_id != identity["id"]
-                ):
+                if context.is_remote and not context_is_owner(context, identity):
                     raise MobileError("instance_not_eligible", 403)
                 from storage.device_health_registry import issue_pairing
                 from vibe.ui_server import _device_viewer
@@ -187,10 +184,7 @@ def register_mobile_routes(app) -> None:
                     raise MobileError("instance_access_forbidden", 403)
                 store = await asyncio.to_thread(MobileStore)
                 identity = await asyncio.to_thread(current_identity, store)
-                if context.is_remote and (
-                    not context.email or context.email.casefold() != identity["owner"]
-                    or context.instance_id != identity["id"]
-                ):
+                if context.is_remote and not context_is_owner(context, identity):
                     raise MobileError("instance_not_eligible", 403)
                 result = await asyncio.to_thread(store.request_for_identity, request_id, identity)
                 return JSONResponse(request_metadata(result), headers={"Cache-Control": "no-store"})

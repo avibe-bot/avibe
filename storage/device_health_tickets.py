@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert
 
 from core.mobile_health_contract import MobileError
 from storage.db import get_cached_sqlite_engine
+from storage.mobile_store import owner_matches
 from storage.models import device_health_links as links, remote_device_sessions as sessions, device_session_extensions as ext
 from vibe.device_metadata import device_key
 
@@ -54,7 +55,7 @@ def redeem(store, viewer, context, report, ticket, now):
         return 400, "invalid_device_description"
     binding, subject, _, sid = viewer
     if not (
-        sid and subject and context.is_remote and context.is_instance_owner and context.email and context.instance_id
+        sid and subject and context.is_remote and context.is_instance_owner and context.instance_id
     ):
         return 403, "health_binding_not_accepted"
     target = device_key(binding, subject, "installation", report["installation_id"])
@@ -104,10 +105,13 @@ def redeem(store, viewer, context, report, ticket, now):
             return 403, "health_binding_not_accepted"
         with store.transaction() as mobile:
             valid = mobile.execute(
-                "SELECT 1 FROM devices WHERE id=? AND owner=? AND instance_id=? AND revoked_at IS NULL",
-                (proof["mobile_id"], context.email.casefold(), context.instance_id),
+                "SELECT * FROM devices WHERE id=? AND revoked_at IS NULL",
+                (proof["mobile_id"],),
             ).fetchone()
-            if valid is None:
+            if valid is None or not owner_matches(valid, {
+                "id": context.instance_id, "owner": (context.email or "").casefold(),
+                "owner_subject": subject if valid["owner_subject"] is not None else None,
+            }):
                 return 403, "health_binding_not_accepted"
             status = device_registry.describe_in_transaction(conn, binding, subject, sid, report, now)
             if status != 200:

@@ -1946,6 +1946,12 @@
   "mcp_oauth_start_rejected": "This MCP OAuth link must be opened from Avibe.",
   "mobile": {
     "health": {
+      "owner": {
+        "cloud_unavailable": "The instance owner could not be verified with Cloud. Health reads and synchronization are paused; stored data is kept. Check the instance Cloud connection, then run `vibe mobile health status` again.",
+        "cloud_owner_subject_unsupported": "This Cloud response does not include the owner ID required by this health connection. Health reads and synchronization are paused; stored data is kept. Update Avibe Cloud or contact its administrator, then run `vibe mobile health status` again.",
+        "legacy_owner_unproven": "This health connection predates owner IDs, and its device record cannot prove the current owner. Health reads and synchronization are paused; stored data is kept. Contact Avibe support to verify the connection before reconnecting.",
+        "owner_record_missing": "Cloud did not provide a valid owner identity for this health connection. Health reads and synchronization are paused; stored data is kept. Contact Avibe support to repair the instance owner record, then run `vibe mobile health status` again."
+      },
       "requestCreated": "Health data requested on iPhone.",
       "connectTitle": "{name} requests access to your health data",
       "refreshTitle": "{name} requests a health data update",

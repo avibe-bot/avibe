@@ -58,7 +58,7 @@ def window(cursor, source, quantum, stamp):
     return stamp(ts // quantum * quantum), 2**63 - 1 if ts % quantum or source < src else (key if source == src else 0)
 
 
-def list_page(conn, viewer, context, instance, owner_email, *, limit, raw_cursor, device=None, health_only=False):
+def list_page(conn, viewer, context, instance, owner_email, *, limit, raw_cursor, device=None, health_only=False, health_identity=None):
     now = int(time.time())
     live_caller(conn, viewer, now)
     if not 1 <= limit <= 100:
@@ -168,7 +168,10 @@ def list_page(conn, viewer, context, instance, owner_email, *, limit, raw_cursor
                 **extra,
             )
 
-    if owner and instance and owner_email and mobile_store_path().exists():
+    health_scope = health_identity if health_identity is not None else (
+        {"id": instance, "owner": owner_email} if instance and owner_email else {}
+    )
+    if owner and health_scope and mobile_store_path().exists():
         # Health is owner-only. Restrict both the proven registry links AND private
         # pairing's actual owner/instance before pagination. An old audit without a
         # proven pairing never gains a device through a guess based on time.
@@ -185,11 +188,12 @@ def list_page(conn, viewer, context, instance, owner_email, *, limit, raw_cursor
                 sql = """WITH proof(mid,linked) AS (SELECT key,value FROM json_each(?))
                     SELECT a.id,a.at,a.device_id,a.metrics,a.from_day,a.to_day,a.session_id FROM accesses a
                     JOIN proof ON proof.mid=a.device_id AND a.at>=proof.linked JOIN devices d ON d.id=a.device_id
-                    WHERE d.instance_id=? AND d.owner=? AND a.operation='health.read' AND a.caller!='local' AND a.at>?"""
+                    WHERE d.instance_id=? AND d.owner_subject IS ? AND (d.owner_subject IS NOT NULL OR d.owner=?) AND a.operation='health.read' AND a.caller!='local' AND a.at>?"""
                 params = [
                     json.dumps({k: v[1] for k, v in linked.items()}),
-                    instance,
-                    owner_email,
+                    health_scope["id"],
+                    health_scope.get("owner_subject"),
+                    health_scope["owner"],
                     instant(cutoff).isoformat(),
                 ]
                 if cursor:
