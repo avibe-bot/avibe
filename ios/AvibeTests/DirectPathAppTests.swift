@@ -5894,10 +5894,13 @@ final class DirectPathAppTests: XCTestCase {
             runtime: runtime
         )
 
-        // Second press: WebKit's own path for the host; no route left.
+        // Second press: WebKit's own path for the host; no route left, and
+        // counted once for the report (`route_fallbacks`).
+        let retriesBefore = DirectRouteFallbacks.shared.pending.first { $0.reason == .retry }?.count ?? 0
         XCTAssertTrue(app.retryRuntimeOpen(attemptID: again.id))
         _ = try await waitForBrowser("instance-1", in: app)
         XCTAssertTrue(firstStore.proxyConfigurations.flatMap(\.matchDomains).isEmpty)
+        XCTAssertEqual(DirectRouteFallbacks.shared.pending.first { $0.reason == .retry }?.count, retriesBefore + 1)
         XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized), reverted)
     }
 
