@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -328,6 +330,29 @@ def verified_merge_paths(root, expected):
     return base, paths
 
 
+def run_logged(command, env, log):
+    """Drain both streams through EOF. The file is evidence; stdout is a live copy."""
+    console = sys.stdout.fileno()
+    with log.open('wb') as saved, subprocess.Popen(
+        command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    ) as child:
+        with child.stdout as output:
+            while chunk := output.read1(64 * 1024):
+                saved.write(chunk)
+                pending = memoryview(chunk)
+                while pending and console is not None:
+                    try:
+                        pending = pending[os.write(console, pending):]
+                    except BlockingIOError:
+                        select.select([], [console], [])
+                    except BrokenPipeError:
+                        console = None  # Continue collecting even if the console closed.
+        code = child.wait()
+        saved.flush()
+        os.fsync(saved.fileno())
+    return subprocess.CompletedProcess(command, code)
+
+
 def execute_tests(common, target, selectors, required, skip, env, temp, remaining):
     def command(result, only):
         return [*common, "-resultBundlePath", str(result), *["-only-testing:" + s for s in only],
@@ -340,12 +365,7 @@ def execute_tests(common, target, selectors, required, skip, env, temp, remainin
 
     result = temp / f"{target}.xcresult"
     log = temp / f"{target}.log"
-    # Keep live Actions output and a log of this execution only (not discovery).
-    with subprocess.Popen(["tee", str(log)], stdin=subprocess.PIPE) as tee:
-        first = subprocess.run(command(result, selectors), env=env, stdout=tee.stdin, stderr=subprocess.STDOUT)
-        tee.stdin.close()
-        if tee.wait():
-            raise RuntimeError(f"Could not save {target} execution log")
+    first = run_logged(command(result, selectors), env, log)
     if first.returncode == 0:
         verify(report(result), target, required)
         return 0

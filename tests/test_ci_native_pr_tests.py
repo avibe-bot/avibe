@@ -1,6 +1,8 @@
 """Verify routing against a compiled catalog and receipts from the result tree."""
 
+import errno
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -341,6 +343,35 @@ def test_unregistered_file_is_not_a_helper_only_green(tmp_path):
     verify_membership(TARGET, sources, tmp_path)
 
 
+@pytest.mark.parametrize('mode', ['backpressure', 'closed console', 'save failure'])
+def test_native_log_survives_console_pressure_but_not_a_failed_save(tmp_path, monkeypatch, capfd, mode):
+    path = tmp_path / 'execution.log'
+    payload = b'** TEST EXECUTE SUCCEEDED **\nTesting started\n'
+    real_write = os.write
+    calls = []
+
+    def mirror(fd, data):
+        calls.append(fd)
+        if mode == 'closed console':
+            raise BrokenPipeError()
+        if len(calls) == 1:
+            raise BlockingIOError(errno.EAGAIN, 'Resource temporarily unavailable')
+        return real_write(fd, data[:7])
+
+    monkeypatch.setattr(native.os, 'write', mirror)
+    command = [sys.executable, '-c', f'import os; os.write(2, {payload!r})']
+    if mode == 'save failure':
+        def no_space(fd):
+            raise OSError(errno.ENOSPC, 'disk full')
+        monkeypatch.setattr(native.os, 'fsync', no_space)
+        with pytest.raises(OSError, match='disk full'):
+            native.run_logged(command, {}, path)
+    else:
+        assert native.run_logged(command, {}, path).returncode == 0
+        assert path.read_bytes() == payload
+        assert calls and capfd.readouterr().out == (payload.decode() if mode == 'backpressure' else '')
+
+
 @pytest.mark.parametrize("mode, calls", [
     ("green", 1), ("stall", 2), ("normal assertion", 1), ("budget exhausted", 1),
     ("driver error", 1), ("unattributed file error", 1), ("suite mention", 1), ("early suite end", 1),
@@ -392,12 +423,15 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     env = {"FIXTURE": "same"}
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
 
-    def run(cmd, *, env, stdout=None, stderr=None, check=False):
+    def first(cmd, env, path):
         assert env == {"FIXTURE": "same"} and cmd[-1] == "test-without-building"
         seen.append([s for s in cmd if s.startswith("-only-testing:")])
-        if stdout is not None:
-            stdout.write(log.encode())
-            return subprocess.CompletedProcess(cmd, 0 if mode == "green" else 65)
+        path.write_bytes(log.encode())
+        return subprocess.CompletedProcess(cmd, 0 if mode == "green" else 65)
+
+    def run(cmd, *, env, check):
+        assert env == {"FIXTURE": "same"} and cmd[-1] == "test-without-building"
+        seen.append([s for s in cmd if s.startswith("-only-testing:")])
         assert check
         if mode == "rerun red":
             raise subprocess.CalledProcessError(65, cmd)
@@ -416,6 +450,7 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
             outcomes[COMMON] = "Passed"
         return json.dumps(tree(outcomes, "OtherTests" if mode == "wrong bundle" else TARGET))
 
+    monkeypatch.setattr(native, "run_logged", first)
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(subprocess, "check_output", receipt)
     args = (["xcodebuild"], TARGET, [TARGET], {COMMON, PHONE}, [], env, tmp_path, 0 if mode == "budget exhausted" else 3)
