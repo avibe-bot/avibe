@@ -315,6 +315,8 @@ const closeSourceDetails = async () => {
 
 beforeEach(() => {
   vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
+  // A Direct card reads its backend's menu; these cases are about the page around it.
+  vi.spyOn(modelsApi, 'getDirectMenu').mockResolvedValue({ models: [], removed: [] });
   vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
 });
 

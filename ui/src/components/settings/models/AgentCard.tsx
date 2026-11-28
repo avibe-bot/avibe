@@ -18,6 +18,8 @@ import { currentChainLink, isTakeoverChain } from './takeover';
 import { backendDisplayOrder, getBackendUiMeta } from '@/lib/agentBackends';
 import { useBots } from '@/context/BotsContext';
 import type { AgentSupply, Source } from './types';
+import { DirectModelList } from './DirectModelMenu';
+import { useDirectModelMenu } from './useDirectModelMenu';
 
 const NO_USERS: readonly string[] = [];
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
@@ -263,6 +265,11 @@ const AgentModelCard: React.FC<{
   }), [agent, botForAgent, displayName]);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
   const allModels = React.useMemo(() => catalogModelIds(agent), [agent]);
+  // A Direct backend's card lists the menu its Session pickers offer, not the gateway's saved list.
+  // ui/design: models/direct-menu/list
+  const isDirect = agent.mode !== 'hub' && getBackendUiMeta(agent.backend).capabilities.supports_cli;
+  const directMenu = useDirectModelMenu(agent.backend, isDirect);
+  const modelCount = isDirect ? directMenu.models?.length ?? null : allModels.length;
   const previousModelsRef = React.useRef(allModels);
   React.useEffect(() => {
     const previousModels = new Set(previousModelsRef.current);
@@ -379,11 +386,11 @@ const AgentModelCard: React.FC<{
           )}
         </div>
         <div className="model-hub-agent-head-controls flex min-w-0 items-center justify-between gap-2">
-          <Badge variant="secondary" className={cn('model-hub-pill model-hub-fill-0a min-w-0', hasTakeover && 'model-hub-takeover-chip')}>
+          {modelCount === null && !hasTakeover ? <span /> : <Badge variant="secondary" className={cn('model-hub-pill model-hub-fill-0a min-w-0', hasTakeover && 'model-hub-takeover-chip')}>
             <span className="truncate">{hasTakeover
               ? t('settings.models.takeover.chip')
-              : t('settings.models.gateway.modelCount', { count: allModels.length })}</span>
-          </Badge>
+              : t('settings.models.gateway.modelCount', { count: modelCount ?? 0 })}</span>
+          </Badge>}
           {agent.mode === 'hub' ? (noProviders && allModels.length === 0 ? null : (
             <div className="model-hub-agent-head-actions">
               <ManageModelsButton className="model-hub-agent-head-action" disabled={pending} onClick={() => onOpenModels(agent)} />
@@ -394,6 +401,7 @@ const AgentModelCard: React.FC<{
         </div>
       </div>
       {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">{noProviders ? <p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyNoProviders')}</p> : <><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></>}</div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} users={users.get(modelId) ?? NO_USERS} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}{!noProviders && <AddModelButton disabled={pending} onClick={() => onAddModels(agent)} />}</div>)}
+      {isDirect && <DirectModelList menu={directMenu} />}
       {/* With no provider yet, every Agent lacks a model by construction: the one way
           forward is the Providers card's add button, not a warning or an add here.
           ui/design: models/first-provider/fresh */}

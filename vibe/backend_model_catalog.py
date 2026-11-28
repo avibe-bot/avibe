@@ -1365,7 +1365,10 @@ def retired_backend_model_ids(backend: str, catalog: dict[str, Any] | None) -> f
     )
 
 
-def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> dict[str, Any]:
+def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True, catalog_only: bool = False) -> dict[str, Any]:
+    """A backend's model catalog. ``catalog_only`` skips the Codex Direct menu cutover below: the public
+    catalog alone, for ``vibe.api.direct_model_menu``, which applies the account's inventory and the
+    removals itself (and answers the restore list, which a filtered catalog cannot)."""
     backend_key = (backend or "").strip().lower()
     if backend_key not in _SUPPORTED_BACKENDS:
         return {"ok": False, "backend": backend_key, "error": f"unsupported backend '{backend}'"}
@@ -1409,7 +1412,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         efforts = entry.get("reasoning_efforts") or default_efforts
         reasoning_options[entry["id"]] = _reasoning_option_items(efforts)
 
-    if backend_key == "codex":
+    if backend_key == "codex" and not catalog_only:
         # Cut over the existing picker and its metadata together. The separate
         # builtin/Hub APIs never use an ambient account as a source binding.
         from config.v2_config import V2Config, is_model_hub_enabled
@@ -1698,6 +1701,11 @@ def _legacy_claude_reasoning_efforts(model: str) -> list[str]:
         for entry in build_claude_reasoning_options(model)
         if entry.get("value") != "__default__"
     ]
+
+
+def reasoning_option_items(efforts: Iterable[object]) -> list[dict[str, str]]:
+    """A picker's effort options for ``efforts``: the backend's Default first, then each effort labelled."""
+    return _reasoning_option_items(efforts)
 
 
 def _reasoning_option_items(efforts: Iterable[object]) -> list[dict[str, str]]:

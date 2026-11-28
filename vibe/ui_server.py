@@ -11447,6 +11447,25 @@ async def direct_model_visibility(backend: str, starlette_request: FastAPIReques
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/backend/{backend}/models/visibility", include_in_schema=False)
+async def direct_model_menu_read(backend: str, starlette_request: FastAPIRequest):
+    """A Direct menu and its restore list (rows the backend offers now that the menu hides), for Settings · Models.
+
+    ``?live=1`` lets OpenCode read its options live, which may start it; otherwise it answers from its cache.
+    """
+
+    async def handler():
+        from modules.agents.catalog import is_native_cli_backend
+        from vibe import api
+
+        if not is_native_cli_backend(backend):
+            return jsonify({"ok": False, "error": "invalid_model_visibility"}), 400
+        answer = await api.direct_menu_and_removals(backend, live=request.args.get("live") == "1")
+        return jsonify(answer), (200 if answer.get("ok") else 502)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/antigravity/models", include_in_schema=False)
 async def antigravity_models(starlette_request: FastAPIRequest):
     async def handler():

@@ -560,6 +560,9 @@ _MEMBER_HTTP_RULES = tuple(
         ("PUT", r"^/api/models/agents/[^/]+/sources$"),
         ("GET", r"^/api/models/agents/[^/]+/models/candidates$"),
         ("PUT", r"^/api/models/agents/[^/]+/models$"),
+        # A Direct menu's removals: whoever edits a Hub menu above removes and restores Direct rows.
+        ("GET", r"^/api/backend/[^/]+/models/visibility$"),
+        ("PUT", r"^/api/backend/[^/]+/models/visibility$"),
         ("GET", r"^/api/models/catalog/models-dev$"),
         ("PATCH", r"^/api/models/agents/[^/]+/mode$"),
         ("POST", r"^/api/models/agents/[^/]+/chains/reorder$"),

@@ -577,6 +577,42 @@ class SettingsHandler(BaseHandler):
     # loader fills ``menu`` in place; ``stored_model`` is the stored route's model when this is its backend, and
     # ``wanted`` every model a form on this backend can show or inherit, whose efforts it needs.
 
+    async def _load_hub_route_menu(self, backend: str, menu: BackendRouteMenu, *, required: bool = False) -> bool:
+        """Fill ``menu`` from Model Hub's menu for ``backend`` and say whether Hub serves it, as the Web route
+        picker and ``vibe agent models`` read it (``vibe.api.route_menu_options``): a backend Hub does not serve,
+        or whose menu Hub cannot answer, shows its Direct menu. Vibey's (``required``) has no other.
+
+        An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered.
+        """
+        model_hub_service = getattr(self.controller, "model_hub_service", None)
+        if model_hub_service is None:
+            return False
+        try:
+            agent = await model_hub_service.read_agent_sources(backend)
+        except Exception:
+            if required:
+                raise
+            logger.debug("Model Hub menu unavailable for %s routing options", backend, exc_info=True)
+            return False
+        if not required and agent.get("mode") != "hub":
+            return False
+        for row in agent.get("catalog_models") or []:
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or not row.get("routeable") or model_id in menu.efforts:
+                continue
+            omitted = set((row.get("effort_menu") or {}).get("omitted") or [])
+            menu.models.append(RouteOption(model_id, str(row.get("display_name") or model_id)))
+            menu.efforts[model_id] = (
+                []
+                if row.get("supports_reasoning") is False
+                else [
+                    RouteOption(effort, effort)
+                    for effort in dict.fromkeys(row.get("reasoning_efforts") or [])
+                    if effort not in omitted
+                ]
+            )
+        return True
+
     async def _load_opencode_route_menu(
         self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
     ) -> None:
@@ -586,23 +622,29 @@ class SettingsHandler(BaseHandler):
             resolve_opencode_allowed_providers,
             resolve_opencode_provider_preferences,
         )
+        from vibe.api import opencode_direct_menu
 
         opencode_agent = self.controller.agent_service.agents.get("opencode")
         if not opencode_agent or not hasattr(opencode_agent, "current_server"):
             return
+        hub = await self._load_hub_route_menu("opencode", menu)
         async with opencode_agent.current_server() as server:  # type: ignore[attr-defined]
             cwd = self.controller.get_cwd(context)
             agents = await server.get_available_agents(cwd)
-            model_hub_service = getattr(self.controller, "model_hub_service", None)
-            public_models = model_hub_service.opencode_public_models() if model_hub_service is not None else None
-            if public_models is None:
-                models = await server.get_available_models(cwd)
-            else:
-                models = await server.get_available_models(cwd, model_hub_models=public_models)
-            default_config = await server.get_default_config(cwd)
+            if not hub:
+                model_hub_service = getattr(self.controller, "model_hub_service", None)
+                public_models = model_hub_service.opencode_public_models() if model_hub_service is not None else None
+                if public_models is None:
+                    models = await server.get_available_models(cwd)
+                else:
+                    models = await server.get_available_models(cwd, model_hub_models=public_models)
+                models = (await asyncio.to_thread(opencode_direct_menu, {"models": models}))["models"]
+                default_config = await server.get_default_config(cwd)
         menu.variants = _unique_options(
             agent.get("name") if isinstance(agent, dict) else agent for agent in agents or []
         )
+        if hub:
+            return
         # OpenCode spreads a select's cap over its providers, so the list is built for the select that shows it,
         # without the values it cannot carry; a platform without a cap (a paged picker) gets every model.
         entries = build_opencode_model_option_items(
@@ -630,6 +672,8 @@ class SettingsHandler(BaseHandler):
         agents_result = get_claude_agents(self.controller.get_cwd(context))
         if agents_result.get("ok"):
             menu.variants = _unique_options(agent.get("id") for agent in agents_result.get("agents", []))
+        if await self._load_hub_route_menu("claude", menu):
+            return
         models_result = await asyncio.to_thread(get_claude_models)
         if not models_result.get("ok"):
             return
@@ -651,10 +695,12 @@ class SettingsHandler(BaseHandler):
         from modules.agents.opencode.utils import build_codex_reasoning_options, resolve_model_reasoning_options
         from vibe.api import codex_agents as get_codex_agents, codex_models as get_codex_models
 
-        models_result = await asyncio.to_thread(get_codex_models)
         agents_result = get_codex_agents(self.controller.get_cwd(context))
         if agents_result.get("ok"):
             menu.variants = _unique_options(agent.get("id") for agent in agents_result.get("agents", []))
+        if await self._load_hub_route_menu("codex", menu):
+            return
+        models_result = await asyncio.to_thread(get_codex_models)
         if not models_result.get("ok"):
             return
         models = [str(model) for model in models_result.get("models", []) if model]
@@ -669,29 +715,7 @@ class SettingsHandler(BaseHandler):
     async def _load_vibey_route_menu(
         self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
     ) -> None:
-        """Vibey's menu from Model Hub, as the Web route picker reads it.
-
-        An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered.
-        """
-        model_hub_service = getattr(self.controller, "model_hub_service", None)
-        if model_hub_service is None:
-            return
-        catalog = (await model_hub_service.read_agent_sources("vibey")).get("catalog_models") or []
-        for row in catalog:
-            model_id = str(row.get("id") or "").strip()
-            if not model_id or row.get("routeable") is False or model_id in menu.efforts:
-                continue
-            omitted = set((row.get("effort_menu") or {}).get("omitted") or [])
-            menu.models.append(RouteOption(model_id, str(row.get("display_name") or model_id)))
-            menu.efforts[model_id] = (
-                []
-                if row.get("supports_reasoning") is False
-                else [
-                    RouteOption(effort, effort)
-                    for effort in dict.fromkeys(row.get("reasoning_efforts") or [])
-                    if effort not in omitted
-                ]
-            )
+        await self._load_hub_route_menu("vibey", menu, required=True)
 
     async def _load_antigravity_route_menu(
         self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]

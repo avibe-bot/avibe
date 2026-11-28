@@ -5881,7 +5881,7 @@ def cmd_agent_default(args):
 
 def _agent_models_current(agent, options: dict) -> dict:
     """Echo an Agent's currently-set model/effort and whether they remain valid."""
-    by_value = {entry.get("value"): entry for entry in options.get("models") or []}
+    by_value = {entry.get("value"): entry for entry in _with_removed_entries(options)}
     model = agent.model
     effort = agent.reasoning_effort
     # An OpenCode Agent may store a bare model id that routes through the configured
@@ -6020,7 +6020,7 @@ def _catalog_mismatches(
     if not options.get("ok"):
         unavailable = f"the {backend} model catalog could not be loaded, so the model and reasoning effort cannot be checked"
         return ([unavailable] if authoritative else []), authoritative
-    by_value = {entry.get("value"): entry for entry in options.get("models") or []}
+    by_value = {entry.get("value"): entry for entry in _with_removed_entries(options)}
     model_unknown = bool(model) and model not in by_value
     mismatches: list[str] = []
     if model_unknown:
@@ -9335,8 +9335,28 @@ def _bot_session_refusal(conn, session_id: str, caller_env=None) -> Optional[Tas
     )
 
 
+def _with_removed_entries(menu: dict) -> list[dict]:
+    """A menu's entries plus, for a Direct menu, the rows removed from it.
+
+    Removing takes a model off menus, not off a Session or Agent already on it, so checks of a stored or
+    requested choice still find it; listing commands show ``menu["models"]`` alone.
+    """
+    from vibe import api
+
+    entries = list(menu.get("models") or [])
+    if menu.get("mode") == "hub" or not menu.get("backend"):
+        return entries
+    try:
+        return entries + api.removed_menu_entries(str(menu["backend"]))
+    except Exception:
+        return entries
+
+
 def _menu_entry(menu: dict, model: Optional[str]) -> Optional[dict]:
-    return next((entry for entry in menu.get("models") or [] if model and entry.get("value") == model), None)
+    if not model:
+        return None
+    entry = next((entry for entry in menu.get("models") or [] if entry.get("value") == model), None)
+    return entry or next((entry for entry in _with_removed_entries(menu) if entry.get("value") == model), None)
 
 
 def _check_session_route(

@@ -328,6 +328,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PUT", "/api/models/agents/codex/models"),
         ("GET", "/api/models/agents/codex/models/candidates"),
         ("GET", "/api/models/catalog/models-dev"),
+        ("PUT", "/api/backend/claude/models/visibility"),
+        ("GET", "/api/backend/claude/models/visibility"),
         ("PUT", "/api/global-prompts"),
         ("POST", "/api/projects"),
         ("PATCH", "/api/projects/project-1"),
@@ -349,7 +351,6 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
 
     owner_examples = (
         ("GET", "/api/future-owner-capability"),
-        ("PUT", "/api/backend/claude/models/visibility"),
         ("POST", "/api/backend/opencode/future-mutation"),
         ("POST", "/api/codex/future-mutation"),
         ("PUT", "/api/permissions/authorized-users"),

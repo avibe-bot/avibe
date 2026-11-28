@@ -6098,7 +6098,10 @@ def test_final_model_hub_route_surface_has_observe_refresh_and_no_saved_test_rou
 def test_models_live_api_calls_only_registered_server_routes():
     source = Path("ui/src/components/settings/models/modelsApi.ts").read_text(encoding="utf-8")
     live_api = source.split("export const modelsApi: ModelsApi = {", 1)[1]
-    path_pattern = re.compile(r"'(?P<single>/api/models/[^']*)'|`(?P<template>/api/models/[^`]*)`")
+    # The page's own routes, plus a Direct menu's (Settings · Models reads and edits it through this client).
+    path_pattern = re.compile(
+        r"'(?P<single>/api/(?:models|backend)/[^']*)'|`(?P<template>/api/(?:models|backend)/[^`]*)`"
+    )
 
     path_matches = list(path_pattern.finditer(live_api))
     assert len(path_matches) == len(re.findall(r"\bcall(?:<|\()", live_api))
@@ -6124,12 +6127,13 @@ def test_models_live_api_calls_only_registered_server_routes():
             re.sub(r"\{[^}]+\}", "{param}", route.path),
         )
         for route in app.routes
-        if route.path.startswith("/api/models/")
+        if route.path.startswith(("/api/models/", "/api/backend/"))
         for method in (route.methods or ())
     }
 
     assert client_routes
     assert ("POST", "/api/models/hosted-tools/web_search/services/{param}/retry") in client_routes
+    assert ("PUT", "/api/backend/{param}/models/visibility") in client_routes
     assert client_routes <= server_routes
 
 
