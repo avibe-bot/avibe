@@ -26,11 +26,12 @@ HEALTHKIT_ENTITLEMENTS = (
 HEALTH_UPDATE_USAGE_EN = "Avibe never writes to Apple Health. It only reads the data you allow."
 HEALTH_UPDATE_USAGE_ZH = "Avibe 不会向「健康」写入数据，只读取你允许的数据。"
 HEALTH_SHARE_USAGE_EN = (
-    "Avibe reads your steps, activity, workouts, and sleep to provide your personal daily and weekly status "
+    "Avibe reads your steps, activity, workouts, sleep, heart rate, resting heart rate, and heart rate variability "
+    "to provide your personal daily and weekly status "
     "through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health."
 )
 HEALTH_SHARE_USAGE_ZH = (
-    "Avibe 只读你的步数、活动、锻炼和睡眠，通过你自己的 Avibe 实例提供个人每日和每周状态。"
+    "Avibe 只读你的步数、活动、锻炼、睡眠、心率、静息心率和心率变异性，通过你自己的 Avibe 实例提供个人每日和每周状态。"
     "Avibe 不会向 Apple 健康写入数据。"
 )
 COMPLETE = {

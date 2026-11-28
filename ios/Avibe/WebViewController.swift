@@ -457,7 +457,7 @@ final class WebViewFactory {
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
-        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
+        healthConnect: @escaping HealthConnectAction = { _, _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
@@ -819,9 +819,9 @@ final class WebViewController: UIViewController {
                 guard let self, !self.isInvalidatedForAccountTransition else { throw NativeBridgeError.forbidden }
                 return try await self.liveActivity(request, origin)
             },
-            healthConnect: { [weak self] requestID, pairingCode, origin in
+            healthConnect: { [weak self] requestID, pairingCode, origin, options in
                 guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
-                return await self.healthConnect(requestID, pairingCode, origin)
+                return await self.healthConnect(requestID, pairingCode, origin, options)
             },
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
@@ -924,7 +924,7 @@ final class WebViewController: UIViewController {
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
-        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
+        healthConnect: @escaping HealthConnectAction = { _, _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         directInstanceLoad: DirectInstanceLoadNote? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },

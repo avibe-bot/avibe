@@ -5,6 +5,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
 import { healthRequestView, type HealthRequest } from '@/lib/healthRequests';
 import HealthLandingPage, { HealthRequestCard } from './HealthRequest';
 
@@ -38,6 +39,104 @@ beforeEach(() => {
 afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'avibeNative'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('Health request production consumers (synthetic server and native peer)', () => {
+  it.each([
+    ['en', 1, 'card'], ['en', 1, 'landing'],
+    ['en', 2, 'card'], ['en', 2, 'landing'],
+    ['zh', 1, 'card'], ['zh', 1, 'landing'],
+    ['zh', 2, 'card'], ['zh', 2, 'landing'],
+  ] as const)('shows the initial scope supported by the %s health:%s shell on the %s', async (lng, version, surface) => {
+    const localized = createInstance();
+    await localized.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } } });
+    installBridge({ health: version });
+    const legacy = ['steps', 'activity', 'workouts', 'sleep'];
+    const heart = ['heart_rate', 'resting_heart_rate', 'hrv'];
+    current = { ...request, metrics: [...legacy, ...heart], minimum_health_version: 1 };
+    const result = render(<I18nextProvider i18n={localized}><MemoryRouter initialEntries={[`/mobile/health/${request.id}`]}>
+      {surface === 'card' ? <HealthRequestCard request={current} />
+        : <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>}
+    </MemoryRouter></I18nextProvider>);
+    await screen.findByRole('button', { name: localized.t('health.authorize') });
+    const text = result.container.textContent?.toLocaleLowerCase(lng);
+    for (const metric of legacy) expect(text).toContain(localized.t(`health.metric.${metric}`).toLocaleLowerCase(lng));
+    for (const metric of heart) {
+      const label = localized.t(`health.metric.${metric}`).toLocaleLowerCase(lng);
+      if (version === 1) expect(text).not.toContain(label);
+      else expect(text).toContain(label);
+    }
+    // Presentation must not narrow the server request or its eventual native payload.
+    expect(current.metrics).toEqual([...legacy, ...heart]);
+  });
+
+  it.each([
+    ['en', ['Heart rate', 'Resting heart rate', 'Heart rate variability']],
+    ['zh', ['心率', '静息心率', '心率变异性']],
+  ] as const)('localizes heart metrics on the %s request card and landing page', async (lng, labels) => {
+    const localized = createInstance();
+    await localized.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } } });
+    installBridge({ health: 2 });
+    current = { ...request, metrics: ['heart_rate', 'resting_heart_rate', 'hrv'], minimum_health_version: 2 };
+    const result = render(<I18nextProvider i18n={localized}><MemoryRouter initialEntries={[`/mobile/health/${request.id}`]}>
+      <HealthRequestCard request={current} />
+      <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>
+    </MemoryRouter></I18nextProvider>);
+    await screen.findByRole('heading', { name: localized.t('health.title.connect') });
+    for (const label of labels) expect(result.container.textContent?.toLowerCase().split(label.toLowerCase()).length).toBeGreaterThanOrEqual(3);
+    expect(result.container.textContent).not.toContain('heart_rate');
+  });
+
+  it.each([
+    ['en', 'Update Avibe on this iPhone to add these. Your current sync keeps running.'],
+    ['zh', '更新这台 iPhone 上的 Avibe 后才能添加这些数据，现有同步不受影响。'],
+  ] as const)('explains expansion updates without implying existing sync is broken (%s)', async (lng, message) => {
+    const localized = createInstance();
+    await localized.init({ lng, resources: { en: { translation: en }, zh: { translation: zh } } });
+    installBridge({ health: 1 });
+    current = { ...request, metrics: ['heart_rate', 'resting_heart_rate', 'hrv'], minimum_health_version: 2 };
+    render(<I18nextProvider i18n={localized}><MemoryRouter initialEntries={[`/mobile/health/${request.id}`]}>
+      <HealthRequestCard request={current} />
+      <Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>
+    </MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(screen.getAllByText(message)).toHaveLength(2));
+    expect(screen.queryByText(localized.t('health.note.needsUpdate'))).toBeNull();
+    expect(screen.queryByRole('button', { name: localized.t('health.authorize') })).toBeNull();
+    for (const metric of current.metrics) {
+      expect(screen.getByText((text, node) => node?.tagName === 'SPAN'
+        && text.includes(localized.t(`health.metric.${metric}`)))).toBeTruthy();
+    }
+  });
+
+  it('uses sentence-case metric names and the locale conjunction on the English landing', async () => {
+    installBridge({ health: 2 });
+    current = { ...request, metrics: ['heart_rate', 'resting_heart_rate', 'hrv'], minimum_health_version: 2 };
+    mount(<Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>);
+    await screen.findByText('Read this iPhone’s heart rate, resting heart rate, and heart rate variability, and sync them to this instance. Next, choose access in Avibe and iOS.');
+  });
+
+  it('requires the new native capability before expanding an existing connection', () => {
+    installBridge({ health: 1 });
+    const expansion = { ...request, minimum_health_version: 2, metrics: ['hrv'] };
+    expect(healthRequestView(expansion)).toBe('needsUpdate');
+    expect(healthRequestView(request)).toBe('authorize');
+    installBridge({ health: 2 });
+    expect(healthRequestView(expansion)).toBe('authorize');
+  });
+
+  it('forwards the negotiated types only to a shell supporting expansion', async () => {
+    const call = installBridge({ health: 2 });
+    current = { ...request, minimum_health_version: 2, metrics: ['hrv'] };
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === `/api/mobile/requests/${request.id}`) return Response.json(current);
+      return Response.json({ pairing_code: 'synthetic-code', supported_metrics: ['steps', 'hrv'], metrics: ['hrv'], expansion: true });
+    });
+    mount(<Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Authorize on iPhone' }));
+    await screen.findByRole('heading', { name: 'Connected' });
+    expect(call).toHaveBeenCalledWith('health.connect', {
+      requestId: request.id, pairingCode: 'synthetic-code', supportedMetrics: ['steps', 'hrv'],
+      requestedMetrics: ['hrv'], expansion: true,
+    });
+  });
+
   it('binds pairing to the request with CSRF and keeps connected distinct from sync completion', async () => {
     const call = installBridge();
     mount(<Routes><Route path="/mobile/health/:requestId" element={<HealthLandingPage />} /></Routes>);

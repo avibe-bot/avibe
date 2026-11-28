@@ -3,6 +3,7 @@ import HealthKit
 
 @MainActor
 protocol HealthDataReading {
+    func configure(metrics: [String])
     func authorize() async throws
     func query(days: Int, now: Date) async throws -> HealthQueryWindow
     /// Return only after the change has been processed or durably queued.
@@ -12,7 +13,9 @@ protocol HealthDataReading {
 }
 
 struct HealthQueryWindow {
-    static let metrics = ["steps", "activity", "workouts", "sleep"]
+    static let legacyMetrics = ["steps", "activity", "workouts", "sleep"]
+    static let heartMetrics = ["heart_rate", "resting_heart_rate", "hrv"]
+    static let metrics = legacyMetrics + heartMetrics
 
     let computedAt: Date
     let from: String
@@ -20,6 +23,14 @@ struct HealthQueryWindow {
     let items: [[String: Any]]
     let failures: [[String: Any]]
     var metricStates: [String: String]
+
+    var selectedMetrics: [String] = legacyMetrics
+
+    func selecting(_ names: [String]) -> HealthQueryWindow {
+        var copy = self
+        copy.selectedMetrics = names
+        return copy
+    }
 
     /// Help only: HealthKit deliberately conceals read-grant status. Missing
     /// days, any query failure, and real samples (including zero) are not proof
@@ -45,9 +56,9 @@ struct HealthQueryWindow {
         [
             "device_seq": sequence,
             "computed_at": HealthDayAggregation.timestamp(computedAt),
-            "window": ["metrics": Self.metrics, "from": from, "to": to],
-            "items": items,
-            "failures": failures,
+            "window": ["metrics": selectedMetrics, "from": from, "to": to],
+            "items": items.filter { selectedMetrics.contains($0["metric"] as? String ?? "") },
+            "failures": failures.filter { selectedMetrics.contains($0["metric"] as? String ?? "") },
         ]
     }
 }
@@ -243,6 +254,46 @@ struct HealthDayAggregation {
         }
     }
 
+    struct HeartStatistics {
+        let minimum: Double?
+        let average: Double
+        let maximum: Double?
+        let latest: Date?
+    }
+
+    func heart(_ metric: String, statistics: [Date: HeartStatistics], queriedAt: Date) -> [[String: Any]] {
+        days.map { day in
+            let statistic = statistics[day.start]
+            var value: [String: Any]?
+            if let statistic {
+                if metric == "heart_rate", let minimum = statistic.minimum, let maximum = statistic.maximum {
+                    // Independent HealthKit unit conversions can differ by an ulp.
+                    let average = min(max(statistic.average, minimum), maximum)
+                    value = ["min_bpm": minimum, "average_bpm": average, "max_bpm": maximum]
+                } else if metric == "hrv" { value = ["sdnn_ms": statistic.average] }
+            }
+            return item(metric: metric, day: day, value: value,
+                        latest: value == nil ? nil : statistic?.latest, queriedAt: queriedAt)
+        }
+    }
+
+    func restingHeartRate(_ samples: [HKQuantitySample], queriedAt: Date) -> [[String: Any]] {
+        days.map { day in
+            let latest = samples.filter { $0.startDate >= day.start && $0.startDate < day.end && $0.startDate <= now }
+                .max {
+                    if $0.endDate != $1.endDate { return $0.endDate < $1.endDate }
+                    if $0.startDate != $1.startDate { return $0.startDate < $1.startDate }
+                    let a = $0.sourceRevision.source.bundleIdentifier
+                    let b = $1.sourceRevision.source.bundleIdentifier
+                    if a != b { return a < b }
+                    return $0.uuid.uuidString < $1.uuid.uuidString
+                }
+            return item(metric: "resting_heart_rate", day: day,
+                value: latest.map { ["bpm": $0.quantity.doubleValue(for: HKUnit.count().unitDivided(by: .minute()))] },
+                latest: latest?.endDate, queriedAt: queriedAt)
+        }
+    }
+
     static func activityName(_ activity: HKWorkoutActivityType) -> String {
         switch activity.rawValue {
         case 1: return "american_football"
@@ -358,12 +409,13 @@ struct HealthDayAggregation {
 
     /// Failures exclude the entire metric, including days assembled before a query failed.
     func window(
-        results: [String: Result<[[String: Any]], Error>], computedAt: Date
+        results: [String: Result<[[String: Any]], Error>], computedAt: Date,
+        metrics: [String] = HealthQueryWindow.legacyMetrics
     ) -> HealthQueryWindow {
         var items: [[String: Any]] = []
         var failures: [[String: Any]] = []
         var states: [String: String] = [:]
-        for metric in HealthQueryWindow.metrics {
+        for metric in metrics {
             switch results[metric] ?? .failure(HealthReadError.missingQueryResult) {
             case .success(let rows):
                 items += rows
@@ -376,7 +428,7 @@ struct HealthDayAggregation {
         }
         return HealthQueryWindow(
             computedAt: computedAt, from: days.first!.name, to: days.last!.name,
-            items: items, failures: failures, metricStates: states
+            items: items, failures: failures, metricStates: states, selectedMetrics: metrics
         )
     }
 }
@@ -384,6 +436,9 @@ struct HealthDayAggregation {
 @MainActor
 final class HealthDataReader: HealthDataReading {
     private let store: HKHealthStore
+    private var metrics = HealthQueryWindow.legacyMetrics
+    func configure(metrics: [String]) { self.metrics = metrics }
+
     private var observers: [HKObserverQuery] = []
     private var observationGeneration = UUID()
     /// Serialize enables/disables so stop during an enable cannot leave delivery enabled.
@@ -394,11 +449,18 @@ final class HealthDataReader: HealthDataReading {
     }
 
     private var observedTypes: [HKSampleType] {
-        [
-            HKQuantityType(.stepCount), HKQuantityType(.appleExerciseTime),
-            HKQuantityType(.activeEnergyBurned), HKObjectType.workoutType(),
-            HKCategoryType(.sleepAnalysis),
-        ]
+        metrics.flatMap { metric -> [HKSampleType] in
+            switch metric {
+            case "steps": [HKQuantityType(.stepCount)]
+            case "activity": [HKQuantityType(.appleExerciseTime), HKQuantityType(.activeEnergyBurned)]
+            case "workouts": [HKObjectType.workoutType()]
+            case "sleep": [HKCategoryType(.sleepAnalysis)]
+            case "heart_rate": [HKQuantityType(.heartRate)]
+            case "resting_heart_rate": [HKQuantityType(.restingHeartRate)]
+            case "hrv": [HKQuantityType(.heartRateVariabilitySDNN)]
+            default: []
+            }
+        }
     }
 
     func authorize() async throws {
@@ -412,7 +474,8 @@ final class HealthDataReader: HealthDataReading {
         calendar.timeZone = .current
         let aggregation = try HealthDayAggregation(days: days, now: now, calendar: calendar)
         var results: [String: Result<[[String: Any]], Error>] = [:]
-        for metric in HealthQueryWindow.metrics {
+        let metrics = self.metrics
+        for metric in metrics {
             try Task.checkCancellation()
             do {
                 guard HKHealthStore.isHealthDataAvailable() else { throw HealthReadError.capabilityUnavailable }
@@ -430,6 +493,14 @@ final class HealthDataReader: HealthDataReading {
                         end: now, options: .strictStartDate
                     )
                     results[metric] = .success(aggregation.workouts(samples.compactMap { $0 as? HKWorkout }, queriedAt: Date()))
+                case "heart_rate", "hrv":
+                    let identifier: HKQuantityTypeIdentifier = metric == "heart_rate" ? .heartRate : .heartRateVariabilitySDNN
+                    let unit: HKUnit = metric == "heart_rate" ? HKUnit.count().unitDivided(by: .minute()) : .secondUnit(with: .milli)
+                    results[metric] = .success(try await discrete(identifier, metric: metric, unit: unit, aggregation: aggregation))
+                case "resting_heart_rate":
+                    let samples = try await samples(type: HKQuantityType(.restingHeartRate),
+                        start: aggregation.days.first!.start, end: now, options: .strictStartDate)
+                    results[metric] = .success(aggregation.restingHeartRate(samples.compactMap { $0 as? HKQuantitySample }, queriedAt: Date()))
                 default:
                     let samples = try await samples(
                         type: HKCategoryType(.sleepAnalysis), start: aggregation.days.first!.sleepStart,
@@ -452,7 +523,7 @@ final class HealthDataReader: HealthDataReading {
             }
         }
         try Task.checkCancellation()
-        return aggregation.window(results: results, computedAt: Date())
+        return aggregation.window(results: results, computedAt: Date(), metrics: metrics)
     }
 
     private func samples(
@@ -469,6 +540,49 @@ final class HealthDataReader: HealthDataReading {
             }
             store.execute(query)
         }
+    }
+
+    static func heartStatisticsQuery(_ identifier: HKQuantityTypeIdentifier, aggregation: HealthDayAggregation) -> HKStatisticsCollectionQuery {
+        var interval = DateComponents()
+        interval.calendar = aggregation.calendar
+        interval.timeZone = aggregation.calendar.timeZone
+        interval.day = 1
+        let options: HKStatisticsOptions = identifier == .heartRate
+            ? [.discreteMin, .discreteAverage, .discreteMax] : .discreteAverage
+        return HKStatisticsCollectionQuery(quantityType: HKQuantityType(identifier),
+            quantitySamplePredicate: HKQuery.predicateForSamples(withStart: aggregation.days.first!.start, end: aggregation.now),
+            options: options, anchorDate: aggregation.days.first!.start, intervalComponents: interval)
+    }
+
+    private func discrete(
+        _ identifier: HKQuantityTypeIdentifier, metric: String, unit: HKUnit, aggregation: HealthDayAggregation
+    ) async throws -> [[String: Any]] {
+        let type = HKQuantityType(identifier)
+        let start = aggregation.days.first!.start
+        let collection: HKStatisticsCollection = try await withCheckedThrowingContinuation { continuation in
+            let query = Self.heartStatisticsQuery(identifier, aggregation: aggregation)
+            query.initialResultsHandler = { [store] query, collection, error in
+                store.stop(query)
+                if let error { continuation.resume(throwing: error) }
+                else if let collection { continuation.resume(returning: collection) }
+                else { continuation.resume(throwing: HealthReadError.missingQueryResult) }
+            }
+            store.execute(query)
+        }
+        let raw = try await samples(type: type, start: start, end: aggregation.now)
+        let queriedAt = Date()
+        var statistics: [Date: HealthDayAggregation.HeartStatistics] = [:]
+        for day in aggregation.days {
+            guard let bucket = collection.statistics(for: day.start),
+                  let average = bucket.averageQuantity()?.doubleValue(for: unit) else { continue }
+            let latest = raw.filter {
+                $0.startDate < min(day.end, aggregation.now) && $0.endDate >= day.start
+                    && ($0.endDate > day.start || $0.startDate == day.start)
+            }.map(\.endDate).max()
+            statistics[day.start] = .init(minimum: bucket.minimumQuantity()?.doubleValue(for: unit),
+                average: average, maximum: bucket.maximumQuantity()?.doubleValue(for: unit), latest: latest)
+        }
+        return aggregation.heart(metric, statistics: statistics, queriedAt: queriedAt)
     }
 
     private func quantities(

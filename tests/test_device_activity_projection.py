@@ -92,3 +92,42 @@ def test_scoped_page_title_label_and_retention(isolated_state, install):
     with engine.connect() as conn:
         assert conn.scalar(select(events.c.id).where(events.c.at == excluded)) is None
         assert conn.scalar(select(events.c.id).where(events.c.at == stamp)) is not None
+
+
+def test_seven_health_metrics_reach_catalog_and_hrv_only_activity(isolated_state, install):
+    """Exercise the producers consumed by all three Devices wire adapters."""
+    from core.mobile_health_contract import METRICS
+    from storage import device_catalog
+
+    _, viewer, key = phone(install, "heart-projection")
+    store = MobileStore()
+    identity = {"id": "inst_123", "owner": "owner@test.invalid", "name": "Fixture"}
+    request, _ = store.create_request("health.connect", identity, names=list(METRICS))
+    code = health.issue_pairing(store, request["id"], identity, viewer)["pairing_code"]
+    paired = health.pair(store, {
+        "pairing_code": code, "device_name": "Synthetic iPhone", "platform": "ios",
+        "app_version": "2", "metrics": list(METRICS), "installation_id": "seven-types",
+    }, identity)
+    now = datetime.now(timezone.utc)
+    stamp, day = now.isoformat(), now.date().isoformat()
+    store.upload(store.authenticate(paired["credential"], identity), {
+        "device_seq": 1, "computed_at": stamp,
+        "window": {"metrics": list(METRICS), "from": day, "to": day}, "failures": [],
+        "items": [{"metric": name, "day": day, "timezone": "UTC", "availability": "empty", "value": None,
+                   "latest_sample_end_at": None, "queried_at": stamp, "closed": False} for name in METRICS],
+    })
+    store.read(["hrv"], day, day, caller="synthetic-agent")
+    engine = get_cached_sqlite_engine()
+    owner = AuthorizationContext(instance_role="owner", subject="owner", is_remote=True)
+    with engine.connect() as conn:
+        rows, _, unlinked = device_catalog.snapshot(conn, viewer, identity["id"], identity["owner"], int(time.time()))
+        function = next(f for f in rows[key]["functions"] if f["kind"] == "health")
+        assert function["data"] == list(METRICS) and unlinked == []
+        items = feed.list_page(conn, viewer, owner, identity["id"], identity["owner"],
+                               device=key, limit=100, raw_cursor=None)["items"]
+        assert next(item for item in items if item["kind"] == "healthRead")["data"] == ["hrv"]
+    # Lose the registry association, not the Health pairing or its synced scope.
+    with engine.begin() as conn:
+        conn.execute(links.delete().where(links.c.mobile_id == paired["device_id"]))
+        _, _, unlinked = device_catalog.snapshot(conn, viewer, identity["id"], identity["owner"], int(time.time()))
+        assert unlinked[0]["data"] == list(METRICS)

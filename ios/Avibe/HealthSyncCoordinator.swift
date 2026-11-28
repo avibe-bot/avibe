@@ -11,9 +11,16 @@ struct HealthConnectionTarget: Equatable {
     let origin: String
 }
 
+struct HealthConnectionOptions {
+    var supportedMetrics = HealthQueryWindow.legacyMetrics
+    var requestedMetrics = HealthQueryWindow.legacyMetrics
+    var expansion = false
+}
+
 struct HealthConsentRequest: Identifiable {
     let id = UUID()
     let target: HealthConnectionTarget
+    var metrics = HealthQueryWindow.legacyMetrics
 }
 
 /// One live setup owns its deadline and every late callback. This is not a
@@ -22,6 +29,7 @@ struct HealthConsentRequest: Identifiable {
 private final class HealthConnectionAttempt {
     let id: UUID
     var epoch: UUID
+    var preservesConnection = false
     var provisional: HealthDeviceIdentity?
     var work: Task<Void, Never>?
     var timer: Task<Void, Never>?
@@ -199,7 +207,7 @@ final class HealthSyncCoordinator: ObservableObject {
             // Freeze authority before settling Native. Cancellation alone
             // cannot stop a HealthKit or URLSession callback already issued.
             attempt.work?.cancel()
-            if self.epoch == attempt.epoch {
+            if self.epoch == attempt.epoch && !attempt.preservesConnection {
                 self.beginCleanup(unregister: true, capturedIdentity: attempt.provisional)
             }
             self.connectionAttempt = nil
@@ -242,7 +250,7 @@ final class HealthSyncCoordinator: ObservableObject {
             _ = beginCleanup(unregister: true)
         case .authorizationUnavailable:
             guard !cleanupPending else { return }
-            if connecting != nil { _ = beginCleanup(unregister: true) }
+            if connecting != nil, connectionAttempt?.preservesConnection != true { _ = beginCleanup(unregister: true) }
             else { pauseAuthority() }
         case .authenticated(let accountID, let instances):
             if startupBindingUntrusted {
@@ -303,6 +311,15 @@ final class HealthSyncCoordinator: ObservableObject {
     private func pauseAuthority() {
         authorizationPaused = true
         epoch = UUID()
+        if let attempt = connectionAttempt, attempt.preservesConnection {
+            // An interrupted expansion retires only its foreground attempt.
+            // Existing credentials, approval intent and durable uploads survive.
+            connecting = nil
+            connectionAttempt = nil
+            answerConsent(false)
+            attempt.work?.cancel()
+            attempt.finish("failed")
+        }
         retireConvergence()
         authorizationResumeID = nil
         authorizationResumePending = false
@@ -330,12 +347,21 @@ final class HealthSyncCoordinator: ObservableObject {
         }
     }
 
-    func connect(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
+    func connect(requestID: String, pairingCode: String, origin: WebOrigin,
+                 options: HealthConnectionOptions = .init()) async -> String {
         guard connecting == nil, connectionAttempt == nil, !startupBindingUntrusted,
               let binding = websiteDataStoreIDProvider?(),
               let target = targetProvider?(), currentAccountID == target.accountID,
               target.origin == origin.serialized,
               !requestID.isEmpty, !pairingCode.isEmpty else { return "failed" }
+        let requested = HealthQueryWindow.metrics.filter {
+            options.supportedMetrics.contains($0) && options.requestedMetrics.contains($0)
+        }
+        guard !requested.isEmpty else { return "failed" }
+        if options.expansion {
+            guard let saved = authorizedIdentity, saved.instanceID == target.instanceID,
+                  saved.origin == target.origin, store?.state.pendingConsent == nil else { return "failed" }
+        }
         let connection = UUID()
         connecting = connection
         defer {
@@ -348,19 +374,25 @@ final class HealthSyncCoordinator: ObservableObject {
         }
         let token = epoch
         let attempt = HealthConnectionAttempt(id: connection, epoch: token)
+        attempt.preservesConnection = options.expansion
         connectionAttempt = attempt
         let approved = await withCheckedContinuation { continuation in
             consentContinuation = continuation
-            consent = HealthConsentRequest(target: target)
+            consent = HealthConsentRequest(target: target, metrics: requested)
         }
         guard epoch == token, targetProvider?() == target else { return "failed" }
         guard approved else { return "declined" }
         return await withCheckedContinuation { completion in
             attempt.completion = completion
             attempt.work = Task { @MainActor in
-                let state = await self.establishConnection(
-                    requestID: requestID, pairingCode: pairingCode,
-                    target: target, binding: binding, attempt: attempt)
+                let state: String
+                if options.expansion {
+                    state = await self.expand(requestID: requestID, pairingCode: pairingCode, metrics: requested, attempt: attempt)
+                } else {
+                    state = await self.establishConnection(
+                        requestID: requestID, pairingCode: pairingCode,
+                        target: target, binding: binding, attempt: attempt, metrics: requested)
+                }
                 if self.connectionAttempt === attempt { self.connectionAttempt = nil }
                 attempt.finish(state)
             }
@@ -369,11 +401,12 @@ final class HealthSyncCoordinator: ObservableObject {
 
     private func establishConnection(requestID: String, pairingCode: String,
                                      target: HealthConnectionTarget, binding: UUID,
-                                     attempt: HealthConnectionAttempt) async -> String {
+                                     attempt: HealthConnectionAttempt, metrics: [String]) async -> String {
         var committed = false
         do {
             try requireConnection(attempt)
             Self.logger.info("Health authorization requested")
+            reader.configure(metrics: metrics)
             try await reader.authorize()
             Self.logger.info("Health authorization request completed")
             try requireConnection(attempt)
@@ -397,7 +430,7 @@ final class HealthSyncCoordinator: ObservableObject {
                 path: "/api/mobile/device/v1/pair", body: [
                     "pairing_code": pairingCode, "installation_id": installationID,
                     "device_name": UIDevice.current.name, "platform": "ios",
-                    "app_version": Self.appVersion, "metrics": HealthQueryWindow.metrics,
+                    "app_version": Self.appVersion, "metrics": metrics,
                 ])
             guard let deviceID = response["device_id"] as? String, !deviceID.isEmpty,
                   let credential = response["credential"] as? String, !credential.isEmpty else {
@@ -417,7 +450,7 @@ final class HealthSyncCoordinator: ObservableObject {
                   let instance = response["instance"] as? [String: Any],
                   instance["id"] as? String == target.instanceID else { throw HealthSyncError.code("invalid_pair") }
             let provisionalStore = try HealthDeviceStore(directory: directory)
-            try provisionalStore.update { $0 = HealthSyncState() }
+            try provisionalStore.update { $0 = HealthSyncState(); $0.confirmedMetrics = metrics }
             store = provisionalStore
             try credentials.save(candidate)
             func setup(_ method: String, _ path: String, _ body: [String: Any]) async throws -> [String: Any] {
@@ -482,6 +515,48 @@ final class HealthSyncCoordinator: ObservableObject {
                 notice = Self.safeCode(error) == "contract_unsupported" || Self.httpStatus(error) == 426
                     ? "health.update_required" : "health.connection_failed"
             }
+            return "failed"
+        }
+    }
+
+    private var confirmedMetrics: [String] {
+        store?.state.confirmedMetrics ?? HealthQueryWindow.legacyMetrics
+    }
+
+    /// An approved expansion keeps the committed device and its upload sequence.
+    /// Persist intent before HTTP: a lost response is reconciled by the next manifest.
+    private func expand(requestID: String, pairingCode: String, metrics: [String],
+                        attempt: HealthConnectionAttempt) async -> String {
+        do {
+            try requireConnection(attempt)
+            try requireAccount()
+            reader.configure(metrics: metrics)
+            defer { reader.configure(metrics: confirmedMetrics) }
+            try await reader.authorize()
+            try requireConnection(attempt)
+            try requireAccount()
+            guard let store else { return "failed" }
+            try store.update { $0.pendingConsent = .init(requestID: requestID, pairingCode: pairingCode, metrics: metrics) }
+            // Durable approval belongs to the shared convergence owner. Its HTTP,
+            // error policy and retries survive the foreground reply's deadline.
+            markManifestDue()
+            await requestConvergence().value
+            try requireConnection(attempt)
+            guard Set(metrics).isSubset(of: Set(confirmedMetrics)) else { throw HealthSyncError.code("request_unavailable") }
+            let token = epoch
+            Task { @MainActor [weak self] in
+                guard let self, self.epoch == token else { return }
+                do { try await self.claimAndProcess(requestID: requestID, wait: 0) }
+                catch { await self.handle(error, expectedEpoch: token) }
+                if self.epoch == token { self.requestConvergence() }
+            }
+            return "connected"
+        } catch {
+            // A failed permission sheet or code does not revoke an existing device.
+            // Persisted approval already has a convergence owner: keep its retry
+            // timing and any terminal update-required notice.
+            guard epoch == attempt.epoch, connectionAttempt === attempt else { return "failed" }
+            if store?.state.suspended != true { notice = "health.connection_failed" }
             return "failed"
         }
     }
@@ -564,7 +639,12 @@ final class HealthSyncCoordinator: ObservableObject {
             try requireCurrent(token)
             // The activation refresh belongs to this entry only; convergence never
             // queries for freshness.
-            if self.foreground { _ = try await synchronize() }
+            if self.foreground {
+                _ = try await synchronize()
+                if !(store?.state.backfillMetrics ?? []).isEmpty {
+                    _ = try await synchronize(backfillOnly: true)
+                }
+            }
         } catch is DecodingError {
             await stopLocal(unregister: true, expectedEpoch: token)
         } catch { await handle(error, expectedEpoch: token) }
@@ -662,6 +742,7 @@ final class HealthSyncCoordinator: ObservableObject {
 
     private func registerObservers() async {
         let token = epoch
+        reader.configure(metrics: confirmedMetrics)
         let enabled = await reader.startObserving { [weak self] in
             guard let self, self.epoch == token, self.identity != nil else { return }
             do {
@@ -684,13 +765,51 @@ final class HealthSyncCoordinator: ObservableObject {
         [
             "contract": 1, "app_version": Self.appVersion,
             "os_version": UIDevice.current.systemVersion,
-            "timezone": TimeZone.current.identifier, "metrics": HealthQueryWindow.metrics,
+            "timezone": TimeZone.current.identifier, "metrics": confirmedMetrics,
             "background_delivery": background, "push_wake": false,
         ]
     }
 
     private func manifest(background: Bool) async throws {
-        _ = try await request("PUT", "manifest", manifestBody(background: background))
+        let token = epoch
+        let pending = store?.state.pendingConsent
+        var body = manifestBody(background: background)
+        if let pending {
+            body["pairing_code"] = pending.pairingCode
+            body["request_id"] = pending.requestID
+            body["metrics"] = HealthQueryWindow.metrics.filter { confirmedMetrics.contains($0) || pending.metrics.contains($0) }
+        }
+        let response: [String: Any]
+        do { response = try await request("PUT", "manifest", body) }
+        catch {
+            try requireCurrent(token)
+            // An expired/declined expansion is independent of the existing authorization.
+            if let pending, store?.state.pendingConsent?.requestID == pending.requestID,
+               [404, 410].contains(Self.httpStatus(error) ?? 0) {
+                try store?.update { $0.pendingConsent = nil }
+                notice = "health.connection_failed"
+                return
+            }
+            throw error
+        }
+        try requireCurrent(token)
+        if let confirmed = response["confirmed_metrics"] as? [String],
+           let supported = response["supported_metrics"] as? [String] {
+            // Consent only grows for this device. A manifest started before an
+            // expansion may finish afterward with the previous confirmed set.
+            let next = HealthQueryWindow.metrics.filter {
+                (confirmed.contains($0) || confirmedMetrics.contains($0)) && supported.contains($0)
+            }
+            guard !next.isEmpty, let store else { throw HealthSyncError.code("invalid_payload") }
+            let added = next.filter { !confirmedMetrics.contains($0) }
+            try store.update {
+                $0.confirmedMetrics = next
+                $0.backfillMetrics = Array(Set(($0.backfillMetrics ?? []) + added)).sorted()
+                if $0.pendingConsent?.requestID == pending?.requestID { $0.pendingConsent = nil }
+            }
+            reader.configure(metrics: next)
+            if !added.isEmpty { await registerObservers() }
+        }
     }
 
     private func markManifestDue() {
@@ -744,6 +863,11 @@ final class HealthSyncCoordinator: ObservableObject {
                   Set(metrics).isSubset(of: Set(HealthQueryWindow.metrics)), !metrics.isEmpty,
                   Set(metrics).count == metrics.count, !claimToken.isEmpty,
                   let store else { throw HealthSyncError.code("invalid_claim") }
+            if !Set(metrics).isSubset(of: Set(confirmedMetrics)) {
+                try await manifest(background: backgroundDelivery)
+                try requireCurrent(token)
+                guard Set(metrics).isSubset(of: Set(confirmedMetrics)) else { throw HealthSyncError.code("invalid_claim") }
+            }
             if var previous = store.state.completed[id] {
                 previous.claimToken = claimToken
                 previous.acknowledged = false
@@ -781,7 +905,7 @@ final class HealthSyncCoordinator: ObservableObject {
         }
     }
 
-    private func synchronize(requestID: String? = nil, waitForUpload: Bool = true) async throws -> [String: String] {
+    private func synchronize(requestID: String? = nil, waitForUpload: Bool = true, backfillOnly: Bool = false) async throws -> [String: String] {
         let token = epoch
         // Every invocation represents work requested after the active query began.
         // Keep it waiting, then query again; an older snapshot cannot satisfy it.
@@ -800,13 +924,27 @@ final class HealthSyncCoordinator: ObservableObject {
         let task = Task { @MainActor () throws -> [String: String] in
             try self.requireAccount()
             guard let store = self.store, !store.state.suspended else { throw HealthSyncError.code("not_connected") }
-            let window = try await self.reader.query(days: store.state.initialBackfillPending ? 30 : 8, now: self.now())
+            let pendingBackfill = store.state.backfillMetrics ?? []
+            let requested = requestID.flatMap { store.state.completed[$0]?.states.keys.map { $0 } }
+            let backfill = !pendingBackfill.isEmpty && (backfillOnly || requested.map { Set($0).isSubset(of: Set(pendingBackfill)) } == true)
+            let selected = backfill ? pendingBackfill : self.confirmedMetrics
+            self.reader.configure(metrics: selected)
+            let window: HealthQueryWindow
+            do {
+                window = try await self.reader.query(days: backfill || store.state.initialBackfillPending ? 30 : 8, now: self.now()).selecting(selected)
+            } catch {
+                self.reader.configure(metrics: self.confirmedMetrics)
+                throw error
+            }
+            self.reader.configure(metrics: self.confirmedMetrics)
             try self.requireCurrent(token)
             try self.requireAccount()
             let seq = try store.nextSequence()
             let id = try store.enqueue(window.payload(sequence: seq)) { state, uploadID in
                 if let requestID, var result = state.completed[requestID] {
-                    result.states = window.metricStates.filter { result.states.keys.contains($0.key) }
+                    result.states = Dictionary(uniqueKeysWithValues: result.states.keys.map {
+                        ($0, window.metricStates[$0] ?? "internal")
+                    })
                     let failure = result.states.values.first { !["ok", "empty"].contains($0) }
                     result.error = failure
                     result.outcome = failure == nil ? "succeeded" : "failed"
@@ -882,7 +1020,21 @@ final class HealthSyncCoordinator: ObservableObject {
                   let data = try JSONSerialization.jsonObject(with: Data(contentsOf: completedStore.file(id))) as? [String: Any],
                   data["device_seq"] as? NSNumber == accepted else { throw HealthSyncError.code("invalid_ack") }
             try completedStore.removeUpload(id) {
-                if (data["failures"] as? [[String: Any]])?.isEmpty == true { $0.initialBackfillPending = false }
+                if (data["failures"] as? [[String: Any]])?.isEmpty == true {
+                    $0.initialBackfillPending = false
+                    if let window = data["window"] as? [String: Any],
+                       let names = window["metrics"] as? [String],
+                       let from = window["from"] as? String, let to = window["to"] as? String {
+                        let formatter = DateFormatter()
+                        formatter.locale = Locale(identifier: "en_US_POSIX")
+                        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                        formatter.dateFormat = "yyyy-MM-dd"
+                        if let start = formatter.date(from: from), let end = formatter.date(from: to),
+                           end.timeIntervalSince(start) >= 29 * 86400 {
+                            $0.backfillMetrics = ($0.backfillMetrics ?? []).filter { !names.contains($0) }
+                        }
+                    }
+                }
                 for key in $0.completed.keys where $0.completed[key]?.uploadID == id { $0.completed[key]?.uploadID = nil }
             }
             if store == nil { store = completedStore }

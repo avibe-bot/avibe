@@ -91,6 +91,9 @@ const healthKeys = {
   activity: 'devices.health.activity',
   workouts: 'devices.health.workouts',
   sleep: 'devices.health.sleep',
+  heart_rate: 'devices.health.heartRate',
+  resting_heart_rate: 'devices.health.restingHeartRate',
+  hrv: 'devices.health.hrv',
 } as const satisfies Record<HealthData, TranslationKey>;
 
 /** Parts of one line, 「Avibe App 3.2.8 · iOS 26.1」; empty parts are left out. */

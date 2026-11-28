@@ -117,7 +117,7 @@ Additional rules:
 | # | Boundary | Parties | Interface | Authentication and limits |
 | --- | --- | --- | --- | --- |
 | 1 | HealthKit | App ↔ iOS | Read-only `HKHealthStore` authorization; daily statistics (`HKStatisticsCollectionQuery`); sleep and workout samples; `HKObserverQuery` + `enableBackgroundDelivery` | System authorization; app main target only |
-| 2 | Native bridge | Instance web page → app | Capability `health: 1`; `health.connect({requestId, pairingCode})` → `{state}` | Instance main frame only. Triggers native confirmation and system authorization; **returns no health data** |
+| 2 | Native bridge | Instance web page → app | Capability `health: 2` (legacy: 1); `health.connect({requestId, pairingCode})` → `{state}` | Instance main frame only. Triggers native confirmation and system authorization; **returns no health data** |
 | 3 | Device API | App → instance | `POST /api/mobile/device/v1/pair`; `PUT …/health/days` (whole-day replacement); `POST …/requests/claim`; `POST …/requests/{id}/result`; `DELETE …/health` | Revocable device credential in device-only Keychain, valid only for these routes. The remote access gateway needs this authentication category and a separate security review |
 | 4 | Notifications | Instance → phone | Add a health-request kind to the existing encrypted push relay; opening it handles connection or refresh | Existing RFC 8291 encryption; relay cannot see content. No silent push in the initial release |
 | 5 | Agent command | Agent → instance | `vibe mobile health status / read / connect / revoke` | Local CLI reads local storage directly. **No health-reading API callable by any web page, including the workbench** |
@@ -385,7 +385,9 @@ Authentication:
 
 - Only per-metric status (`ok` / `empty` / error code); **no values**.
   Values exist only in storage.
-- Unfinished `health.refresh` requests for the same device are coalesced.
+- Unfinished `health.refresh` requests for the same device are coalesced only
+  when the existing scope covers the requested, device-confirmed metrics.
+  A frozen four-type request cannot absorb an HRV refresh after expansion.
 
 **States:**
 
@@ -413,7 +415,7 @@ errors exit with status 1.
 
 ```bash
 vibe mobile health status
-vibe mobile health read [--metric steps,activity,workouts,sleep]
+vibe mobile health read [--metric steps,activity,workouts,sleep,heart_rate,resting_heart_rate,hrv]
     [--period today|yesterday|last7d|last30d | --from YYYY-MM-DD --to YYYY-MM-DD]
     [--max-age 6h] [--refresh [--wait 20]] [--callback-session-id ID | --no-callback]
 vibe mobile health connect [--wait 0] [--callback-session-id ID | --no-callback]
@@ -447,8 +449,14 @@ vibe mobile requests await <request-id> [--timeout S]
 
 **`connect`:**
 
-- Creates `health.connect`, sends push, and leaves a card in the conversation.
-- When already connected, returns current status directly.
+- In one write transaction, reuse the owner's pending connect before deciding
+  initial connection or expansion from the current active device.
+- A new consent request sends push and leaves a card in the conversation.
+- Repeated calls keep the original request ID through upload ACK and result;
+  `--wait` observes that request even after pairing or expansion is confirmed.
+- Return status directly only without a pending connect and with all supported
+  types confirmed and acknowledged. If consent is complete but a canceled or
+  expired setup left missing ACKs, use an ordinary refresh to finish syncing.
 
 **`revoke`:**
 
@@ -479,7 +487,7 @@ vibe mobile requests await <request-id> [--timeout S]
 
 | Item | Description |
 | --- | --- |
-| `capabilities.health = 1` | Capability declaration |
+| `capabilities.health = 2` | Capability declaration |
 | `health.connect({requestId, pairingCode})` | Returns `{state: "connected" \| "declined" \| "failed"}`. `connected` means confirmation, pairing, manifest, exact request claim validation and durable local connection commit have succeeded; initial synchronization continues through the persisted reservation/outbox |
 
 - Instance main frame only.
@@ -593,7 +601,7 @@ route-scoped credential and value-free result boundaries remain unchanged.
    `requires_user`, and `metrics`, without pairing code, credential or values.
    The lease remains 60 seconds with three attempts. Reclaim changes the claim
    token; the phone's execution ledger prevents repeated execution.
-3. **Status-only results.** `result.metrics` maps only the four metric keys to
+3. **Status-only results.** `result.metrics` maps only the requested metric keys to
    `ok`, `empty`, or `protected_data_unavailable`, `capability_unavailable`,
    `user_declined`, `internal`. `error` contains only `code`; unknown fields are
    rejected and freeform strings are not stored. `user_declined` means only
@@ -670,3 +678,51 @@ owner-only visibility or same-machine isolation. That design (owner attestation,
 Turn capability, private session scope), the isolation gap inventory and the
 isolation probe remain as history and are not release prerequisites. The
 November 18 rule that every Agent in the instance may read is unchanged.
+
+
+## Heart metrics and explicit consent expansion
+
+The current data contract adds `heart_rate: {min_bpm, average_bpm, max_bpm}`,
+`resting_heart_rate: {bpm}` and `hrv: {sdnn_ms}`. Heart rate and HRV use combined
+HealthKit discrete statistics; resting heart rate is the latest daily estimate,
+with end/start/source/UUID tie breaking. These daily values have no sample count.
+Availability, timestamps, timezone, retention and the original four aggregations
+keep their existing meaning. See [the heart-metric design](health-heart-metrics.md).
+
+`connect` on a connected device requests all supported metrics missing from the confirmed set;
+first connections request all supported metrics. Connect has no metric selector;
+`read --metric` remains selective. One owner/instance has at most one pending
+connect, including a bound request waiting for first sync. Pending reuse and the
+active-device initial/expansion/no-op decision share one write transaction.
+Repeated callers reuse that request without changing its callback or waiter,
+even when consent is complete but ACK/result is pending. On pairing or expansion,
+other pending legacy connects are settled atomically: covered requests succeed
+without invented sync results, inapplicable ones cancel, and their codes retire.
+An expansion request remains unbound and unclaimable until native consent; its
+metadata carries `minimum_health_version: 2`. An ordinary connection uses 1.
+Pairing-code responses add `supported_metrics`, `metrics`, and `expansion`.
+The Web page forwards these as `supportedMetrics`, `requestedMetrics`, and
+`expansion` only to a native bridge advertising `health >= 2`. Missing capability
+metadata means the original four; an old App must update before expanding.
+
+After explicit native confirmation and the system permission request, the same
+device sends its existing authenticated `PUT /manifest`, with `pairing_code`,
+`request_id`, and the union of previously confirmed and newly requested metrics.
+The server atomically consumes the code, confirms that the request belongs to
+that device/owner/instance, expands its metrics and binds the request. Ordinary
+manifests cannot expand the set. Replies add `supported_metrics` and
+`confirmed_metrics`; replaying a bound request is idempotent and cannot grant more.
+Pairing codes never enter the stored manifest or logs. The device credential,
+registry link, upload sequence, outbox, old data and outstanding refresh requests survive.
+
+The App persists approved intent before HTTP. A restart retries/reconciles a lost
+manifest reply without presenting a permission sheet. Only added metrics receive
+a 30-day backfill; existing metrics keep their routine eight-day window. This is
+necessary because replacement pairing destroys stored days that HealthKit may
+no longer return after deletion or revocation of read access. Completion still
+requires upload ACK and an accepted status-only result matching the claim.
+
+`read` adds `confirmation_required` per metric; `status` includes
+`confirmed_metrics`. These describe Avibe confirmation, never HealthKit read
+permission. Refusal cannot be inferred from empty results. No new reads, prompts
+or uploads happen solely because an App upgrade adds supported types.

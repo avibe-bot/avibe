@@ -11,7 +11,7 @@ import type {
   SignedOutDevice, SwitchSetting, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
 } from './types';
 
-const HEALTH: readonly HealthData[] = ['steps', 'activity', 'workouts', 'sleep'];
+const HEALTH: readonly HealthData[] = ['steps', 'activity', 'workouts', 'sleep', 'heart_rate', 'resting_heart_rate', 'hrv'];
 const record = (value: unknown): Record<string, unknown> => (value && typeof value === 'object' ? value as Record<string, unknown> : {});
 const text = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);

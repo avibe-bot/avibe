@@ -33,7 +33,7 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>Use Face ID to unlock Avibe.</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Avibe reads your steps, activity, workouts, and sleep to provide your personal daily and weekly status through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health.</string>
+	<string>Avibe reads your steps, activity, workouts, sleep, heart rate, resting heart rate, and heart rate variability to provide your personal daily and weekly status through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Avibe never writes to Apple Health. It only reads the data you allow.</string>
 	<key>NSLocalNetworkUsageDescription</key>

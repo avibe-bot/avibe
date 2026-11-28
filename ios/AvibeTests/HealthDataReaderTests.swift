@@ -33,6 +33,63 @@ final class HealthDataReaderTests: XCTestCase {
         XCTAssertGreaterThan(host.view.bounds.height, 0)
     }
 
+    @MainActor
+    func testHeartStatisticsQueryCombinesSourcesAndUsesTheLocalDSTCalendar() throws {
+        let aggregation = try window(days: 2, now: "2026-11-02T12:00:00-08:00", timezone: "America/Los_Angeles")
+        XCTAssertEqual(aggregation.days[0].end.timeIntervalSince(aggregation.days[0].start), 25 * 3600)
+        let heart = HealthDataReader.heartStatisticsQuery(.heartRate, aggregation: aggregation)
+        XCTAssertEqual(heart.options, [.discreteMin, .discreteAverage, .discreteMax])
+        XCTAssertFalse(heart.options.contains(.separateBySource), "Use combined readable sources, not source subtotals")
+        XCTAssertEqual(heart.intervalComponents.timeZone, aggregation.calendar.timeZone)
+        XCTAssertEqual(heart.intervalComponents.day, 1)
+        let hrv = HealthDataReader.heartStatisticsQuery(.heartRateVariabilitySDNN, aggregation: aggregation)
+        XCTAssertEqual(hrv.options, .discreteAverage)
+    }
+
+    func testHeartDailySummariesPreserveEmptyRealZeroAndSampleFreshness() throws {
+        let aggregation = try window(days: 2)
+        let latest = date("2026-11-18T07:00:00+08:00")
+        let values: [Date: HealthDayAggregation.HeartStatistics] = [aggregation.days[1].start:
+            .init(minimum: 50, average: 72.5, maximum: 140, latest: latest)]
+        let rows = aggregation.heart("heart_rate", statistics: values, queriedAt: aggregation.now)
+        XCTAssertEqual(rows[0]["availability"] as? String, "empty")
+        XCTAssertTrue(rows[0]["value"] is NSNull)
+        XCTAssertEqual(try value(rows[1])["average_bpm"] as? Double, 72.5)
+        XCTAssertEqual(Set(try value(rows[1]).keys), ["min_bpm", "average_bpm", "max_bpm"])
+        XCTAssertEqual(rows[1]["latest_sample_end_at"] as? String, HealthDayAggregation.timestamp(latest))
+        let hrv = aggregation.heart("hrv", statistics: [aggregation.days[1].start:
+            .init(minimum: nil, average: 0, maximum: nil, latest: latest)], queriedAt: aggregation.now)
+        XCTAssertEqual(try value(hrv[1])["sdnn_ms"] as? Double, 0)
+        XCTAssertEqual(hrv[1]["availability"] as? String, "ok")
+    }
+
+    func testHeartAverageIsClampedBeforeBuildingTheUploadPayload() throws {
+        let aggregation = try window(days: 1)
+        for average in [Double(72).nextUp, Double(72).nextDown] {
+            let rows = aggregation.heart("heart_rate", statistics: [aggregation.days[0].start:
+                .init(minimum: 72, average: average, maximum: 72, latest: aggregation.now)], queriedAt: aggregation.now)
+            XCTAssertEqual(try value(rows[0])["average_bpm"] as? Double, 72)
+            XCTAssertEqual(rows[0]["availability"] as? String, "ok")
+        }
+    }
+
+    func testRestingHeartRateUsesLatestDailyEstimateAndExcludesNextMidnight() throws {
+        let aggregation = try window(days: 2)
+        let type = HKQuantityType(.restingHeartRate)
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        func sample(_ time: String, _ value: Double) -> HKQuantitySample {
+            HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: value),
+                             start: date(time), end: date(time))
+        }
+        let samples = [sample("2026-11-17T09:00:00+08:00", 50), sample("2026-11-17T23:59:59+08:00", 55),
+                       sample("2026-11-18T00:00:00+08:00", 60), sample("2026-11-19T00:00:00+08:00", 99)]
+        let rows = aggregation.restingHeartRate(samples, queriedAt: aggregation.now)
+        XCTAssertEqual(try value(rows[0])["bpm"] as? Double, 55)
+        XCTAssertEqual(try value(rows[1])["bpm"] as? Double, 60)
+        let empty = aggregation.restingHeartRate([], queriedAt: aggregation.now)
+        XCTAssertTrue(empty.allSatisfy { $0["availability"] as? String == "empty" && $0["value"] is NSNull })
+    }
+
     func testWorkoutActivityNamesIncludeModernTypesAndUnknownFallback() {
         XCTAssertEqual(HealthDayAggregation.activityName(.highIntensityIntervalTraining), "high_intensity_interval_training")
         XCTAssertEqual(HealthDayAggregation.activityName(.pickleball), "pickleball")

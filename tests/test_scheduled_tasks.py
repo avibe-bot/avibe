@@ -12361,7 +12361,8 @@ def test_mobile_maintenance_follows_pairing_lifecycle(tmp_path: Path, monkeypatc
     mobile_dir = paths.get_state_dir() / "mobile"
     mobile = None if initial == "absent" else MobileStore()
     if initial in {"paired", "revoked"}:
-        pair_device(mobile)
+        _, setup = pair_device(mobile)
+        mobile.cancel_request(setup["id"])  # Finish setup before connecting the second phone.
         if initial == "revoked":
             mobile.revoke()
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -12378,7 +12379,8 @@ def test_mobile_maintenance_follows_pairing_lifecycle(tmp_path: Path, monkeypatc
             if initial == "absent":
                 assert not mobile_dir.exists()
             devices = mobile or MobileStore()
-            first, _ = await asyncio.to_thread(pair_device, devices, installation="other")
+            first, _ = await asyncio.to_thread(
+                pair_device, devices, installation="other", legacy_initial=initial == "paired")
             await service._mobile_probe
             job = service.scheduler.get_job(job_id)
             assert job is not None and job.options["seconds"] == 60

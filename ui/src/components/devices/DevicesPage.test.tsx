@@ -15,7 +15,7 @@ import { DevicesPageView } from './DevicesPageView';
 import { functionControl, lockedOutCount } from './rules';
 import { said } from './testText';
 import type { Device, Reach } from './types';
-import type { DevicesSnapshot } from './wire';
+import { activityFromWire, devicesFromWire, type DevicesSnapshot } from './wire';
 
 // ui/design: settings/devices/*
 const toasts = vi.hoisted(() => ({ show: vi.fn() }));
@@ -993,5 +993,32 @@ describe('DevicesPage · 解除绑定 done', () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue({ ...snapshot([macbook]), unbind: { state: 'unbound', host } });
     mount();
     expect(await screen.findByText(said(`${host} 在你的账号下保留 30 天，这期间可以在这台或别的电脑上领回。`))).toBeTruthy();
+  });
+});
+
+
+describe('Devices health metric consumers in both languages', () => {
+  it.each([
+    ['en', ['heart rate', 'resting heart rate', 'heart rate variability']],
+    ['zh', ['心率', '静息心率', '心率变异性']],
+  ] as const)('renders real wire scopes in linked detail, unlinked summary and HRV-only activity (%s)', async (language, labels) => {
+    await i18n.changeLanguage(language);
+    const data = ['steps', 'activity', 'workouts', 'sleep', 'heart_rate', 'resting_heart_rate', 'hrv', 'future_metric'];
+    const parsed = devicesFromWire({ mine: [{ id: 'phone', group: 'mine', kind: 'iphone_app', display_name: 'Synthetic iPhone',
+      functions: [{ kind: 'health', on: true, can_change: true, data }] }],
+      unlinked_health: [{ pairing_id: 'p1', device_name: 'Unlinked iPhone', data }],
+    });
+    const linked = render(<DevicesPageView reach={on} devices={parsed.devices} detail="phone" />);
+    for (const label of labels) expect(screen.getByRole('dialog').textContent?.toLowerCase()).toContain(label);
+    expect(linked.container.textContent).not.toContain('future_metric');
+    linked.unmount();
+    const unlinked = render(<DevicesPageView reach={on} devices={[]} unlinkedHealth={parsed.unlinkedHealth} />);
+    for (const label of labels) expect(unlinked.container.textContent?.toLowerCase()).toContain(label);
+    unlinked.unmount();
+    const entry = activityFromWire({ id: 'r1', kind: 'healthRead', at: '2026-11-27T01:00:00Z', data: ['hrv'],
+      from_day: '2026-11-27', to_day: '2026-11-27' }, () => 'Synthetic iPhone')!;
+    const activity = render(<DevicesPageView reach={on} devices={[]} activity={[entry]} />);
+    expect(activity.container.textContent?.toLowerCase()).toContain(labels[2]);
+    expect(activity.container.textContent).not.toContain('devices.health.');
   });
 });

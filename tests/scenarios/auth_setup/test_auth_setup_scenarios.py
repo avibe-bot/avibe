@@ -446,6 +446,47 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
         status = client.get(f"/api/mobile/requests/{h.request['id']}").get_json()
         assert status["state"] == "succeeded" and "987654321" not in json.dumps(status)
 
+    def confirm_heart_metrics_without_replacing_device(h):
+        # AUTH-SETUP-186: CLI -> owner card/code -> authenticated manifest ->
+        # upload/receipt -> local CLI. The original credential and values survive.
+        from core.mobile_health_contract import METRICS
+        from tests.test_mobile_health import heart_manifest
+        names = ["heart_rate", "resting_heart_rate", "hrv"]
+        args = cli.build_parser().parse_args([
+            "mobile", "health", "connect", "--no-callback",
+        ])
+        request = cli_mobile.execute(args)["request"]
+        assert request["minimum_health_version"] == 2
+        pairing = client.post("/api/mobile/pairings", json={"request_id": request["id"]},
+                              headers=csrf_headers(client)).get_json()
+        assert pairing["supported_metrics"] == list(METRICS) and pairing["expansion"]
+        response = client.put("/api/mobile/device/v1/manifest", headers=h.auth,
+            json=heart_manifest(list(METRICS),
+                                pairing_code=pairing["pairing_code"], request_id=request["id"]))
+        assert response.status_code == 200
+        claim = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
+            json={"wait_seconds": 0, "max": 1, "request_id": request["id"]}).get_json()["requests"][0]
+        additions = [m for m in METRICS if m not in ["steps", "sleep"]]
+        assert request["metrics"] == additions
+        payload = upload_payload(seq=2, names=tuple(additions), empty=True)
+        values = dict(zip(names, [
+            {"min_bpm": 50, "average_bpm": 72.5, "max_bpm": 140}, {"bpm": 55}, {"sdnn_ms": 42.5},
+        ]))
+        for item in payload["items"]:
+            if item["metric"] in values:
+                item.update(value=values[item["metric"]], availability="ok",
+                            latest_sample_end_at="2026-11-18T07:00:00+08:00")
+        assert client.put("/api/mobile/device/v1/health/days", headers=h.auth, json=payload).status_code == 200
+        result = client.post(f"/api/mobile/device/v1/requests/{request['id']}/result", headers=h.auth,
+            json={"claim_token": claim["claim_token"], "outcome": "succeeded",
+                  "result": {"metrics": {name: "ok" if name in names else "empty" for name in additions}}})
+        assert result.status_code == 200
+        data = cli_mobile.execute(cli.build_parser().parse_args([
+            "mobile", "health", "read", "--metric", ",".join(names), "--period", "today",
+        ]))["metrics"]
+        assert data["hrv"]["items"][0]["value"] == {"sdnn_ms": 42.5}
+        assert not data["hrv"]["confirmation_required"]
+
     def read_and_revoke(h):
         args = cli.build_parser().parse_args([
             "mobile", "health", "read", "--metric", "steps,sleep",
@@ -469,11 +510,12 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
         ScenarioStep("abandon-native-before-pair", abandon_before_pair),
         ScenarioStep("pair-and-claim-same-request", pair),
         ScenarioStep("upload-before-status-result", upload_and_complete),
+        ScenarioStep("expand-heart-metrics-in-place", confirm_heart_metrics_without_replacing_device),
         ScenarioStep("local-agent-read-and-revoke", read_and_revoke),
     ))
     ScenarioExpect.step_history(runner, [
         "connect-and-persist-card", "abandon-native-before-pair", "pair-and-claim-same-request",
-        "upload-before-status-result", "local-agent-read-and-revoke",
+        "upload-before-status-result", "expand-heart-metrics-in-place", "local-agent-read-and-revoke",
     ])
 
 

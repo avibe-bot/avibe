@@ -26,6 +26,10 @@ def test_logout_invalidates_issuer_code_but_preserves_pairing_on_live_sibling(in
     cookie, viewer, target = phone(install, "same-phone")
     identity, first = code_for(store, viewer)
     mid = registry.pair(store, first, identity)["device_id"]
+    # A second request starts only after the first connection has finished.
+    with store.transaction() as mobile:
+        setup_id = mobile.execute("SELECT id FROM requests WHERE device_id=?", (mid,)).fetchone()[0]
+    store.cancel_request(setup_id)
     identity, pending = code_for(store, viewer)
     sibling, _, same_target = phone(install, "same-phone")
     assert same_target == target

@@ -18,7 +18,7 @@ export type DeviceKind = 'host' | 'iphone' | 'desktop' | 'browser' | 'other';
 export type ClientKind = 'runtime' | 'app' | 'desktop' | 'browser' | 'homeScreen' | 'other';
 export type DeviceClient = { kind: ClientKind; version?: string; platform?: string };
 
-export type HealthData = 'steps' | 'activity' | 'workouts' | 'sleep';
+export type HealthData = 'steps' | 'activity' | 'workouts' | 'sleep' | 'heart_rate' | 'resting_heart_rate' | 'hrv';
 
 /** What a device offers. `canChange`: whether this viewer may switch it (the instance decides;
  *  the page never infers it from the group or the kind). */

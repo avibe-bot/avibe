@@ -114,7 +114,17 @@ struct HealthPendingResult: Codable {
     var completedAt = Date()
 }
 
+struct HealthPendingConsent: Codable {
+    let requestID: String
+    let pairingCode: String
+    let metrics: [String]
+}
+
 struct HealthSyncState: Codable {
+    // Optional additions decode released four-metric state without rewriting it.
+    var confirmedMetrics: [String]?
+    var pendingConsent: HealthPendingConsent?
+    var backfillMetrics: [String]?
     var sequence: Int64 = 0
     var completed: [String: HealthPendingResult] = [:]
     var uploads: [String] = []

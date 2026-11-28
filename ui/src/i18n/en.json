@@ -8055,17 +8055,21 @@
       "failed": "This request did not finish. You can ask again in the conversation later.",
       "expired": "This request has expired. Ask for a new one in the conversation.",
       "canceled": "This request was canceled.",
-      "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first."
+      "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first.",
+      "needsUpdateExpansion": "Update Avibe on this iPhone to add these. Your current sync keeps running."
     },
     "landing": {
-      "authorize": "Read this iPhone’s steps, activity, workouts and sleep, and sync them to this instance. Next, choose access in Avibe and iOS.",
+      "authorize": "Read this iPhone’s {{metrics}}, and sync them to this instance. Next, choose access in Avibe and iOS.",
       "openConversations": "Open conversations"
     },
     "metric": {
       "steps": "Steps",
       "activity": "Activity",
       "workouts": "Workouts",
-      "sleep": "Sleep"
+      "sleep": "Sleep",
+      "heart_rate": "Heart rate",
+      "resting_heart_rate": "Resting heart rate",
+      "hrv": "Heart rate variability"
     },
     "metricSeparator": ", ",
     "waitingRefresh": "Waiting for your iPhone to process this request."
@@ -8187,7 +8191,10 @@
       "steps": "steps",
       "activity": "activity",
       "workouts": "workouts",
-      "sleep": "sleep"
+      "sleep": "sleep",
+      "heartRate": "heart rate",
+      "restingHeartRate": "resting heart rate",
+      "hrv": "heart rate variability"
     },
     "detail": {
       "connection": "Connection",

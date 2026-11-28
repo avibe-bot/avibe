@@ -8,6 +8,7 @@ export type HealthRequest = {
   created_at: string;
   expires_at: string;
   requires_user: boolean;
+  minimum_health_version?: number;
   metrics: string[];
   error?: { code: string } | null;
 };
@@ -35,7 +36,7 @@ export function healthRequestView(request: HealthRequest): HealthViewState {
   if (request.state !== 'queued') return request.state;
   if (request.operation !== 'health.connect' || !request.requires_user) return 'waiting';
   if (typeof window !== 'undefined' && window.avibeNative?.platform === 'ios' && isNativeShell()) {
-    return hasNativeCapability('health') ? 'authorize' : 'needsUpdate';
+    return hasNativeCapability('health', request.minimum_health_version ?? 1) ? 'authorize' : 'needsUpdate';
   }
   return 'waiting';
 }
@@ -123,16 +124,16 @@ export async function connectHealthRequest(request: HealthRequest, signal: Abort
   publishConnection({ entries, active: attempt });
   signal.addEventListener('abort', attempt.cancelPairing, { once: true });
   try {
-    const pairingCode = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, pairing.signal, async (requestSignal) => {
+    const pairingInfo = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, pairing.signal, async (requestSignal) => {
       const response = await apiFetch('/api/mobile/pairings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ request_id: request.id }), signal: requestSignal,
       });
       if (!response.ok) throw new Error('health_pairing_failed');
-      const value = await response.json() as { pairing_code?: unknown };
+      const value = await response.json() as { pairing_code?: unknown; supported_metrics?: string[]; metrics?: string[]; expansion?: boolean };
       requestSignal.throwIfAborted();
       if (typeof value.pairing_code !== 'string' || !value.pairing_code) throw new Error('health_pairing_invalid');
-      return value.pairing_code;
+      return value;
     });
     pairing.signal.throwIfAborted();
     signal.throwIfAborted();
@@ -148,7 +149,13 @@ export async function connectHealthRequest(request: HealthRequest, signal: Abort
       attempt = { ...attempt, phase: 'unresponsive' };
       publishConnection({ ...connections, active: attempt });
     }, 100_000);
-    const result = await nativeHealthConnect({ requestId: request.id, pairingCode });
+    const result = await nativeHealthConnect({ requestId: request.id, pairingCode: pairingInfo.pairing_code as string,
+      ...(hasNativeCapability('health', 2) && Array.isArray(pairingInfo.supported_metrics) ? {
+        supportedMetrics: pairingInfo.supported_metrics,
+        requestedMetrics: pairingInfo.metrics ?? request.metrics,
+        expansion: pairingInfo.expansion === true,
+      } : {}),
+    });
     if (!result || !['connected', 'declined', 'failed'].includes(result.state)) throw new Error('health_connect_failed');
     settle(result.state);
   } catch {

@@ -24,7 +24,7 @@ def add_mobile_parser(subparsers) -> None:
     commands = health.add_subparsers(dest="mobile_command", required=True)
     commands.add_parser("status", help="Show device connection and sync freshness")
     read = commands.add_parser("read", help="Read daily health data from this instance")
-    read.add_argument("--metric", default=",".join(METRICS), help="Comma-separated steps,activity,workouts,sleep")
+    read.add_argument("--metric", default=",".join(METRICS), help="Comma-separated health metrics")
     window = read.add_mutually_exclusive_group()
     window.add_argument("--period", choices=["today", "yesterday", "last7d", "last30d"])
     window.add_argument("--from", dest="from_day", metavar="YYYY-MM-DD")
@@ -110,6 +110,8 @@ def _request(store, operation, identity, args, *, names=METRICS, caller="local")
             operation, identity, names=names, caller=caller, callback_session=callback,
             waiter_id=waiter_id, wait_seconds=seconds,
         )
+        if request is None:
+            return None
         if created:
             try:
                 publish_request_card(request, os.environ.get("AVIBE_SESSION_ID"))
@@ -164,11 +166,10 @@ def execute(args) -> dict:
     if command == "status":
         return {"kind": "mobile_health", **store.status()}
     if command == "connect":
-        if store.status()["connected"]:
+        request = _request(store, "health.connect", identity, args, caller=caller)
+        if request is None:
             return {"kind": "mobile_health", **store.status()}
-        return {"kind": "mobile_request", "request": _request(
-            store, "health.connect", identity, args, caller=caller,
-        )}
+        return {"kind": "mobile_request", "request": request}
     names = metrics(args.metric.split(","))
     start, end = _window(args, today=store.calendar_today())
     max_age = _max_age(args.max_age)

@@ -1555,7 +1555,9 @@ scenarios:
       request, and the abandoned code cannot replay after pairing. Native
       consent dismissal, bounded setup/cleanup, callback ownership and optional
       empty-step help are owned by HealthSyncTests; page retry and legacy
-      pending-owner recovery by HealthRequest.lifecycle.test.tsx.
+      pending-owner recovery by HealthRequest.lifecycle.test.tsx. An explicit heart-metric
+      expansion retains the credential and original data, negotiates capabilities,
+      uploads all three synthetic summaries, and completes through the local CLI.
   - id: AUTH-SETUP-914
     name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
     status: covered

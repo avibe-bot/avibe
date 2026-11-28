@@ -150,6 +150,9 @@ class MobileStore:
                 # Compatible with released v1 writers, which name every audit column.
                 if not any(col[1] == "device_id" for col in conn.execute("PRAGMA table_info(accesses)")):
                     conn.execute("ALTER TABLE accesses ADD COLUMN device_id TEXT")
+                # Nullable additive column: released writers explicitly name request columns.
+                if not any(col[1] == "consent_device_id" for col in conn.execute("PRAGMA table_info(requests)")):
+                    conn.execute("ALTER TABLE requests ADD COLUMN consent_device_id TEXT")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -179,6 +182,7 @@ class MobileStore:
             "created_at": row["created_at"], "expires_at": row["expires_at"],
             "requires_user": row["operation"] == "health.connect",
             "metrics": json.loads(row["metrics"]),
+            "minimum_health_version": 2 if row["consent_device_id"] else 1,
             "result": json.loads(row["result"]) if row["result"] else None,
             "error": {"code": row["error"]} if row["error"] else None,
         }
@@ -213,28 +217,57 @@ class MobileStore:
     def create_request(
         self, operation: str, identity: dict, *, names=METRICS, caller="local",
         callback_session=None, waiter_id=None, wait_seconds=0,
-    ) -> tuple[dict, bool]:
-        metrics(list(names))
+    ) -> tuple[dict | None, bool]:
+        """Select work atomically; None means confirmed scope already has upload ACKs."""
+        if operation == "health.refresh":
+            metrics(list(names))
         if operation not in {"health.connect", "health.refresh"}:
             raise MobileError("invalid_payload")
         now = _now()
         with self.transaction() as conn:
             self._expire(conn, now)
+            if operation == "health.connect":
+                existing = conn.execute(
+                    "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner=? "
+                    "AND state IN ('queued','claimed') ORDER BY created_at LIMIT 1",
+                    (identity["id"], identity["owner"]),
+                ).fetchone()
+                if existing:
+                    # Pairing/consent is not completion: retain the original
+                    # continuation until upload ACK and the request result.
+                    return self._request(existing), False
             device = self.active_device(conn)
-            if operation == "health.refresh" and not device:
-                raise MobileError("not_connected", 409)
+            confirmed = json.loads(device["metrics"]) if device else []
+            expand = operation == "health.connect" and device is not None
+            if operation == "health.connect":
+                selected = [name for name in METRICS if name not in confirmed]
+                if not selected:
+                    acknowledged = {row[0] for row in conn.execute(
+                        "SELECT metric FROM metric_sync WHERE device_id=? AND synced_at IS NOT NULL",
+                        (device["id"],),
+                    )}
+                    if set(confirmed) <= acknowledged:
+                        return None, False
+                    # A canceled/expired setup can leave consent without data.
+                    # Reuse ordinary synchronization; never reopen permission.
+                    operation, expand, names = "health.refresh", False, confirmed
+            if operation == "health.refresh":
+                if not device:
+                    raise MobileError("not_connected", 409)
+                selected = confirmed
+                required = set(names) & set(confirmed)
+                candidates = conn.execute(
+                    "SELECT * FROM requests WHERE operation='health.refresh' AND instance_id=? AND owner=? "
+                    "AND device_id=? AND state IN ('queued','claimed') ORDER BY created_at",
+                    (identity["id"], identity["owner"], device["id"]),
+                ).fetchall()
+                existing = next((row for row in candidates if required <= set(json.loads(row["metrics"]))), None)
+                if existing:
+                    # An immutable pre-expansion claim cannot satisfy a caller
+                    # asking for newly confirmed types it never queried.
+                    return self._request(existing), False
             device_id = device["id"] if operation == "health.refresh" else None
-            existing = conn.execute(
-                "SELECT * FROM requests WHERE operation=? AND device_id IS ? AND instance_id=? "
-                "AND owner=? AND state IN ('queued','claimed') ORDER BY created_at LIMIT 1",
-                (operation, device_id, identity["id"], identity["owner"]),
-            ).fetchone()
-            if existing:
-                # Refresh always queries all consented groups. A coalesced caller
-                # cannot change the original request's continuation owner.
-                return self._request(existing), False
             request_id = "mreq_" + secrets.token_hex(16)
-            selected = json.loads(device["metrics"]) if device else list(names)
             conn.execute(
                 "INSERT INTO requests(id,operation,device_id,instance_id,owner,metrics,state,created_at,"
                 "expires_at,callback_session,callback_run,waiter_id,waiter_until,caller) "
@@ -244,6 +277,8 @@ class MobileStore:
                  callback_session, secrets.token_hex(16), waiter_id,
                  _after(now, seconds=wait_seconds) if waiter_id else None, caller),
             )
+            if expand:
+                conn.execute("UPDATE requests SET consent_device_id=? WHERE id=?", (device["id"], request_id))
             self._audit(conn, operation, caller=caller, session_id=callback_session, names=selected)
             row = conn.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
         if callback_session and not device:
@@ -267,7 +302,9 @@ class MobileStore:
                 "INSERT INTO pairings VALUES(?,?,?,?,?)",
                 (_hash(code), request_id, identity["id"], identity["owner"], expiry),
             )
-            return {"pairing_code": code, "expires_at": expiry}
+            return {"pairing_code": code, "expires_at": expiry,
+                    "supported_metrics": list(METRICS), "metrics": json.loads(row["metrics"]),
+                    "expansion": bool(row["consent_device_id"])}
 
     def precheck_pairing(self, payload: dict) -> None:
         """Reject unknown/expired codes locally; pair still consumes atomically."""
@@ -304,6 +341,8 @@ class MobileStore:
             request = conn.execute("SELECT * FROM requests WHERE id=?", (pairing["request_id"],)).fetchone()
             if not request or request["state"] in TERMINAL or request["device_id"]:
                 raise MobileError("request_terminal", 410)
+            if request["consent_device_id"]:
+                raise MobileError("contract_unsupported", 426)
             if installation:
                 for old in conn.execute(
                     "SELECT id FROM devices WHERE installation_hash=? AND revoked_at IS NULL",
@@ -321,9 +360,30 @@ class MobileStore:
             conn.execute("UPDATE requests SET device_id=?,metrics=? WHERE id=?",
                          (device_id, _json(names), request["id"]))
             conn.execute("DELETE FROM pairings WHERE request_id=?", (request["id"],))
+            self._settle_other_connects(conn, identity, device_id, names, request["id"], now)
         publish_mobile_schedule_changed()
         return {"device_id": device_id, "credential": credential,
                 "instance": {"id": identity["id"], "name": identity["name"]}}
+
+    @staticmethod
+    def _settle_other_connects(conn, identity, device_id, confirmed, winner_id, now):
+        """Retire stale approval cards atomically with a confirmed-scope change.
+
+        Covered requests finish without inventing a sync receipt. The winning
+        request still follows the existing query/upload/ACK/result lifecycle.
+        """
+        rows = conn.execute(
+            "SELECT * FROM requests WHERE operation='health.connect' AND instance_id=? AND owner=? "
+            "AND id<>? AND state IN ('queued','claimed')",
+            (identity["id"], identity["owner"], winner_id),
+        ).fetchall()
+        for row in rows:
+            covered = (row["consent_device_id"] in (None, device_id)
+                       and row["device_id"] in (None, device_id)
+                       and set(json.loads(row["metrics"])) <= set(confirmed))
+            conn.execute("UPDATE requests SET state=?,ended_at=?,result=NULL,error=NULL WHERE id=?",
+                         ("succeeded" if covered else "canceled", now, row["id"]))
+            conn.execute("DELETE FROM pairings WHERE request_id=?", (row["id"],))
 
     @staticmethod
     def _revoke_device(conn, device_id: str, now: str):
@@ -331,8 +391,8 @@ class MobileStore:
         conn.execute("DELETE FROM health_days WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM metric_sync WHERE device_id=?", (device_id,))
         conn.execute(
-            "UPDATE requests SET state='canceled',ended_at=? WHERE device_id=? "
-            "AND state IN ('queued','claimed')", (now, device_id),
+            "UPDATE requests SET state='canceled',ended_at=? WHERE (device_id=? OR consent_device_id=?) "
+            "AND state IN ('queued','claimed')", (now, device_id, device_id),
         )
 
     def authenticate(self, credential: str, identity: dict) -> dict:
@@ -372,23 +432,56 @@ class MobileStore:
 
     def manifest(self, device: dict, payload: dict) -> dict:
         object_fields(payload, {"contract", "app_version", "os_version", "timezone", "metrics",
-                                "background_delivery", "push_wake"})
+                                "background_delivery", "push_wake"}, {"pairing_code", "request_id"})
         if type(payload["contract"]) is not int or payload["contract"] != 1:
             raise MobileError("contract_unsupported", 426)
         text(payload["app_version"], limit=80)
         text(payload["os_version"], limit=80)
         timezone_name(payload["timezone"])
         names = metrics(payload["metrics"])
-        if not set(names) <= set(json.loads(device["metrics"])):
-            raise MobileError("unsupported_metric")
         if type(payload["background_delivery"]) is not bool or type(payload["push_wake"]) is not bool:
             raise MobileError("invalid_payload")
         now = _now()
+        consent_changed = False
         with self.transaction() as conn:
             self._ensure_active(conn, device["id"])
+            self._expire(conn, now)
+            current = conn.execute("SELECT * FROM devices WHERE id=?", (device["id"],)).fetchone()
+            confirmed = json.loads(current["metrics"])
+            if "pairing_code" in payload or "request_id" in payload:
+                code = text(payload.get("pairing_code"), limit=100)
+                request_id = text(payload.get("request_id"), limit=100)
+                row = conn.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
+                if (not row or row["consent_device_id"] != device["id"]
+                        or (row["instance_id"], row["owner"]) != (device["instance_id"], device["owner"])):
+                    raise MobileError("request_not_found", 404)
+                if row["device_id"] is None:
+                    pairing = conn.execute("SELECT * FROM pairings WHERE code_hash=? AND request_id=?",
+                                           (_hash(code), request_id)).fetchone()
+                    if row["state"] in TERMINAL:
+                        raise MobileError("request_terminal", 410)
+                    if not pairing or pairing["expires_at"] <= now:
+                        raise MobileError("request_terminal", 410)
+                    additions = json.loads(row["metrics"])
+                    if set(names) != set(confirmed) | set(additions):
+                        raise MobileError("unsupported_metric")
+                    confirmed = [name for name in METRICS if name in names]
+                    conn.execute("UPDATE devices SET metrics=? WHERE id=?", (_json(confirmed), device["id"]))
+                    conn.execute("UPDATE requests SET device_id=? WHERE id=?", (device["id"], request_id))
+                    conn.execute("DELETE FROM pairings WHERE request_id=?", (request_id,))
+                    self._settle_other_connects(conn, {"id": device["instance_id"], "owner": device["owner"]},
+                                                device["id"], confirmed, request_id, now)
+                    consent_changed = True
+                # Bound requests already consumed consent; retries do not expand it further.
+            if not set(names) <= set(confirmed):
+                raise MobileError("unsupported_metric")
+            stored_manifest = {key: value for key, value in payload.items()
+                               if key not in {"pairing_code", "request_id"}}
             conn.execute("UPDATE devices SET manifest=?,app_version=? WHERE id=?",
-                         (_json(payload), payload["app_version"], device["id"]))
-        return {"accepted_at": now}
+                         (_json(stored_manifest), payload["app_version"], device["id"]))
+        if consent_changed:
+            publish_mobile_schedule_changed()
+        return {"accepted_at": now, "supported_metrics": list(METRICS), "confirmed_metrics": confirmed}
 
     @staticmethod
     def _ensure_active(conn, device_id):
@@ -497,7 +590,7 @@ class MobileStore:
                         (device["id"], row["created_at"]),
                     )
                 }
-                if synced != set(json.loads(row["metrics"])):
+                if not set(json.loads(row["metrics"])) <= synced:
                     raise MobileError("incomplete_window")
             conn.execute(
                 "UPDATE requests SET state=?,result=?,error=?,ended_at=? WHERE id=?",
@@ -697,6 +790,7 @@ class MobileStore:
             manifest = json.loads(device["manifest"]) if device["manifest"] else {}
             return {
                 "connected": True,
+                "confirmed_metrics": json.loads(device["metrics"]),
                 "device": {"id": device["id"], "name": device["name"], "app_version": device["app_version"],
                            "last_contact_at": device["last_seen"]},
                 "metrics": {
@@ -765,7 +859,8 @@ class MobileStore:
                         datetime.fromisoformat(now) - datetime.fromisoformat(value.replace("Z", "+00:00"))
                         > timedelta(seconds=max_age) for value in queried
                     )
-                result[name] = {"items": items, "freshness": freshness}
+                result[name] = {"items": items, "freshness": freshness,
+                                "confirmation_required": name not in json.loads(device["metrics"])}
             self._audit(conn, "health.read", caller=caller, session_id=session_id, names=names,
                         start=start, end=end, device_id=device["id"])
             return {"metrics": result}
