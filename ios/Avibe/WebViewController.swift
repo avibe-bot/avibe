@@ -2951,6 +2951,11 @@ extension WebViewController: WKNavigationDelegate {
             // page, not a live load of an instance that may be offline.
             let showsCachedPageAgain = cachedPageUncovered
             leaveCachedPage()
+            // A replacement of a stale cached page went with it too: the
+            // restart below loads live anyway, and a late failure of the
+            // dead load must not take the restart's settlement.
+            hasPendingStaleReplacement = false
+            staleReplacementNavigation = nil
             if showsCachedPageAgain {
                 hasUsedCache = false
             }
