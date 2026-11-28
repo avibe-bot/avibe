@@ -1,6 +1,6 @@
 import { expect, test } from '../support/browserTest';
-import en from '../../src/i18n/en.json';
-import zh from '../../src/i18n/zh.json';
+import en from '../../src/i18n/en.json' with { type: 'json' };
+import zh from '../../src/i18n/zh.json' with { type: 'json' };
 import { DESKTOP, NARROW, open, serveProduct } from './support';
 
 // The actual Settings → launcher → Editor boundary: mocks cannot prove the Settings overlay
