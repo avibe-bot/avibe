@@ -23,7 +23,7 @@ jobs:
       # Web UI of RC_REF in a WKWebView, through the route, against a stand-in
       # instance (gate.mjs) and a stand-in for the App's bridge.
       MEASURE_ONLY: late
-      RC_REF: 9e8dd32284ce68083a744902d97fdcce1af5458a
+      RC_REF: 02b7627e33a5770dcaa5b60ca10e97af16a3df30
       GATE_DIST: ${{ github.workspace }}/rc/ui/dist
     steps:
       - name: Check out experiment
