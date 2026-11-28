@@ -113,9 +113,9 @@ export function installPageFetchCounting(): void {
     if (!sameOrigin(input)) return original(input, init);
     // Sent only once no hold is open: after a hand-over in progress has
     // finished, so it cannot reuse a connection the hand-over is about to
-    // close, and after a return's hold. One that opens meanwhile is waited
-    // for too.
-    while (holds.size > 0) await Promise.all(Array.from(holds));
+    // close, and after a return's hold. With none open it is counted in the
+    // same turn it was made in.
+    if (holds.size > 0) await pageRequestsReleased();
     const done = beginPageRequest();
     const order = beginRequestVia();
     let response: Response;
@@ -129,6 +129,14 @@ export function installPageFetchCounting(): void {
     noteRequestVia(order, response.headers.get('X-Avibe-Via'));
     return countedUntilBodyEnds(response, done);
   };
+}
+
+/**
+ * Resolves once no hold is open, at once when none is. A hold that opens
+ * while this waits is waited for too.
+ */
+export async function pageRequestsReleased(): Promise<void> {
+  while (holds.size > 0) await Promise.all(Array.from(holds));
 }
 
 /**

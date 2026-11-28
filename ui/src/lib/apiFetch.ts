@@ -1,6 +1,7 @@
 import { isRetiredAddressResponse, noteRetiredAddressResponse } from './addressRetired';
 import { reportRemoteAuthorizationState } from './remoteAuth';
 import { inputTerminalHint } from './inputSource';
+import { pageRequestsReleased } from './pageConnections';
 import { PAGE_REPORT_HEADER, takePageReport } from './pageReport';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
@@ -256,6 +257,10 @@ export async function apiFetch(
   // and a redirect to another origin, which never gave this page an answer
   // it could use, is now an error instead of carrying the header along.
   if (method === 'GET' && nextInit.mode === undefined && isOwnSessionRead(input)) {
+    // The word is taken when the read can leave, not when it was asked for:
+    // a session read made during a return's hold (lib/native) then says how
+    // long that hold was. The request itself waits for the same holds.
+    await pageRequestsReleased();
     const report = takePageReport();
     if (report !== null) {
       headers.set(PAGE_REPORT_HEADER, report);

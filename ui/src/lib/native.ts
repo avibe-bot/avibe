@@ -1053,8 +1053,10 @@ function holdRequestsForReturn(answered: Promise<unknown>): void {
     if (ended) return;
     ended = true;
     window.clearTimeout(timer);
-    release();
+    // Noted before the requests are let go: the session read among them
+    // carries it (lib/apiFetch).
     notePageHold(Date.now() - started);
+    release();
   };
   const timer = window.setTimeout(end, DIRECT_RETURN_HOLD_MS);
   void answered.then(end, end);
