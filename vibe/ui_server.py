@@ -9374,6 +9374,7 @@ def direct_rendezvous():
     rendezvous_state.log_listener_faults(payload.get("listener_faults"))
     rendezvous_state.log_leg_faults(payload.get("leg_faults"))
     rendezvous_state.log_path_use(payload.get("path_use"))
+    rendezvous_state.log_path_guard(payload.get("path_guard"))
     rendezvous_state.log_startup(payload.get("startup"))
     rendezvous_state.log_handovers(payload.get("handovers"))
     rendezvous_state.log_slow_store_removals(payload.get("slow_store_removals_ms"))
