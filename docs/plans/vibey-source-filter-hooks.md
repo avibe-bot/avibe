@@ -17,7 +17,7 @@ and the implementation differ, the "Implementation" sections win.
   are checked again when they are sent, and a refusal becomes the failed output the after hook sees.
 - **Process.** `[python, script]` with no shell, cwd = the hook folder, `.venv/bin/python` (`.venv\Scripts\python.exe`
   on Windows) when the folder has one, else Avibe's Python. A minimal inherited environment plus `AVIBE_HOME`; no
-  provider keys. 60 s per run, 4 MB of stdout, killed on timeout or when the turn stops the call.
+  provider keys. 600 s per run, 4 MB of stdout, killed on timeout or when the turn stops the call.
 - **Outputs.** A hook's `result` is mapped onto the canonical record: search `results[]` → `sources` (`url`, `title`,
   `snippet`, `page_age`; at most 50, bounded like the search mapping); fetch `url` / `final_url` / `title` /
   `content` → the `WebFetchRecord`, content cut to its budget. Other fields are not passed on. A failed search output also carries the sources the search kept
@@ -238,7 +238,7 @@ Hub gateway, without holding any provider key.
     any other Session.
 - **Separate billing.** Each inference call is recorded and billed as hook inference on the tool call's record,
   apart from the tool's own upstream cost.
-- **Time.** The hook time limit allows for a model call (proposed 60 s, still inside the tool deadline).
+- **Time.** The hook time limit is 600 s per run, separate from the upstream tool's deadline.
   The script gives its HTTP call a shorter timeout so that it can still answer before the limit.
 - **Script hygiene.** stdout carries only the protocol JSON. Scripts must not print the environment or the key,
   even to stderr, since stderr reaches the runtime log.

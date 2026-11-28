@@ -165,6 +165,25 @@ async def test_a_failing_after_hook_never_releases_the_unfiltered_output(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["before_search", "after_search", "before_fetch", "after_fetch"])
+async def test_each_hook_gets_ten_minutes_by_default(hooks, monkeypatch, name):
+    """Model-backed hooks need 600 s; short injected budgets in timeout tests cannot guard this default."""
+
+    hooks(name, 'json.dump({"action": "pass"}, sys.stdout)')
+    wait_for = asyncio.wait_for
+    budgets = []
+
+    async def observe_wait(awaitable, timeout):
+        budgets.append(timeout)
+        return await wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(source_filter_module.asyncio, "wait_for", observe_wait)
+    answer = await source_filter_module.SourceFilterHooks().run(name, {"v": 1, "hook": name})
+    assert answer.response == {"action": "pass"}
+    assert budgets[0] == 600.0
+
+
+@pytest.mark.asyncio
 async def test_a_hook_that_runs_too_long_is_stopped_and_blocks(tmp_path, hooks, monkeypatch):
     hooks("before_search", "import time\ntime.sleep(30)")
     service = filtered_owner(tmp_path)

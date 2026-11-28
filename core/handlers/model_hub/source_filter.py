@@ -44,7 +44,7 @@ HOOKS: Final[Mapping[str, tuple[str, str]]] = {
 }
 HOOK_NAMES: Final = ("before_search", "after_search", "before_fetch", "after_fetch")
 # One hook run, inside the call. A hook may call a model, so it is not a few seconds.
-HOOK_TIMEOUT_SECONDS: Final = 60.0
+HOOK_TIMEOUT_SECONDS: Final = 600.0
 STDOUT_MAX_BYTES: Final = 4 * 1024 * 1024
 _STDERR_KEPT_BYTES: Final = 4 * 1024
 _READ_CHUNK: Final = 64 * 1024

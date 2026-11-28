@@ -7,13 +7,16 @@ end-to-end case runs a real hook subprocess that calls the real gateway; only th
 
 from __future__ import annotations
 
+import asyncio
 import json
 import textwrap
+from contextlib import asynccontextmanager
 
 import aiohttp
 import pytest
 
 from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.source_filter import HookFailed
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from tests.test_model_hub_l3 import LiveInvokeHandle, _outcome, _source
 from tests.test_model_hub_vibey_consumer import _vibey_service
@@ -65,6 +68,55 @@ async def test_a_hook_key_serves_chat_completions_only_while_its_run_lasts(tmp_p
         assert status == 401
         assert len(service.adapter.invocations) == 1
     finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+async def test_a_stopped_hook_retires_its_run_key(tmp_path, monkeypatch, stop):
+    """Longer run budgets must not keep a credential alive after timeout or user cancellation."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    folder = tmp_path / "home" / "hooks" / "source_filter"
+    folder.mkdir(parents=True)
+    ready = folder / "ready"
+    (folder / "after_search.py").write_text(
+        "import pathlib, time\npathlib.Path('ready').touch()\ntime.sleep(30)\n", encoding="utf-8",
+    )
+    service, gateway = _gateway(tmp_path)
+    hooks = service._source_filter_hooks
+    env = {}
+
+    @asynccontextmanager
+    async def capture_env():
+        async with gateway.hook_gateway_env() as current:
+            env.update(current)
+            yield current
+
+    hooks.gateway = capture_env
+    if stop == "timeout":
+        hooks.timeout = 0.5
+    task = asyncio.create_task(hooks.run("after_search", {"v": 1, "hook": "after_search"}))
+    try:
+        if stop == "cancel":
+            async def wait_ready():
+                while not ready.exists():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_ready(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(HookFailed, match="timed out"):
+                await task
+        status, _ = await _post(env, "chat/completions", {"model": "menu-alias", "messages": []})
+        assert status == 401
+        assert not service.adapter.invocations
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         await gateway.close()
 
 
