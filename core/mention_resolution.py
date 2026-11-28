@@ -59,11 +59,8 @@ _SKIP_SEGMENT_RE = re.compile(
     r"(?:^|\n)[ \t]*(?P<lf_bt>`{3,})[^`\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*(?P=lf_bt)`*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)"
     r"|(?:^|\n)[ \t]*(?P<lf_tilde>~{3,})[^\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*(?P=lf_tilde)~*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)"
     r")"
-    r"|(?P<fence>"
-    r"(?P<f_bt>`{3,})(?:(?!\n\n)[\s\S])*?(?P=f_bt)"
-    r"|(?P<f_tilde>~{3,})(?:(?!\n\n)[\s\S])*?(?P=f_tilde)"
-    r")"
-    r"|(?P<code_span>(?P<bt>`+)[^`\n]+?(?P=bt))"
+    r"|(?P<fence>(?P<f_tilde>~{3,})(?:(?!\r?\n\r?\n)[\s\S])*?(?P=f_tilde))"
+    r"|(?P<code_span>(?<!`)(?P<bt>`+)(?!`)(?:(?!\r?\n\r?\n)[\s\S])*?(?<!`)(?P=bt)(?!`))"
     r"|(?P<autolink><https?://[^>\s]+>)"
     r"|(?P<md_link>\[[^\]\n]*\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))"
     r"|(?P<link_dest>\]\((?:[^()\s]|(?:\([^()\s]*\)))*\))",
@@ -238,7 +235,7 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
             in_indented_code = False
             after_blank = False
             current_line_is_code = False
-            if not fence_line.startswith(("    ", "\t")):
+            if not fence_line.startswith((" ", "\t")):
                 last_non_blank_was_list = False
         elif match.start() == 0 or text[match.start() - 1] == "\n":
             in_indented_code = False

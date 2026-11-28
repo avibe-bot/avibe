@@ -114,15 +114,15 @@ export type LinkifyMentionsOptions = {
 const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
 const LIST_ITEM_LINE_RE = /^ {0,3}(?:[-*+]|\d+[.)])[ \t]/;
 const LIST_MARKER_RE = /^(?:[-*+]|\d+[.)])[ \t]/;
-const INLINE_CODE_SPAN_RE = /(`+)[^`\n]+?\1/g;
+const INLINE_CODE_SPAN_RE = /(?<!`)(`+)(?!`)(?:(?!\r?\n\r?\n)[\s\S])*?(?<!`)\1(?!`)/g;
 
 // Segments skipped during mention rewriting:
 // 1. Line-start fenced code blocks (any leading indentation so code blocks
 //    inside numbered/nested list items stay intact; empty, CRLF, multi-length,
 //    and still-open streaming fences all handled).
-// 2. Closed mid-line fenced blocks (for backwards compatibility with inline
-//    fences that have an explicit closing fence, without crossing blank lines).
-// 3. Inline code spans.
+// 2. Closed mid-line tilde blocks (without crossing blank lines).
+// 3. Inline code spans (exact backtick run length, including multiline spans
+//    within a paragraph without crossing blank lines).
 // 4. Autolinks (`<https://...>`).
 // 5. Full Markdown inline links (`[label](dest)` — so mentions inside an
 //    existing link label never create nested links; in agentReply mode,
@@ -131,7 +131,7 @@ const INLINE_CODE_SPAN_RE = /(`+)[^`\n]+?\1/g;
 // 6. Bare link destinations (`](dest)` fallback when a label contains nested
 //    brackets).
 const SKIP_SEGMENT_RE =
-  /(?<lineFence>(?:^|\n)[ \t]*(`{3,})[^`\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*\2`*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)|(?:^|\n)[ \t]*(~{3,})[^\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*\3~*[ \t\r]*(?=\n|$)|[\s\S]*$)|$))|(`{3,})(?:(?!\n\n)[\s\S])*?\4|(~{3,})(?:(?!\n\n)[\s\S])*?\5|(`+)[^`\n]+?\6|<https?:\/\/[^>\s]+>|(?<linkLabel>\[[^\]\n]*\])(?<linkDest>\((?:[^()\s]|(?:\([^()\s]*\)))*\))|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
+  /(?<lineFence>(?:^|\n)[ \t]*(`{3,})[^`\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*\2`*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)|(?:^|\n)[ \t]*(~{3,})[^\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*\3~*[ \t\r]*(?=\n|$)|[\s\S]*$)|$))|(~{3,})(?:(?!\r?\n\r?\n)[\s\S])*?\4|(?<!`)(`+)(?!`)(?:(?!\r?\n\r?\n)[\s\S])*?(?<!`)\5(?!`)|<https?:\/\/[^>\s]+>|(?<linkLabel>\[[^\]\n]*\])(?<linkDest>\((?:[^()\s]|(?:\([^()\s]*\)))*\))|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
 
 /**
  * Rewrite `@<…>` / `#<…>` (and, in Agent replies, resolved bare `#ses...`)
@@ -357,7 +357,7 @@ export function linkifyMentions(
       inIndentedCode = false;
       afterBlank = false;
       currentLineIsCode = false;
-      if (!INDENTED_CODE_LINE_RE.test(fenceLine)) {
+      if (!/^[ \t]/.test(fenceLine)) {
         lastNonBlankWasList = false;
       }
     } else if (m.index === 0 || text[m.index - 1] === '\n') {

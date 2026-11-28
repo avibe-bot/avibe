@@ -106,7 +106,7 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "\n"
         "Use ``` to open a fence. Then #<sesafterbt001>.\n"
         "\n"
-        "Code span `#<sescode00001>` and `#sescode00002` stay untouched.\n"
+        "Code span `#<sescode00001>` and `#sescode00002` and `echo\n#<sesmultiline>` and ``quote `\n#<sesdblbt0001>`` stay untouched.\n"
         "```\n#<sesfence0001>\n#sesfence0002\n```\n"
         "````markdown\n```\n#<sesnestedf01>\n```\n#<sesnestedf02>\n````\n"
         "10. Step\n\n    ```py\n    x=1\n\n    print('#<seslistf0001>')\n    ```\n\n"

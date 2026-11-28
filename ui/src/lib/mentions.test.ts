@@ -209,6 +209,23 @@ describe('linkifyMentions', () => {
     expect(text).toContain('    more #<sesw34zgzgcvp>');
   });
 
+  it('in agentReply mode, preserves multiline inline code spans and backtick spans with inner backticks', () => {
+    const input =
+      'Run `echo\n#<sesw34zgzgcvp>\n#sesw34zgzgcvp` and ``quote ` #<sesmissing99>\n#<sesw34zgzgcvp>`` then #<sesw34zgzgcvp>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('`echo\n#<sesw34zgzgcvp>\n#sesw34zgzgcvp`');
+    expect(text).toContain('``quote ` #<sesmissing99>\n#<sesw34zgzgcvp>``');
+  });
+
   it('in agentReply mode, still resolves nested 4-space bullets, list/paragraph continuations, and prose after mid-sentence triple backticks', () => {
     const input =
       '- parent\n'
