@@ -2876,6 +2876,34 @@ final class DirectConnectListenerTests: XCTestCase {
         )
     }
 
+    /// WebKit sends a route's proxy the parent domain of a routed host too
+    /// (measured). The head's rule stays exact: a parent is accepted only
+    /// when the controller allowed that very host, never for being a parent.
+    func testAParentDomainIsRefusedUnlessThatHostItselfIsAllowed() {
+        func parse(_ target: String, allowed: Set<String>) -> DirectConnectRequest {
+            DirectConnectRequest.parse(
+                Data("CONNECT \(target) HTTP/1.1\r\nHost: \(target)\r\n\r\n".utf8),
+                allowedHosts: allowed, limit: 4096
+            )
+        }
+        XCTAssertEqual(parse("avibe.bot:443", allowed: ["alex-app.avibe.bot"]), .refused(403))
+        XCTAssertEqual(
+            parse("avibe.bot:443", allowed: ["alex-app.avibe.bot", "avibe.bot"]),
+            .accepted(DirectAuthority(host: "avibe.bot")!, earlyData: Data())
+        )
+        XCTAssertEqual(parse("avibe.bot:8443", allowed: ["alex-app.avibe.bot", "avibe.bot"]), .refused(403))
+
+        // Exactly the parent: a host without its first label.
+        let routed: Set<String> = ["alex-app.avibe.bot", "desk.team.example.com"]
+        XCTAssertTrue(DirectAuthority.isParentDomain("avibe.bot", ofAny: routed))
+        XCTAssertTrue(DirectAuthority.isParentDomain("team.example.com", ofAny: routed))
+        for other in ["example.com", "bot", "com", "other.avibe.bot", "x.alex-app.avibe.bot",
+                      "notavibe.bot", "alex-app.avibe.bot"] {
+            XCTAssertFalse(DirectAuthority.isParentDomain(other, ofAny: routed), other)
+        }
+        XCTAssertFalse(DirectAuthority.isParentDomain("avibe.bot", ofAny: ["avibe.bot"]))
+    }
+
     func testTheInstanceAnswerIsReadAsAStatusOnly() {
         func parse(_ text: String) -> DirectConnectAnswer {
             DirectConnectAnswer.parse(Data(text.utf8), limit: 4096)

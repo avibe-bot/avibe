@@ -37,6 +37,29 @@ struct DirectAuthority: Equatable, Sendable {
         "\(host):443"
     }
 
+    /// Whether `host` is the parent domain of one of `routed`: that host
+    /// without its first label, as `avibe.bot` is of an instance at
+    /// `name.avibe.bot`. Exactly that: no grandparent, and never a single
+    /// label (a top-level domain).
+    ///
+    /// WebKit sends a route's proxy not only the hosts `matchDomains` lists
+    /// and their subdomains but also their parent domain (measured
+    /// 2026-11-28, iOS 26.5 simulator, branch `experiment/webkit-rc6-gate`,
+    /// runs 46145770889 and 46147194369: a sibling host never came, the
+    /// parent always did, and `excludedDomains` with the parent took the
+    /// routed host off the route with it). Refusing the parent was harmless
+    /// only while the route allowed fail-over. Under 「仅直连和中继」 it does
+    /// not, and the page's requests to avibe.bot (voice) failed.
+    ///
+    /// Being a parent is spelling, not ownership: the parent of a routed
+    /// host can be anyone's. The controller carries one only when it is
+    /// also the control plane's own host (`DirectPathController.plan`).
+    static func isParentDomain(_ host: String, ofAny routed: some Sequence<String>) -> Bool {
+        host.contains(".") && routed.contains { name in
+            name.firstIndex(of: ".").map { name[name.index(after: $0)...] == host } ?? false
+        }
+    }
+
     private static func isDNSName(_ host: String) -> Bool {
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         guard

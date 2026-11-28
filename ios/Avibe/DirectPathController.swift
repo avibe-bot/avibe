@@ -234,6 +234,13 @@ final class DirectRouteOwner {
     /// one of them: `DirectPathController.lateRoute`.)
     private var excluded: Set<StoreHost> = []
 
+    /// The hosts `store`'s route lists now. Unlike `allowedHosts`, a host
+    /// taken off the route (`remove`) is not among them, nor is a host only
+    /// another store routes.
+    func routedHosts(store: UUID) -> [String] {
+        (hostsByStore[store] ?? []).map(\.name)
+    }
+
     func routes(_ host: String, store: UUID) -> Bool {
         hostsByStore[store]?.contains { $0.name == host } == true
     }
@@ -382,6 +389,12 @@ struct DirectPathTiming: Sendable {
     /// connection attempt.
     let ownCloseSeconds: TimeInterval
     let portProbeSeconds: TimeInterval
+    /// A change of a host's 「仅直连和中继」 policy closes its connections.
+    /// How long that waits for the host's tunnel connections to carry
+    /// nothing for a second, so that what the page is loading right then
+    /// (it has just opened) is not cut; what is still busy after it is
+    /// closed anyway.
+    let cutoverQuietSeconds: TimeInterval
 
     init(
         listenerWaitSeconds: TimeInterval,
@@ -390,8 +403,10 @@ struct DirectPathTiming: Sendable {
         strictOpenSeconds: TimeInterval = 10,
         retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5],
         ownCloseSeconds: TimeInterval = 3,
-        portProbeSeconds: TimeInterval = 0.3
+        portProbeSeconds: TimeInterval = 0.3,
+        cutoverQuietSeconds: TimeInterval = 5
     ) {
+        self.cutoverQuietSeconds = cutoverQuietSeconds
         self.strictOpenSeconds = strictOpenSeconds
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
@@ -591,6 +606,13 @@ final class DirectPathController {
     /// listener was closed for the background, a return was settled, an
     /// attempt to bind the listener's port again failed, or one succeeded.
     private let onAvailabilityChanged: () -> Void
+    /// Whether the shell is still loading this runtime's document (its
+    /// navigation has started and not finished). Asked just before a
+    /// cut-over closes the host's tunnel connections.
+    private let isLoadingDocument: (MobileRuntimeContext) -> Bool
+    /// A cut-over closed connections of this runtime's page while its
+    /// document was still loading: the shell loads the page again.
+    private let onLoadingPageCut: (MobileRuntimeContext) -> Void
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     private var listener: DirectConnectListener?
@@ -679,7 +701,13 @@ final class DirectPathController {
     // a timed-out CONNECT still using a failover-enabled route during cutover.
     private var hostsNeedingColdStore: Set<String> = []
     private var armed: Set<String> = []
+    /// The control plane's host (avibe.bot). The only host the listener
+    /// carries without a route of its own (`carriesControlPlane`).
+    private let controlPlaneHost: String?
     private var rewriting: Set<String> = []
+    /// Hosts whose policy is changing: from the wait for their tunnel
+    /// connections to go quiet until the drain and rewrite are done.
+    private var cuttingOver: Set<String> = []
     private var policyGeneration: [String: UInt64] = [:]
     private var strictFailures: [String: UInt64] = [:]
     private var unlinkedAnswers: [String: UInt64] = [:]
@@ -887,10 +915,16 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         pathUse: DirectPathUse = .shared,
+        controlPlaneHost: String? = MobileControlPlaneConfiguration().baseURL.host,
         onStatusChanged: @escaping () -> Void,
-        onAvailabilityChanged: @escaping () -> Void = {}
+        onAvailabilityChanged: @escaping () -> Void = {},
+        isLoadingDocument: @escaping (MobileRuntimeContext) -> Bool,
+        onLoadingPageCut: @escaping (MobileRuntimeContext) -> Void
     ) {
+        self.isLoadingDocument = isLoadingDocument
+        self.onLoadingPageCut = onLoadingPageCut
         self.pathUse = pathUse
+        self.controlPlaneHost = controlPlaneHost?.lowercased()
         self.websiteDataStore = websiteDataStore
         self.transport = transport
         self.isCurrentRuntime = isCurrentRuntime
@@ -1172,6 +1206,11 @@ final class DirectPathController {
         // The listener accepts the host before WebKit can be routed to it.
         // Its list only grows: `plan(for:)` refuses a host no route lists.
         await listener.allowHost(authority.host)
+        // And the control plane's host, where WebKit will send it here too
+        // because it is this host's parent domain (`carriesControlPlane`).
+        if let controlPlaneHost, DirectAuthority.isParentDomain(controlPlaneHost, ofAny: [authority.host]) {
+            await listener.allowHost(controlPlaneHost)
+        }
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -1244,7 +1283,7 @@ final class DirectPathController {
     func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
         guard let authority = DirectAuthority(instanceURL: url) else { return .open }
         let host = authority.host
-        if rewriting.contains(host) { return .held }
+        if rewriting.contains(host) || cuttingOver.contains(host) { return .held }
         let strict = needsListener(host)
         guard routeOwner.routes(host, store: websiteDataStore.identifier), let listener else {
             return strict ? .held : .open
@@ -1493,18 +1532,43 @@ final class DirectPathController {
         onAvailabilityChanged()
     }
 
-    /// One drain at a time per host. New plans wait; in-flight plans also
+    /// One change of policy at a time per host. It first waits, for a
+    /// bounded time, until the host's tunnel connections carry nothing: the
+    /// page has just opened and may still be using them. Plans go on as
+    /// they were meanwhile; a load the shell would start waits
+    /// (`loadGate`). Then the drain: new plans wait; in-flight plans also
     /// fail their commit check. Sample the latest choice after the drain so
-    /// a late completion cannot reverse a newer choice or touch another store.
+    /// a late completion cannot reverse a newer choice or touch another
+    /// store.
+    ///
+    /// A page that has loaded is told of what was closed as of any other
+    /// closure: it opens its stream again and catches up, and nothing is
+    /// reloaded. A page whose document was still loading cannot make a cut
+    /// script, stylesheet or first read again (a slow network: the wait ran
+    /// out, or a request was waiting for its answer through the quiet
+    /// second), so the shell loads it again, on the new policy. Whether it
+    /// was loading is asked before the drain, never after: a cut load ends
+    /// the navigation, and the page would look loaded.
     private func cutover(_ host: String) {
         let store = websiteDataStore.identifier
         guard routeOwner.routes(host, store: store), let listener, let port = listenerPort,
-              rewriting.insert(host).inserted else { return }
+              cuttingOver.insert(host).inserted else { return }
         policyGeneration[host, default: 0] &+= 1
+        let quietWait = timing.cutoverQuietSeconds
         Task { [weak self] in
-            await listener.drainHost(host)
+            await listener.waitUntilQuiet(
+                host: host, backend: .publicOrigin,
+                quietSeconds: Self.handoverQuietSeconds, waitSeconds: quietWait
+            )
             guard let self else { return }
+            let loading = self.runtime.flatMap { runtime in
+                DirectAuthority(instanceURL: runtime.instance.url)?.host == host
+                    && self.isLoadingDocument(runtime) ? runtime : nil
+            }
+            self.rewriting.insert(host)
+            let drained = await listener.drainHost(host)
             self.rewriting.remove(host)
+            self.cuttingOver.remove(host)
             if self.websiteDataStore.identifier == store, self.listener === listener {
                 let strict = self.requestedStrict.contains(host) && !self.hostsNeedingColdStore.contains(host)
                     && self.target?.authority.host == host && self.isUsable && !self.isInBackground
@@ -1515,6 +1579,17 @@ final class DirectPathController {
                                            port: port, allowsFailover: allowsFailover), strict {
                     self.armed.insert(host)
                 } else { self.armed.remove(host) }
+            }
+            // After the policy is in force: the connections the page opens
+            // in answer are planned under it.
+            if drained > 0 {
+                if let loading, self.runtime == loading {
+                    // The gate is open again; the load goes by the policy
+                    // now in force. No closure: that document is replaced.
+                    self.onLoadingPageCut(loading)
+                } else {
+                    self.recordClosure(hosts: [host])
+                }
             }
             self.onAvailabilityChanged()
         }
@@ -1734,12 +1809,52 @@ final class DirectPathController {
         transport.pathDidFail(for: tag)
     }
 
+    /// Whether a CONNECT for `host` is carried though no route lists it:
+    /// only the control plane's own host, only while it is exactly the
+    /// parent domain of a host the current account store's route lists now,
+    /// and not once it is routed itself (its own policy then decides). That
+    /// is read from the route as it stands, not from every host ever
+    /// routed: when the last host under it leaves the route
+    /// (`bypassListener`), or the account's store is replaced, WebKit no
+    /// longer sends the parent here, and anything else on this device that
+    /// asks the loopback port for it is refused again.
+    private func carriesControlPlane(_ host: String) -> Bool {
+        host == controlPlaneHost
+            && !routeOwner.allowedHosts.contains(host)
+            && DirectAuthority.isParentDomain(
+                host, ofAny: routeOwner.routedHosts(store: websiteDataStore.identifier)
+            )
+    }
+
     // MARK: Plans
 
     /// Decides one accepted CONNECT (section 6). `nil` refuses it.
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
         let host = authority.host
-        guard routeOwner.allowedHosts.contains(host) else { return nil }
+        guard routeOwner.allowedHosts.contains(host) else {
+            // The control plane's own host, when it is the parent domain of
+            // a routed host (avibe.bot, for an instance under it): WebKit
+            // sends it here though no route lists it. It is not the
+            // instance: it goes straight to that host through the public
+            // opener and its address policy under every choice, never over
+            // the direct path, and is in no count of the instance's
+            // connections. Fenced as any public-only plan is, so nothing
+            // planned before a change of selection or account is granted
+            // after it; and no longer carried once the host is routed in
+            // its own right or stops being a routed host's parent.
+            guard carriesControlPlane(host) else { return nil }
+            let fence = Fence(selection: selection, pathGeneration: pathGeneration, accountEpoch: accountEpoch)
+            let publicBackend = publicBackend
+            return DirectConnectPlan(
+                scope: scope, generation: pathGeneration, openDirect: nil,
+                openPublic: { try await publicBackend.open(authority) },
+                isCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.isCurrent(fence, lease: nil) && self.carriesControlPlane(host)
+                },
+                directFailed: {}
+            )
+        }
         if awaitingFirstConnect.remove(host) != nil {
             // WebKit brought a connection of this host to the listener: from
             // here on its documents hear what the transport prefers.

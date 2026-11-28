@@ -60,7 +60,9 @@ enum DirectConnectRequest: Equatable {
     /// Accepts `CONNECT <host>:443 HTTP/1.1` for exactly one of
     /// `allowedHosts` and refuses everything else. `matchDomains` is a
     /// suffix match, so WebKit also sends this listener a CONNECT for any
-    /// subdomain of a routed host.
+    /// subdomain of a routed host; and it sends the parent domain of one
+    /// too (`DirectAuthority.isParentDomain`). Which of those the listener
+    /// may be asked for is the controller's decision (`allowHost`).
     static func parse(
         _ received: Data,
         allowedHosts: Set<String>,
@@ -744,7 +746,9 @@ actor DirectConnectListener {
     /// Drains granted tunnels for this host. A CONNECT whose opener is still
     /// racing keeps its client socket: retire only the race so it replans under
     /// the new policy rather than silently closing on WebKit's old route.
-    func drainHost(_ host: String) async {
+    /// The answer is how many granted tunnels it closed.
+    @discardableResult
+    func drainHost(_ host: String) async -> Int {
         // An identified request without an admitted plan has started no opener.
         // Leave it for the rewrite hold; a plan sampled across this snapshot
         // cannot be admitted with its pre-drain stamp.
@@ -761,6 +765,7 @@ actor DirectConnectListener {
             }
         }
         for task in closing { await task.value }
+        return closing.count
     }
 
     private func identify(_ id: UUID, host: String) -> Bool {
@@ -835,6 +840,29 @@ actor DirectConnectListener {
                     drain(id)
                 }
                 return (closed, busy)
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    /// Returns once every committed `backend` relay for `host` has carried
+    /// no bytes either way for `quietSeconds`, or after `waitSeconds`,
+    /// whichever comes first. Nothing is closed: a change of the host's
+    /// policy waits here so that it does not cut what the page is loading,
+    /// and then drains (`drainHost`).
+    func waitUntilQuiet(
+        host: String,
+        backend: DirectRelayBackend,
+        quietSeconds: TimeInterval,
+        waitSeconds: TimeInterval,
+        clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) async {
+        let deadline = clock() + waitSeconds
+        while true {
+            let now = clock()
+            let busy = handoverCandidates(host: host, backend: backend, quietSeconds: quietSeconds, now: now).busy
+            if busy == 0 || now >= deadline || Task.isCancelled {
+                return
             }
             try? await Task.sleep(for: .milliseconds(100))
         }
