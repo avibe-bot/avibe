@@ -8455,7 +8455,7 @@
       "howSelf": "就是这台：改名时会自己清理并跳到新地址。",
       "howHost": "运行 Avibe 的电脑：不用做什么。",
       "howIphone": "在 Avibe App 里打开「实例」，点你的账号，选「在此设备退出」。",
-      "howDesktop": "在 Avibe Desktop 里打开「实例」，点「账户」下的账号，选「在此设备退出」。",
+      "howDesktop": "在 Avibe Desktop 里点左下角的实例名称，打开「实例」，在「账号」下选「在此设备退出」。",
       "howHomeScreen": "打开主屏幕上的 Avibe，在「更多」里选「退出登录」。",
       "howBrowser": "在那个浏览器里打开 {{host}}，点头像选「退出登录」（手机上在「更多」里）。",
       "howPushOnly": "只接收通知，没有登录：不用做什么。",

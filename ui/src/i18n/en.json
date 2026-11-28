@@ -8455,7 +8455,7 @@
       "howSelf": "This one: it clears itself and moves to the new address when you rename.",
       "howHost": "The computer running Avibe: nothing to do.",
       "howIphone": "In the Avibe App, open Instances, tap your account, then choose Sign out on this device.",
-      "howDesktop": "In Avibe Desktop, open Instances, choose your account under Account, then Sign out on this device.",
+      "howDesktop": "In Avibe Desktop, click the instance name at the bottom left to open Instances, then choose Sign out on this device under Account.",
       "howHomeScreen": "Open Avibe from the home screen and choose Sign out under More.",
       "howBrowser": "In that browser, open {{host}}, click your avatar and choose Sign out (on a phone, under More).",
       "howPushOnly": "Notifications only, not signed in: nothing to do.",
