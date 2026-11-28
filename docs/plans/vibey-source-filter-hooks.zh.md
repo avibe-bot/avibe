@@ -7,7 +7,7 @@
 - 开关存为 `model_hub.hosted_tools.web_search.source_filter`，仅机主可改：`GET` / `PUT /api/settings/experimental/source-filter`。从下一轮生效。
 - 开启后主模型不再原生搜索；`web_search` / `web_fetch` 每次逻辑调用前后各跑一次对应脚本。
 - 模型原始参数先走常规检查；before 改写的参数在真正发出时再检查一次，没通过就作为失败输出交给 after。
-- 每次运行最长 60 秒、stdout 最多 4 MB；有 `.venv` 用 `.venv` 的 Python，否则用 Avibe 自带的 Python。
+- 每次运行最长 600 秒、stdout 最多 4 MB；有 `.venv` 用 `.venv` 的 Python，否则用 Avibe 自带的 Python。
 - 脚本的 `result` 会映射到标准记录：搜索取 `url`、`title`、`snippet`、`page_age`（最多 50 条）；读取取 `url`、`final_url`、`title`、`content`。其他字段不传给模型。搜索失败但已找到部分来源时，失败输出也带上这些来源（`result.results`），after 可以保留其中一部分。真实执行过的尝试和费用照常保留。
 - 拦截记为 `source_filter_blocked`，脚本失败记为 `source_filter_failed`；每个脚本最近一次失败显示在设置页，直到它下次正常运行。
 
@@ -138,7 +138,7 @@
   - 不能使用托管工具，所以模型不会再去调用 `web_search` / `web_fetch`，钩子也就不会递归；
   - 不是上游供应商密钥，也不是主会话 token，碰不到 Vault、Avibe API 或其他会话。
 - **单独计费。** 每次推理都作为"钩子推理"记在这次工具调用名下，与工具本身的上游费用分开。
-- **时间。** 钩子的时间上限按调用模型的需要放宽（提议 60 秒，仍在工具总时限之内）。脚本给自己的 HTTP 请求设一个更短的超时，留出时间来输出结果。
+- **时间。** 每个钩子运行的时间上限为 600 秒，与上游工具的时限分开计算。脚本给自己的 HTTP 请求设一个更短的超时，留出时间来输出结果。
 
 ## 6. 真实发生了什么，与模型看到了什么
 
