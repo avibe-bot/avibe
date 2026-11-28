@@ -3309,7 +3309,7 @@ class AgentAuthService:
             logger.warning("Failed to clear V2Config after remove for %s: %s", backend, err)
 
         if backend == "antigravity":
-            self._bump_antigravity_auth_epoch()
+            await _native_auth_thread(self._bump_antigravity_auth_epoch)
 
         # Notify the live controller — reuse the same hook path the
         # OAuth-success flow uses, but skip the auth_mode persistence
@@ -5106,7 +5106,7 @@ class AgentAuthService:
                 raise
         finally:
             if backend == "antigravity":
-                self._bump_antigravity_auth_epoch()
+                await _native_auth_thread(self._bump_antigravity_auth_epoch)
 
     async def _terminate_web_flow(
         self,

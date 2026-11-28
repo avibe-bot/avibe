@@ -15,6 +15,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -7062,11 +7063,46 @@ _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH = 0
 _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH_LOCK = threading.Lock()
 
 
+def _antigravity_auth_generation_path() -> Path:
+    return paths.get_state_dir() / "antigravity-auth-generation"
+
+
+def _read_antigravity_auth_generation() -> str:
+    try:
+        return _antigravity_auth_generation_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def bump_antigravity_auth_epoch() -> None:
     """Invalidate in-flight Antigravity passive auth probes after auth cutovers."""
     global _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
     with _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH_LOCK:
         _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH += 1
+        generation = f"{_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH}:{uuid.uuid4().hex}"
+    path = _antigravity_auth_generation_path()
+    tmp_path: Optional[str] = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=path.parent,
+            encoding="utf-8",
+            delete=False,
+            prefix=".antigravity-auth-generation-",
+        ) as tmp_file:
+            tmp_path = tmp_file.name
+            tmp_file.write(f"{generation}\n")
+            tmp_file.flush()
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except OSError as exc:
+        logger.warning("Failed to persist Antigravity auth generation marker: %s", exc)
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 async def _coalesce_inflight_dict(
@@ -14537,6 +14573,7 @@ async def get_antigravity_auth_async() -> dict:
     default_cli = default_cli_for_backend("antigravity") or "agy"
 
     adc = await asyncio.to_thread(detect_antigravity_adc)
+    shared_generation = await asyncio.to_thread(_read_antigravity_auth_generation)
     epoch = _ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
     key = (
         configured_cli or default_cli,
@@ -14548,6 +14585,7 @@ async def get_antigravity_auth_async() -> dict:
         bool(adc["present"]),
         str(adc["path"] or ""),
         epoch,
+        shared_generation,
     )
 
     async def _probe() -> dict:

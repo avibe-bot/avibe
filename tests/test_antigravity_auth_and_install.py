@@ -1076,3 +1076,68 @@ async def test_antigravity_no_post_completion_cache_and_epoch_bump_forces_fresh_
     stale = await slow_task
     assert (stale["authenticated"], stale["active_auth_mode"]) == (False, "none")
     assert not api._ANTIGRAVITY_AUTH_INFLIGHT
+
+
+@pytest.mark.asyncio
+async def test_antigravity_cross_process_generation_marker_splits_inflight_probe(
+    fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IM login in the controller process invalidates an in-flight UI probe via the shared disk marker."""
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    probe_calls = 0
+
+    async def _probe_with_cross_process_login(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal probe_calls
+        probe_calls += 1
+        call_num = probe_calls
+        if call_num == 1:
+            first_started.set()
+            await release_first.wait()
+            return {
+                "ok": True,
+                "authenticated": False,
+                "credentials_present": False,
+                "uncertain": False,
+                "auth_methods": ["oauth-personal"],
+                "supports_logout": True,
+                "error": "not_logged_in",
+            }
+        return {
+            "ok": True,
+            "authenticated": True,
+            "credentials_present": True,
+            "uncertain": False,
+            "auth_methods": ["oauth-personal"],
+            "supports_logout": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _probe_with_cross_process_login)
+
+    # Start a slow passive-auth probe in the UI process before IM login finishes.
+    ui_slow_task = asyncio.create_task(api.get_antigravity_auth_async())
+    await first_started.wait()
+    pre_login_epoch = api._ANTIGRAVITY_AUTH_INFLIGHT_EPOCH
+    pre_login_generation = api._read_antigravity_auth_generation()
+
+    # Simulate IM login completing in the separate controller process while keeping
+    # the exact same configured auth_mode ("oauth-personal").
+    service = _make_auth_service()
+    await service._persist_backend_auth_mode("antigravity", "oauth-personal")
+    post_login_generation = api._read_antigravity_auth_generation()
+    assert post_login_generation
+    assert post_login_generation != pre_login_generation
+
+    # Reset the local in-memory epoch to simulate the UI process never observing
+    # the controller process's in-memory counter increment.
+    monkeypatch.setattr(api, "_ANTIGRAVITY_AUTH_INFLIGHT_EPOCH", pre_login_epoch)
+
+    fresh = await api.get_antigravity_auth_async()
+    assert (fresh["authenticated"], fresh["active_auth_mode"]) == (True, "oauth-personal")
+    assert probe_calls == 2
+
+    release_first.set()
+    stale = await ui_slow_task
+    assert (stale["authenticated"], stale["active_auth_mode"]) == (False, "none")
+    assert not api._ANTIGRAVITY_AUTH_INFLIGHT
