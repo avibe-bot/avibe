@@ -359,8 +359,8 @@ class CodexAgent(BaseAgent):
     def collect_running_rows(self, now: float) -> list[dict[str, Any]]:
         del now
         rows: list[dict[str, Any]] = []
-        session_mgr = getattr(self, "_session_mgr", None)
-        turn_registry = getattr(self, "_turn_registry", None)
+        session_mgr = self._session_mgr
+        turn_registry = self._turn_registry
         if session_mgr is None:
             return rows
 
@@ -423,7 +423,9 @@ class CodexAgent(BaseAgent):
         return rows
 
     def live_session_workdir(self, base_session_id: str) -> Optional[str]:
-        session_mgr = getattr(self, "_session_mgr", None)
+        session_mgr = self._session_mgr
+        if session_mgr is None:
+            return None
         get_cwd = getattr(session_mgr, "get_cwd", None)
         if not callable(get_cwd):
             return None
@@ -440,7 +442,7 @@ class CodexAgent(BaseAgent):
         base_session_id: Optional[str] = None,
     ) -> Optional[str]:
         del composite_key
-        registry = getattr(self, "_turn_registry", None)
+        registry = self._turn_registry
         if registry is None or not base_session_id:
             return None
         try:

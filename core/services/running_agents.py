@@ -38,6 +38,7 @@ from modules.agents.base import (
     safe_call as _safe_call,
     safe_items as _safe_items,
 )
+from modules.agents.catalog import AGENT_BACKEND_REGISTRY
 
 if TYPE_CHECKING:
     from core.controller import Controller
@@ -158,18 +159,15 @@ def _collect_claude(
     return rows
 
 
-_PREFERRED_AGENT_SNAPSHOT_ORDER = ("codex", "opencode", "vibey", "antigravity")
-
-
 def _collect_registered_agents(controller: "Controller", now: float) -> list[dict[str, Any]]:
     service = getattr(controller, "agent_service", None)
     agents = getattr(service, "agents", None)
     if not agents:
         return []
     items = dict(_safe_items(agents))
-    ordered_names: list[str] = [name for name in _PREFERRED_AGENT_SNAPSHOT_ORDER if name in items]
+    ordered_names = [name for name in AGENT_BACKEND_REGISTRY if name != "claude" and name in items]
     ordered_names.extend(
-        sorted(name for name in items if name != "claude" and name not in _PREFERRED_AGENT_SNAPSHOT_ORDER)
+        sorted(name for name in items if name != "claude" and name not in AGENT_BACKEND_REGISTRY)
     )
     rows: list[dict[str, Any]] = []
     for name in ordered_names:
@@ -178,7 +176,10 @@ def _collect_registered_agents(controller: "Controller", now: float) -> list[dic
             continue
         collect = getattr(agent, "collect_running_rows", None)
         if callable(collect):
-            rows.extend(collect(now))
+            try:
+                rows.extend(collect(now))
+            except Exception:  # noqa: BLE001
+                logger.warning("running_agents: failed to collect %s rows", name, exc_info=True)
     return rows
 
 
@@ -582,7 +583,18 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     end_session = getattr(agent, "end_session", None)
     if not callable(end_session):
         return {"ok": False, "error": "opencode_registries_unavailable"}
-    return await end_session(base_session_id)
+    try:
+        ended = await end_session(base_session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
+        return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
+    return {
+        "ok": True,
+        "action": "ended",
+        "backend": "opencode",
+        "interrupted": bool(ended.get("interrupted")),
+        "process_killed": bool(ended.get("process_killed")),
+    }
 
 
 async def _settle_workbench_turn(

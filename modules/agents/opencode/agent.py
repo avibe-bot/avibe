@@ -861,8 +861,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # OpenCode has no owned subprocess (HTTP server + poll loop), so no pid.
         # ``_active_requests`` only holds IN-FLIGHT turn tasks (popped in a finally
         # once the turn settles), so OpenCode only ever surfaces as ``active`` here.
-        active_requests = getattr(self, "_active_requests", {}) or {}
-        for base, task in safe_items(active_requests):
+        for base, task in safe_items(self._active_requests):
             if bool(getattr(task, "done", lambda: False)()):
                 continue  # finishing — being popped; not a live turn
             rows.append(
@@ -875,7 +874,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         return rows
 
     def live_session_workdir(self, base_session_id: str) -> Optional[str]:
-        session_mgr = getattr(self, "_session_manager", None)
+        session_mgr = self._session_manager
+        if session_mgr is None:
+            return None
         get_req = getattr(session_mgr, "get_request_session", None)
         if not callable(get_req):
             return None
@@ -894,8 +895,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         base_session_id: Optional[str] = None,
     ) -> Optional[str]:
         del composite_key
-        active_requests = getattr(self, "_active_requests", {}) or {}
-        task = active_requests.get(base_session_id) if base_session_id else None
+        task = self._active_requests.get(base_session_id) if base_session_id else None
         if task is None:
             return "idle"
         try:
@@ -903,10 +903,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         except Exception:  # noqa: BLE001
             return "active"
 
-    async def end_session(self, base_session_id: str) -> dict[str, Any]:
-        active_requests = getattr(self, "_active_requests", {}) or {}
-        task = active_requests.get(base_session_id)
-        session_mgr = getattr(self, "_session_manager", None)
+    async def end_session(self, base_session_id: str) -> dict[str, bool]:
+        task = self._active_requests.get(base_session_id)
+        session_mgr = self._session_manager
         get_req = getattr(session_mgr, "get_request_session", None)
         req_info = get_req(base_session_id) if callable(get_req) else None
         if task is not None and not task.done():
@@ -920,7 +919,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             except Exception:  # noqa: BLE001
                 logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
             task.cancel()
-            return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+            return {"interrupted": True, "process_killed": False}
 
         retire_req = getattr(session_mgr, "retire_request_session", None)
         if callable(retire_req):
@@ -929,31 +928,27 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             pop_req = getattr(session_mgr, "pop_request_session", None)
             if callable(pop_req):
                 pop_req(base_session_id)
-        getattr(self, "_session_last_activity", {}).pop(base_session_id, None)
+        self._session_last_activity.pop(base_session_id, None)
         list_all = getattr(session_mgr, "list_all", None)
         if not callable(list_all) or list_all():
-            return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
-        if any(not request.done() for request in active_requests.values()):
-            return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+            return {"interrupted": False, "process_killed": False}
+        if any(not request.done() for request in self._active_requests.values()):
+            return {"interrupted": False, "process_killed": False}
 
         # The serve process is shared across Sessions. Retiring the current
         # generation stops it now when idle; work bound to any generation keeps
         # that process until the work drains.
         retire = getattr(self, "retire_current_generation", None)
         if not callable(retire):
-            return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
-        try:
-            outcome = await retire()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
-            return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
+            return {"interrupted": False, "process_killed": False}
+        outcome = await retire()
         outcome = getattr(outcome, "value", outcome)
         if outcome == "failed":
             # The stop ran and the process survived; its record stays for a retry.
-            return {"ok": False, "error": "runtime_retirement_failed", "detail": "OpenCode server did not exit"}
+            raise RuntimeError("OpenCode server did not exit")
         # "draining": a lease or other work still binds the process, which stops
         # once that drains. Only a confirmed stop reports a killed process.
-        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": outcome == "stopped"}
+        return {"interrupted": False, "process_killed": outcome == "stopped"}
 
     async def _prepare_launch(
         self,

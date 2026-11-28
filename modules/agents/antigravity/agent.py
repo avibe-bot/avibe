@@ -2224,8 +2224,7 @@ class AntigravityAgent(BaseAgent):
         from modules.agents.base import build_running_agent_row, safe_items
 
         rows: list[dict[str, Any]] = []
-        sessions = getattr(self, "_sessions", {}) or {}
-        for runtime_key, session in safe_items(sessions):
+        for runtime_key, session in safe_items(self._sessions):
             turn = session.active_turn
             is_active = bool(turn is not None and not turn.settled)
             alive = not session.retired and session.client.is_alive
@@ -2258,8 +2257,7 @@ class AntigravityAgent(BaseAgent):
     def live_session_workdir(self, base_session_id: str) -> Optional[str]:
         from modules.agents.base import safe_items
 
-        sessions = getattr(self, "_sessions", {}) or {}
-        for _key, session in safe_items(sessions):
+        for _key, session in safe_items(self._sessions):
             if session.base_session_id == base_session_id and session.workdir:
                 return session.workdir
         return None
@@ -2272,9 +2270,8 @@ class AntigravityAgent(BaseAgent):
     ) -> Optional[str]:
         from modules.agents.base import safe_items
 
-        sessions = getattr(self, "_sessions", {}) or {}
         matched = False
-        for key, session in safe_items(sessions):
+        for key, session in safe_items(self._sessions):
             if (composite_key and key == composite_key) or (
                 base_session_id and session.base_session_id == base_session_id
             ):

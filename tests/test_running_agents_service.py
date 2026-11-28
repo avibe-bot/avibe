@@ -484,16 +484,33 @@ def test_snapshot_and_live_hooks_dispatch_to_custom_base_agent_in_deterministic_
         _FakeTurnRegistry({}),
         transport_for_session=_transport_by_cwd(mgr, {"/work/codex": _FakeTransport(7100)}),
     )
+    vibey = _CustomAgent("vibey", "vibey-base", "/work/vibey", "active")
+    opencode = _CustomAgent("opencode", "opencode-base", "/work/opencode", "active")
+    antigravity = _CustomAgent("antigravity", "agy-base", "/work/agy", "idle")
     claude_agent = _CustomAgent("claude", "should-be-skipped", "/work/skip", "active")
     zeta = _CustomAgent("zeta", "zeta-base", "/work/zeta", "active")
     alpha = _CustomAgent("alpha", "alpha-base", "/work/alpha", "idle")
     controller = _make_controller(
         codex=codex,
-        extra_agents={"zeta": zeta, "claude": claude_agent, "alpha": alpha},
+        extra_agents={
+            "zeta": zeta,
+            "antigravity": antigravity,
+            "claude": claude_agent,
+            "opencode": opencode,
+            "alpha": alpha,
+            "vibey": vibey,
+        },
     )
 
     snap = running_agents.snapshot_running_agents(controller)
-    assert [row["backend"] for row in snap["agents"]] == ["codex", "alpha", "zeta"]
+    assert [row["backend"] for row in snap["agents"]] == [
+        "vibey",
+        "opencode",
+        "codex",
+        "antigravity",
+        "alpha",
+        "zeta",
+    ]
     assert running_agents._live_workdir_for_backend(controller, "zeta", "zeta-base", None) == "/work/zeta"
     assert running_agents._live_workdir_for_backend(controller, "zeta", "other", None) is None
     assert (
@@ -508,6 +525,41 @@ def test_snapshot_and_live_hooks_dispatch_to_custom_base_agent_in_deterministic_
         )
         == "idle"
     )
+
+
+def test_snapshot_isolates_failing_backend_collector():
+    from modules.agents.base import BaseAgent
+
+    class _FailingAgent(BaseAgent):
+        def __init__(self, name: str):
+            self.name = name
+
+        async def handle_message(self, request):
+            raise NotImplementedError
+
+        def collect_running_rows(self, now: float) -> list[dict]:
+            del now
+            raise RuntimeError("backend collector exploded")
+
+    oc = _opencode_shell(active_requests={"base-oc": _FakeTask(done=False)})
+    mgr = _FakeSessionMgr({"base-codex": "/work/codex"})
+    codex = _codex_shell(
+        mgr,
+        _FakeTurnRegistry({}),
+        transport_for_session=_transport_by_cwd(mgr, {"/work/codex": _FakeTransport(7200)}),
+    )
+    controller = _make_controller(
+        opencode=oc,
+        codex=codex,
+        vibey=_FailingAgent("vibey"),
+    )
+
+    snap = running_agents.snapshot_running_agents(controller)
+    assert snap["ok"] is True
+    assert [(row["backend"], row["base_session_id"]) for row in snap["agents"]] == [
+        ("opencode", "base-oc"),
+        ("codex", "base-codex"),
+    ]
 
 
 def test_vibey_adapter_inspection_methods():
@@ -1225,6 +1277,69 @@ def test_codex_end_keeps_a_successor_started_during_its_stop():
         assert codex_transports(agent) == {"/w": successor}
 
     asyncio.run(exercise())
+
+
+def test_opencode_end_session_returns_status_dict_and_raises_on_failed_retirement():
+    class _Task:
+        def __init__(self):
+            self.cancelled = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancelled = True
+
+    active_task = _Task()
+    active_agent = _opencode_shell(
+        active_requests={"b-active": active_task},
+        session_manager=types.SimpleNamespace(get_request_session=lambda _b: None),
+    )
+    assert asyncio.run(active_agent.end_session("b-active")) == {
+        "interrupted": True,
+        "process_killed": False,
+    }
+    assert active_task.cancelled is True
+
+    stopped_agent = _opencode_shell(
+        active_requests={},
+        session_manager=types.SimpleNamespace(
+            get_request_session=lambda _b: None,
+            pop_request_session=lambda _b: None,
+            list_all=lambda: {},
+        ),
+        retire_current_generation=_AsyncFlag(ret="stopped"),
+    )
+    assert asyncio.run(stopped_agent.end_session("b-idle")) == {
+        "interrupted": False,
+        "process_killed": True,
+    }
+
+    draining_agent = _opencode_shell(
+        active_requests={},
+        session_manager=types.SimpleNamespace(
+            get_request_session=lambda _b: None,
+            pop_request_session=lambda _b: None,
+            list_all=lambda: {},
+        ),
+        retire_current_generation=_AsyncFlag(ret="draining"),
+    )
+    assert asyncio.run(draining_agent.end_session("b-draining")) == {
+        "interrupted": False,
+        "process_killed": False,
+    }
+
+    failed_agent = _opencode_shell(
+        active_requests={},
+        session_manager=types.SimpleNamespace(
+            get_request_session=lambda _b: None,
+            pop_request_session=lambda _b: None,
+            list_all=lambda: {},
+        ),
+        retire_current_generation=_AsyncFlag(ret="failed"),
+    )
+    with pytest.raises(RuntimeError, match="OpenCode server did not exit"):
+        asyncio.run(failed_agent.end_session("b-failed"))
 
 
 def test_end_opencode_cancels_active_task():

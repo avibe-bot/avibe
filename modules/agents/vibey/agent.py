@@ -925,7 +925,7 @@ class VibeyAgent(BaseAgent):
         rows: list[dict[str, Any]] = []
         # Vibey runs in process, so no pid. A Session's runtime holds its Turn's run
         # until the run settles; like OpenCode, Vibey only ever surfaces as ``active``.
-        for _session_id, runtime in safe_items(getattr(self, "_runtimes", {}) or {}):
+        for _session_id, runtime in safe_items(self._runtimes):
             run = getattr(runtime, "run", None)
             if run is None or run.settled:
                 continue
@@ -940,7 +940,7 @@ class VibeyAgent(BaseAgent):
         return rows
 
     def live_session_workdir(self, base_session_id: str) -> Optional[str]:
-        for _session_id, runtime in safe_items(getattr(self, "_runtimes", {}) or {}):
+        for _session_id, runtime in safe_items(self._runtimes):
             run = getattr(runtime, "run", None)
             if run is None or run.settled:
                 continue
@@ -954,7 +954,7 @@ class VibeyAgent(BaseAgent):
         composite_key: Optional[str] = None,
         base_session_id: Optional[str] = None,
     ) -> Optional[str]:
-        for _session_id, runtime in safe_items(getattr(self, "_runtimes", {}) or {}):
+        for _session_id, runtime in safe_items(self._runtimes):
             run = getattr(runtime, "run", None)
             if run is None or run.settled:
                 continue

@@ -18,7 +18,11 @@ from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.resource_governance import AgentResourceFailure
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
-from modules.agents.base import BaseAgent as RealBaseAgent
+from modules.agents.base import (
+    BaseAgent as RealBaseAgent,
+    build_running_agent_row,
+    safe_call,
+)
 from modules.agents.codex.transport import CodexResponseTooLargeError, CodexRPCError
 from modules.agents.codex.session import CodexSessionManager as RealCodexSessionManager
 from tests.codex_generation_support import (
@@ -67,10 +71,15 @@ _codex_pkg = types.ModuleType("modules.agents.codex")
 
 _base_module = types.ModuleType("modules.agents.base")
 setattr(_base_module, "AgentRequest", object)
+setattr(_base_module, "build_running_agent_row", build_running_agent_row)
+setattr(_base_module, "safe_call", safe_call)
 
 
 class _BaseAgent:
     render_input = RealBaseAgent.render_input
+    collect_running_rows = RealBaseAgent.collect_running_rows
+    live_session_workdir = RealBaseAgent.live_session_workdir
+    live_session_state = RealBaseAgent.live_session_state
 
     def __init__(self, controller):
         self.controller = controller
