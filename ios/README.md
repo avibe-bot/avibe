@@ -1917,13 +1917,17 @@ production instance is used.
 
 ## Turn Live Activities
 
-`TurnActivityCoordinator.shipsLockScreenProgress` is the switch (on since
-11-27, after the black-card fix; it was off from 11-26). Off, the stored
-setting is forced off, nothing starts a card, and a card an earlier build left
-ends at launch and when the App comes to the front. Switching off also means removing
-`lockScreenProgress` from `NativeShellMetadata.capabilities` by hand.
+`TurnActivityCoordinator.shipsLockScreenProgress` is the switch. **It is off
+again (11-28)** for the public build until the owner approves the card on his
+phone (off 11-26, on 11-27). Off, the shell does not announce
+`lockScreenProgress`, so no page shows the setting; the setting reads off (the
+user's stored choice is kept for a later switched-on build), nothing starts a card, and a card an earlier build left ends at launch and
+when the App comes to the front. Switching on again also means adding
+`lockScreenProgress: 1` to `NativeShellMetadata.capabilities`. The DEBUG Turn
+card fixture (`TurnActivityFixtureLaunch`) starts its card directly, so the
+layout UI test runs either way.
 
-The shell announces `lockScreenProgress: 1`: `liveActivity.setting`,
+When shipped, the shell announces `lockScreenProgress: 1`: `liveActivity.setting`,
 `setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
 `stop` calls return `unsupported`. The shell never announces `liveActivities`,
 so older Web bundles do not activate the retired entry's bridge observers. The
