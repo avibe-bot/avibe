@@ -267,11 +267,11 @@ Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one conn
 | `on_path` | arrives directly, by its stream and by its latest request |
 | `asked` | has asked the shell and waits for its answer |
 | `quiet_frame`, `quiet_socket`, `quiet_request` | waits for a quiet page; what keeps it busy, the longest-lived first (a same-origin frame, a terminal, a request) |
-| `verdict` | waits for the last hand-over's stream to say how it came in |
+| `verdict` | has not been told how it arrives: the last hand-over's stream, or a new page's first one, has not said yet |
 | `not_ours` | still arrives another way after a hand-over that closed nothing and kept nothing: its connections are not ones the shell can close |
 | `cap` | is held by the bounds on how many hand-overs |
 | `spacing` | is too soon after the last hand-over |
-| `idle` | wants a hand-over, is held by none of the above, and has no attempt under way. It should never last; it is named so that it shows if it does |
+| `idle` | arrives another way, wants a hand-over, is held by none of the above, and has no attempt under way. It should never last; it is named so that it shows if it does |
 
 It rides one request and no other: the page's own read of `/api/session` (`X-Avibe-Page`, `ui/src/lib/apiFetch.ts`), which begins every connect of the event stream and follows every gap in it. With the word that read is made same-origin (`mode: 'same-origin'`), so the header cannot be carried to another origin: a redirect of that read to another origin, which never gave the page an answer it could use, is now an error. The instance therefore hears the word at every return, reconnect and hand-over, as the state the page stands in then, not every minute. It is sent when the word changes and otherwise at most once in ten seconds. After a return that held the page's requests (section 8), the first such read carries how long, once, as `<word>;hold=<ms>` (0 to 1000, where 1000 is the cap and may mean longer). A fixed word and one bounded number, nothing else; only a page that can hand over sends it.
 

@@ -4172,9 +4172,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // (lib/pageReport): the first that applies of `attemptDirectHandover`'s
   // gates, each by its word, and of what its last attempt found (`not_ours`,
   // before the bounds and the spacing, so that it names the cause while they
-  // hold). `idle` is what is left when none of them holds and no attempt is
-  // under way; an attempt that found no subscriber to the stream reads so
-  // too.
+  // hold). `idle` is what is left when the page has been told it arrives
+  // another way, none of them holds, and no attempt is under way; an attempt
+  // that found no subscriber to the stream reads so too.
   const directHandoverWhy = (): PageWhy | null => {
     const state = directHandoverRef.current;
     if (!nativeDirectHandoverAvailable() || state.disposed) return null;
@@ -4189,11 +4189,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // write this word leaves with is the request that keeps it busy.
     if (state.running) return `quiet_${pageConnectionsHeldBy() ?? 'request'}`;
     if (state.awaitingVerdict && !state.arrived) return 'verdict';
-    // The one hand-over of this stretch is spent. A page that has not been
-    // told how it arrives is left alone until it is; one that arrives
-    // another way is held by the bound (a shell that names no path arms
-    // again only when its preference leaves the direct path).
-    if (!state.armed) return pageVia() === null ? 'verdict' : 'cap';
+    // Not told yet how it arrives (its stream is still opening, or has not
+    // said): nothing acts until it is, whether or not a hand-over was made.
+    // Every page is here between its load and its stream's first word.
+    if (pageVia() === null) return 'verdict';
+    // The one hand-over of this stretch is spent, and the page arrives
+    // another way: held by the bound (a shell that names no path arms again
+    // only when its preference leaves the direct path).
+    if (!state.armed) return 'cap';
     if (state.closedNothing && pageVia() === 'other') return 'not_ours';
     const sinceLast = Date.now() - state.lastAt;
     if (
