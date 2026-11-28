@@ -24,8 +24,10 @@ at `507d0b04`. Backend routes and production issuance remain separate work.
 
 The pairing fingerprint reuses the existing pairing transaction's identity
 fields, including its credentials; it contains their digest, not their values.
-A changed instance ID, hostname or pairing identity discards every file, pending
-keys included. The existing config-save pairing hook retires files **before**
+A changed instance ID, hostname or pairing identity retires every key and chain,
+pending keys included. If a hostname retry deadline still cannot be transferred
+to its ledger, the existing manifest retains only the hostname and timestamp;
+no new key is allocated until that transfer succeeds. The config-save pairing hook retires files **before**
 pairing replacement/clear is published. A failed config publication may therefore
 lose the optional direct path, never preserve an old key for a new pairing.
 Retirement failure is reported with a fixed warning and does not break pairing;

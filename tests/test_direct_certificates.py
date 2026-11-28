@@ -947,6 +947,43 @@ def test_server_floor_survives_repair_and_is_checked_at_final_admission(setup, m
     assert due(env, waiting).status == 'queued' and env.backend.calls[-1][1] == 'certificates/orders'
 
 
+@pytest.mark.skipif(os.name != 'posix' or getattr(os, 'geteuid', lambda: 0)() == 0,
+                    reason='requires unprivileged POSIX directory permissions')
+@pytest.mark.parametrize('recover_before_repair', [False, True])
+def test_retirement_reconciles_manifest_floor_after_budget_directory_outage(setup, recover_before_repair):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    floor = queued.next_poll_at + 8 * 3600
+    env.backend.advance_response = dict(status='failed', public_key_fingerprint=fp, certificate_pem=None,
+                                        failure_origin='server', retry_at=datetime.fromtimestamp(floor, timezone.utc).isoformat())
+    ledger_dir = certificates._HostOrders.path(HOST).parent
+    mode = stat.S_IMODE(ledger_dir.stat().st_mode)
+    ledger_dir.chmod(0o500)
+    try:
+        assert due(env, queued).status == 'pending'
+        calls = len(env.backend.calls)
+        if recover_before_repair:
+            ledger_dir.chmod(mode)
+        discard_direct_certificates()
+        env.config.remote_access.vibe_cloud.instance_secret = 'replacement-fixture'
+        env.config.save()
+        if not recover_before_repair:
+            env.client = DirectCertificateClient()
+            assert env.client.poll(allowed=True).last_error_code == 'local_state_unavailable'
+            assert len(env.backend.calls) == calls
+            remaining = list(certificates._directory().iterdir())
+            assert [path.name for path in remaining] == ['state.json']
+            assert json.loads(remaining[0].read_bytes()) == {'hostname': HOST, 'uncommitted_floor': floor}
+    finally:
+        ledger_dir.chmod(mode)
+    env.client = DirectCertificateClient()
+    env.clock.now = floor - 1
+    assert env.client.poll(allowed=True).next_poll_at == floor and len(env.backend.calls) == calls
+    env.clock.now = floor
+    assert env.client.poll(allowed=True).status == 'queued' and len(env.backend.calls) == calls + 1
+
+
 def test_server_fault_restores_displaced_start_without_erasing_prior_history(setup):
     env = setup
     history = [env.clock.now - t for t in (300, 200, 100)]

@@ -129,6 +129,9 @@ class _State:
     # A bounded pre-charge snapshot also restores the oldest displaced slot.
     start_charge: list[float] | None = None  # Previous starts followed by this admission's timestamp.
     server_failures: int = 0
+    # If hostname accounting could not commit, retirement must transfer this
+    # floor before discarding the manifest. It carries no pairing authority.
+    uncommitted_floor: float = 0.0
 
 
 @dataclass
@@ -179,23 +182,12 @@ class _HostOrders:
 
     @classmethod
     def replacement_floor(cls, hostname: str) -> float:
-        # Both files contain only an absolute time. Neither belongs to a key
-        # or pairing; a replacement must honor the later readable floor.
-        path = cls.path(hostname)
-        return max(cls._read_floor(path.with_suffix('.floor')), cls._read_floor(path.with_suffix('.recovery')))
+        return cls._read_floor(cls.path(hostname).with_suffix('.floor'))
 
     @classmethod
     def defer_replacement(cls, hostname: str, floor: float) -> None:
-        if floor <= cls.replacement_floor(hostname):
-            return
-        path = cls.path(hostname)
-        try:
-            write_atomic(path.with_suffix('.floor'), json.dumps(floor))
-        except OSError:
-            # Leave the order pollable and the reservation intact. The manifest
-            # alone is insufficient: a re-pair can delete it before that poll.
-            write_atomic(path.with_suffix('.recovery'), json.dumps(floor))
-            raise
+        if floor > cls.replacement_floor(hostname):
+            write_atomic(cls.path(hostname).with_suffix('.floor'), json.dumps(floor))
 
     def start_deadline(self, hostname: str) -> float:
         return max(self.deadline(), self.replacement_floor(hostname))
@@ -253,6 +245,31 @@ def _discard() -> None:
     if directory.is_symlink():
         directory.unlink()
     elif directory.exists():
+        manifest = directory / 'state.json'
+        # Retire key/chain material even if the independent hostname ledger is
+        # still unwritable. Only the manifest can contain a pending deadline.
+        for entry in directory.iterdir():
+            if entry != manifest:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+        try:
+            payload = json.loads(_read_private(manifest))
+        except (FileNotFoundError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            floor, host = payload.get('uncommitted_floor'), payload.get('hostname')
+            if type(floor) in (int, float) and math.isfinite(floor) and floor > 0 and isinstance(host, str):
+                # The hostname ledger and manifest can fail independently. Never
+                # leave old keys in service just to remember a retry deadline.
+                try:
+                    _HostOrders.defer_replacement(host, floor)
+                except (OSError, ValueError, TypeError):
+                    retired = {'hostname': host, 'uncommitted_floor': floor}
+                    if retired != payload:
+                        write_atomic(manifest, json.dumps(retired))
+                    raise  # Do not replace the sole remaining floor with a new manifest.
         shutil.rmtree(directory)
 
 
@@ -343,7 +360,8 @@ def _load() -> _State | None:
                 or state.status not in _ORDER_STATES or state.purpose not in {"first_issuance", "key_rotation"}
                 or type(state.blocked) is not bool or type(state.failures) is not int or not 0 <= state.failures <= 8
                 or any(not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0
-                       for value in (state.next_poll_at, state.order_not_before, state.next_current_at, state.current_not_before, state.request_not_before))
+                       for value in (state.next_poll_at, state.order_not_before, state.next_current_at, state.current_not_before,
+                                     state.request_not_before, state.uncommitted_floor))
                 or type(state.server_failures) is not int or not 0 <= state.server_failures <= 8
                 or (state.start_charge is not None and (
                     not isinstance(state.start_charge, list) or not 1 <= len(state.start_charge) <= _ORDER_LIMIT + 1
@@ -874,7 +892,8 @@ class DirectCertificateClient:
                 return changed
         if not current and status == 'failed':
             failures = min(8, state.server_failures + 1) if server_fault else 0
-            floor = max(retry_at, now + min(_MAX_BACKOFF, 60 * 2 ** (failures - 1)) if failures else 0.0)
+            floor = max(retry_at, state.uncommitted_floor,
+                        now + min(_MAX_BACKOFF, 60 * 2 ** (failures - 1)) if failures else 0.0)
             # The hostname floor must be durable before releasing any charge.
             # On storage failure retain the validated order ID and advance that
             # same order again (even if this was an immediate start response).
@@ -891,9 +910,11 @@ class DirectCertificateClient:
                     budget.record_failure(state.hostname, now)
             except (OSError, ValueError, TypeError):
                 state.status, state.last_error_code = 'pending', 'local_state_unavailable'
+                state.uncommitted_floor = floor
                 state.order_not_before = max(state.order_not_before, floor)
                 state.next_poll_at = max(next_poll, state.request_not_before)
                 return changed
+            state.uncommitted_floor = 0.0
             state.server_failures = failures
             state.start_charge = None
             state.order_not_before = max(state.order_not_before, floor, budget.deadline())
