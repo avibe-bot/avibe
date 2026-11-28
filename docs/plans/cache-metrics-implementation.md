@@ -19,6 +19,8 @@ Owner: `system-prompt-cache-tiers.md`, Metrics. Base: merged PR #3117. Only Vibe
 
 Each receipt has `source_id` and `source_kind` (`official_api_key`, `relay_key`, `subscription`, or `unknown`). Use these fields, not the request's initially selected route. Hub attribution comes from the serving hop at launch, not today's Source configuration. Unverified or unavailable identity is null; missing classification is `unknown`. Receipts contain no body, URL or credential. A completed pause and its completed follow-up are separate entries. Refused requests, partials and attempts stopped before send contribute no receipt. Historical NULL means unmeasured; `[]` means there was no observed completed POST. As with other request diagnostics, this is not a crash-proof billing ledger.
 
+Sessionless Bot handle proposals are `purpose = 'bot_handle'`, with a null `session_id`; a completed request counts even when its answer is not a valid handle. Their receipts use the existing audit event store, not a synthetic conversation.
+
 For upload totals, expand **only** `successful_wires`: `thread_attempts` describes some of the same POSTs plus failed attempts, and `cache_state` is a recovery snapshot, not additional traffic.
 
 ```sql

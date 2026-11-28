@@ -190,9 +190,9 @@ CACHE_VIEWS = {
                CASE WHEN json_type({_EVENT}, '$.cache') = 'object' THEN json_extract({_EVENT}, '$.cache') ELSE '{{}}' END,
                CASE WHEN json_type({_EVENT}, '$.usage') = 'object' THEN json_extract({_EVENT}, '$.usage') ELSE '{{}}' END,
                json_extract({_EVENT}, '$.cache.provider'), json_extract({_EVENT}, '$.cache.protocol'),
-               json_extract({_EVENT}, '$.cache.model'), 'attempt'
+               json_extract({_EVENT}, '$.cache.model'), CASE WHEN a.event_type = 'bot_handle_request' THEN 'bot_handle' ELSE 'attempt' END
         FROM agent_events a
-        WHERE a.visibility = 'audit' AND a.event_type = 'model_attempt'
+        WHERE a.visibility = 'audit' AND a.event_type IN ('model_attempt', 'bot_handle_request')
               AND json_type({_EVENT}, '$.cache') = 'object'
         UNION ALL
         SELECT a.id || ':' || j.key, a.session_id, a.turn_id, a.created_at,

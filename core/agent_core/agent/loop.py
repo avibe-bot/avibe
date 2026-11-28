@@ -947,7 +947,8 @@ class Agent:
         for facts in dangling.values():
             if facts['successful_wires']:
                 await self._cleanup(lambda facts=facts: self.store.append_audit(
-                    self.session_id, 'attempt', {'version': 1, 'error': None, 'cache': facts},
+                    self.session_id, 'attempt', {'version': 1, 'error': None, 'cache': facts,
+                                                 'cache_state': list(self._cache_tracker.latest.values())},
                 ))
         await self._flush_diagnostics(emit)
         try:
@@ -1134,6 +1135,7 @@ class Agent:
                                     cache_write_basis=wire_attempt.get("cache_write_basis", "unknown"),
                                 )
                                 payload["cache"] = facts
+                                payload["cache_state"] = list(self._cache_tracker.latest.values())
                             await self._audit("attempt", payload)
 
                         observation.settle_discard = settle_discard

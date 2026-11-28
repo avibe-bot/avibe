@@ -144,6 +144,48 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
     )
     assert [(row['source'], row['bytes']) for row in totals.rows] == [('src_fixture001', 3 * 450)]
 
+@pytest.mark.parametrize('ending,proposal', [('success', 'bird'), ('invalid_handle', None), ('partial', None)])
+async def test_sessionless_bot_proposal_appears_once_in_wire_query(state_db, monkeypatch, ending, proposal):
+    from types import SimpleNamespace
+    import httpx
+    from core.bot_handles import propose_handle_with_model
+    from core.agent_core.ai.openai_chat import OpenAIChatAdapter
+    from modules.agents.model_hub import ModelHubLaunch
+    from modules.agents.vibey import models
+    from storage.db import create_sqlite_engine
+
+    class Runtime:
+        async def resolve(self, *args, **kwargs):
+            return ModelHubLaunch(backend='vibey', channel='hub', requested_model='m', target_model='m', runtime_model='m',
+                                  source_id='src_requested01', source_identity='fixture', gateway_base_url='https://hub.invalid',
+                                  gateway_token='fixture', protocol='openai_chat', provider='openai')
+
+    sent = []
+    def respond(wire):
+        sent.append(len(wire.content))
+        answer = 'two separate words!' if ending == 'invalid_handle' else 'bird'
+        body = 'data: ' + json.dumps({'choices': [{'delta': {'content': answer}}]}) + '\n\n'
+        if ending != 'partial':
+            body += 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        return httpx.Response(200, headers={'x-avibe-source-kind': 'relay_key', 'x-avibe-served-hop': json.dumps(
+            {'source': 'src_served0001', 'model': 'm', 'api': 'openai_chat', 'provider': 'openai'})}, text=body)
+
+    engine = create_sqlite_engine(state_db)
+    store = SimpleNamespace(engine=engine, get_main_bot_agent=lambda: SimpleNamespace(model='m'))
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            monkeypatch.setattr(models, 'registry_providers', lambda **_: lambda _: OpenAIChatAdapter(client, gateway=True))
+            assert await propose_handle_with_model(SimpleNamespace(model_hub_runtime=Runtime(), vibe_agent_store=store),
+                                                   display_name='小鸟') == proposal
+        rows = run_read_only_query('select session_id, purpose, successful_wires from cache_requests', db_path=state_db,
+                                   page_request=PageRequest(), user_context=instance_owner_context()).rows
+        assert len(sent) == 1
+        assert [(r['session_id'], r['purpose'], json.loads(r['successful_wires'])) for r in rows] == ([] if ending == 'partial' else [
+            (None, 'bot_handle', [{'body_bytes': sent[0], 'source_id': 'src_served0001', 'source_kind': 'relay_key'}])])
+    finally:
+        engine.dispose()
+
+
 def test_cache_view_requires_member_access_for_audit_union(state_db: Path) -> None:
     with sqlite3.connect(state_db) as conn:
         _session(conn)

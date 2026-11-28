@@ -53,6 +53,28 @@ async def test_untrusted_attribution_never_defaults_to_the_requested_route(repor
     assert req.successful_wires == [{"body_bytes": len(sent[0].content), "source_id": expected, "source_kind": "unknown"}]
 
 
+async def test_injected_resolution_cannot_attribute_another_sources_kind():
+    from core.agent_core.ai._common import ServedHop, default_served_hop_resolver
+    from core.agent_core.ai.openai_chat import OpenAIChatAdapter
+
+    req = replace(_direct_request('openai_chat'), successful_wires=[])
+    headers = {**_served(source='src_original01'), 'x-avibe-source-kind': 'subscription'}
+    sent = []
+
+    def reply(wire):
+        sent.append(wire)
+        return httpx.Response(200, text=CHAT, headers=headers)
+
+    def resolver(headers):
+        return ServedHop(default_served_hop_resolver(headers).origin, 'src_override01')
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        adapter = OpenAIChatAdapter(client, gateway=True, served_hop_resolver=resolver)
+        events = [e async for e in adapter.stream(req, CancelToken())]
+    assert isinstance(events[-1], Done)
+    assert req.successful_wires == [{'source_id': 'src_override01', 'source_kind': 'unknown', 'body_bytes': len(sent[0].content)}]
+
+
 async def test_stop_before_send_leaves_no_receipt():
     req = replace(_direct_request("openai_chat"), successful_wires=[])
     cancel = CancelToken()

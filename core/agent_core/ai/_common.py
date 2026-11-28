@@ -2071,6 +2071,11 @@ async def drive_sse_stream(
                             # Same bound as the Hub's complete served-hop report. Never retain an arbitrary header.
                             source = source if source and len(source) <= 4096 and _SOURCE_ID.fullmatch(source) else None
                             kind = response.headers.get("x-avibe-source-kind") if source and gateway else None
+                            if kind and resolver is not None:
+                                # An injected resolver may identify a different hop than the Hub header.
+                                reported = default_served_hop_resolver(response.headers)
+                                if reported is None or reported.source_id != source:
+                                    kind = None
                             receipt = {
                                 "body_bytes": body_bytes, "source_id": source,
                                 "source_kind": kind if kind in ("official_api_key", "relay_key", "subscription") else "unknown",
@@ -2111,6 +2116,9 @@ async def drive_sse_stream(
                 # long again, so the failure ends the turn: neither replayed nor
                 # continued.
                 candidate = replace(candidate, retryable=False, continuable=False, silence_exhausted=True)
+            # Once the provider completed this POST, even a Stop during artifact cleanup cannot un-send it.
+            if isinstance(candidate, Done):
+                complete_wire()
             # Decided before the artifact's write is awaited: diagnostic storage never counts as provider silence.
             if attempt is not None:
                 await _await_artifact(
@@ -2127,8 +2135,6 @@ async def drive_sse_stream(
             # and sanitize exactly once at the shared driver boundary.
             assembler.end_driver()
             terminal = assembler.terminal(candidate)
-            if isinstance(terminal, Done):
-                complete_wire()
             if terminal is not None:
                 yield terminal
     finally:
