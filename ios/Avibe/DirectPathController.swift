@@ -234,6 +234,12 @@ final class DirectRouteOwner {
     /// one of them: `DirectPathController.lateRoute`.)
     private var excluded: Set<StoreHost> = []
 
+    /// Every host some store's route lists now. Unlike `allowedHosts`, a
+    /// host taken off its last route (`remove`) is not among them.
+    var routedHosts: Set<String> {
+        Set(hostsByStore.values.joined().map(\.name))
+    }
+
     func routes(_ host: String, store: UUID) -> Bool {
         hostsByStore[store]?.contains { $0.name == host } == true
     }
@@ -1777,12 +1783,16 @@ final class DirectPathController {
 
     /// Whether a CONNECT for `host` is carried though no route lists it:
     /// only the control plane's own host, only while it is exactly the
-    /// parent domain of a host some route lists, and not once it is routed
-    /// itself (its own policy then decides).
+    /// parent domain of a host some route lists now, and not once it is
+    /// routed itself (its own policy then decides). "Now" is read from the
+    /// routes as they stand, not from every host ever routed: when the last
+    /// host under it leaves its route (`bypassListener`), WebKit stops
+    /// sending the parent here, and anything else on this device that asks
+    /// the loopback port for it is refused again.
     private func carriesControlPlane(_ host: String) -> Bool {
         host == controlPlaneHost
             && !routeOwner.allowedHosts.contains(host)
-            && DirectAuthority.isParentDomain(host, ofAny: routeOwner.allowedHosts)
+            && DirectAuthority.isParentDomain(host, ofAny: routeOwner.routedHosts)
     }
 
     // MARK: Plans

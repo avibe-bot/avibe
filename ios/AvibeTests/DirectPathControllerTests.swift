@@ -506,6 +506,34 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(controller.plan(for: try XCTUnwrap(DirectAuthority(host: "example.org"))))
     }
 
+    /// The exception lasts only while some route still lists a host under
+    /// the control plane's: with two such hosts, taking one off its route
+    /// (`bypassListener`) changes nothing; taking the last one off refuses a
+    /// new CONNECT for the parent and makes a plan sampled earlier stale,
+    /// though the selection has not changed.
+    @MainActor
+    func testTheControlPlaneHostIsNotCarriedOnceItsLastRoutedHostLeftTheRoute() async throws {
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        let first = try XCTUnwrap(URL(string: "https://team.\(Harness.controlPlaneHost)"))
+        let second = try XCTUnwrap(URL(string: "https://lab.\(Harness.controlPlaneHost)"))
+        let service = try XCTUnwrap(DirectAuthority(host: Harness.controlPlaneHost))
+        try await harness.signIn()
+        try await harness.select("instance-under-service")
+        try await harness.select("instance-under-service-2")
+        let plan = try XCTUnwrap(controller.plan(for: service))
+        XCTAssertTrue(plan.isCurrent())
+
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: first))
+        XCTAssertTrue(plan.isCurrent())
+        XCTAssertNotNil(controller.plan(for: service))
+
+        XCTAssertTrue(controller.bypassListener(forInstanceURL: second))
+        XCTAssertTrue(harness.currentRoutes.isEmpty)
+        XCTAssertFalse(plan.isCurrent())
+        XCTAssertNil(controller.plan(for: service))
+    }
+
     /// A tunnel that never goes quiet does not hold the choice up for good.
     @MainActor
     func testTheStrictCutoverClosesATunnelStillBusyAtItsBound() async throws {
@@ -2946,6 +2974,7 @@ private final class Harness {
                 // Under the control plane's host (`controlPlaneHost`), as an
                 // instance is under avibe.bot; and under another domain.
                 instance("instance-under-service", "https://team.\(controlPlaneHost)"),
+                instance("instance-under-service-2", "https://lab.\(controlPlaneHost)"),
                 instance("instance-under-other", "https://app.other.example"),
             ]
         )

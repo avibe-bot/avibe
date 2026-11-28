@@ -818,8 +818,9 @@ conforms to. Without a conforming controller the App offers neither:
   domain of a routed host. It goes to that host itself, on port 443,
   through the public opener and its address policy, under every choice,
   never over the direct path, in no count of the instance's connections,
-  and fenced by the selection and account like any other plan. The parent
-  of an instance on any other domain is refused as before.
+  and fenced by the selection and account like any other plan. Once the
+  last host under it has left its route (the fallback above), it is refused
+  again. The parent of an instance on any other domain is refused as before.
 - **What does not work under it.** A request the App makes for the instance
   after it left the foreground: the listener is closed there and the route
   has no fail-over. Today that is the Lock Screen card's registration when
