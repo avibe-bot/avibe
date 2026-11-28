@@ -152,6 +152,7 @@ def predecessor(tmp_path):
             (importer.JSON_IMPORT_MARKER, "2026-11-12T12:00:00+00:00"),
             (importer.BACKGROUND_IMPORT_MARKER, "2026-11-12T12:00:00+00:00"),
             (DATA_MARKER, COMPLETED),
+            (importer.PROVISION_EXPIRY_MARKER, True),
         ):
             conn.execute("INSERT INTO state_meta(key,value_json,updated_at) VALUES (?,?,'old')", (key, json.dumps(value)))
         conn.execute(

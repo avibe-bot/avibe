@@ -252,6 +252,66 @@ def test_provision_request_does_not_store_derived_delivery_as_reply_anchor(vault
     assert json.loads(stored["requester"])["turn_id"] == "turn_active"
 
 
+@pytest.fixture
+def provision_clock(monkeypatch):
+    class Clock(datetime):
+        instant = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.instant.astimezone(tz)
+
+    monkeypatch.setattr(vs, "datetime", Clock)
+    return Clock
+
+
+def test_provision_request_expiry_retires_card_and_arms_callback(vault, provision_clock):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "WANTED", requester={"session_id": "ses_active"})
+        deadline = provision_clock.instant + timedelta(days=7)
+        assert req["expires_at"] == deadline.isoformat()
+        provision_clock.instant = deadline - timedelta(microseconds=1)
+        assert [r["id"] for r in vs.list_requests(conn)] == [req["id"]]
+        provision_clock.instant = deadline
+        assert vs.list_requests(conn) == []
+        assert vs.get_request(conn, req["id"])["status"] == "expired"
+        (terminal,) = vs.list_pending_request_callbacks(conn)
+        callback = vs.resolve_request_callback(terminal)
+        assert callback.session_id == "ses_active" and "Re-request" in callback.message
+
+
+def test_provision_deadline_during_submit_rolls_back_envelope_and_sibling_decisions(vault, provision_clock):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "WANTED")
+        deadline = datetime.fromisoformat(req["expires_at"])
+        provision_clock.instant = deadline - timedelta(seconds=1)
+        sibling = vs.create_provision_request(conn, "WANTED")
+
+    @event.listens_for(vault, "after_execute")
+    def cross_deadline(conn, clauseelement, multiparams, params, execution_options, result):
+        if getattr(clauseelement, "is_insert", False) and clauseelement.table is vault_secrets:
+            provision_clock.instant = deadline
+
+    with vault.begin() as conn:
+        with pytest.raises(vs.InvalidRequestError, match="expired"):
+            vs.fulfill_provision(conn, req["id"], _sealed())
+    with vault.begin() as conn:
+        assert not conn.execute(select(vault_secrets.c.id)).first()
+        assert vs.get_request(conn, req["id"])["status"] == "expired"
+        assert vs.get_request(conn, sibling["id"])["status"] == "pending"
+        assert [row["id"] for row in vs.list_pending_request_callbacks(conn)] == [req["id"]]
+
+
+def test_direct_secret_create_does_not_fulfill_overdue_provision(vault):
+    with vault.begin() as conn:
+        overdue = vs.create_provision_request(conn, "WANTED")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == overdue["id"]).values(
+            expires_at="2000-01-01T00:00:00+00:00",
+        ))
+        vs.create_secret(conn, name="WANTED", sealed=_sealed())
+        assert vs.get_request(conn, overdue["id"])["status"] == "expired"
+
+
 def test_provision_request_rejects_case_only_duplicate_pending_request(vault):
     with vault.begin() as conn:
         pending = vs.create_provision_request(conn, "openAiKey")

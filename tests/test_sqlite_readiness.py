@@ -102,7 +102,42 @@ def test_current_startup_is_read_only_even_behind_migration_and_sqlite_writers(
     assert not any(sql.startswith(("BEGIN", "COMMIT")) for sql in statements)
     with closing(connect(ready_db)) as conn:
         plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + reads[0])]
-    assert sum("SEARCH state_meta USING INDEX" in step for step in plan) == 5
+    assert sum("SEARCH state_meta USING INDEX" in step for step in plan) == 6
+
+
+def test_upgrade_retires_stale_provisions_once_without_callbacks(ready_db):
+    from storage import vault_service
+    from storage.db import create_sqlite_engine
+
+    db = ready_db
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("DELETE FROM state_meta WHERE key=?", (importer.PROVISION_EXPIRY_MARKER,))
+        conn.execute("INSERT INTO agent_sessions(id,agent_backend,agent_variant,session_anchor,native_session_id,"
+                     "status,metadata_json,created_at,updated_at) VALUES('old','test','test','old','','archived','{}','t','t')")
+        conn.executemany("INSERT INTO vault_requests(id,request_type,secret_name,status,delivery,created_at,expires_at) "
+                         "VALUES(?,?,'KEY',?,'{\"card\":{\"session_id\":\"old\"}}','t',?)", [
+                             ('legacy', 'provision', 'pending', None), ('archived', 'provision', 'pending', '2099-01-01'),
+                             ('live', 'provision', 'pending', '2099-01-01'), ('terminal', 'provision', 'denied', None),
+                             ('access', 'access', 'pending', None),
+                         ])
+        conn.execute("UPDATE vault_requests SET requester=? WHERE id IN ('legacy','live')", ('{\"session_id\":\"live\"}',))
+    importer.ensure_sqlite_state(db_path=db, state_dir=db.parent)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as conn:
+            assert dict(conn.exec_driver_sql('SELECT id,status FROM vault_requests').all()) == {
+                'legacy': 'expired', 'archived': 'expired', 'live': 'pending', 'terminal': 'denied', 'access': 'pending',
+            }
+            assert conn.exec_driver_sql("SELECT DISTINCT callback_status FROM vault_requests WHERE status='expired'").all() == [('skipped',)]
+            assert vault_service.list_pending_request_callbacks(conn) == []
+            # Older binaries can still omit expires_at; a second repair does not replay the upgrade.
+            conn.exec_driver_sql("INSERT INTO vault_requests(id,request_type,status,secret_name,created_at) "
+                                 "VALUES('after','provision','pending','AFTER','t')")
+        importer.repair_sqlite_state(db_path=db, state_dir=db.parent)
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("SELECT status FROM vault_requests WHERE id='after'").scalar_one() == 'pending'
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize("change", [

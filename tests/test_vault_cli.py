@@ -3085,33 +3085,33 @@ def test_field_provision_success_hints_use_current_subset(capfd, monkeypatch, al
     assert "do-not-expose" not in message and "hidden-user" not in message
 
 
-def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
-    def wait_mock(request_id, *, timeout, poll_interval=2.0):
+@pytest.mark.parametrize("fulfill", [True, False], ids=["fulfill", "decline"])
+def test_request_wait_observes_provision_decision_within_lifetime(capfd, monkeypatch, fulfill):
+    def decide_between_polls(_delay):
         with cli._open_vault_engine().begin() as conn:
-            vault_service.fulfill_pending_provision_requests_for_secret(conn, "WAIT_KEY")
-            return vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            req = vault_service.find_pending_provision_request(conn, "WAIT_KEY")
+            assert req and req["expires_at"]
+            if fulfill:
+                vault_service.fulfill_provision(conn, req["id"], Sealed("ct", "nonce", "wrap"))
+            else:
+                vault_service.deny_request(conn, req["id"])
 
-    monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
-
-    assert cli.cmd_vault_request(_ns(name="WAIT_KEY", wait=30)) == 0
-    payload = json.loads(capfd.readouterr().out)
-    assert payload["status"] == "fulfilled"
-    assert payload["request"]["status"] == "fulfilled"
+    monkeypatch.setattr(cli, "time", SimpleNamespace(monotonic=time.monotonic, sleep=decide_between_polls))
+    args = cli.build_parser().parse_args(["vault", "request", "WAIT_KEY", "--wait", "30"])
+    assert cli.cmd_vault_request(args) == (0 if fulfill else 1)
+    out, err = capfd.readouterr()
+    if fulfill:
+        result = json.loads(out)
+        assert result["request"]["status"] == result["status"] == "fulfilled"
+        request_id = result["request_id"]
+    else:
+        error = json.loads(err)
+        assert error["code"] == "request_denied"
+        request_id = error["details"]["request_id"]
     with cli._open_vault_engine().connect() as conn:
-        status = conn.execute(vault_requests.select().where(vault_requests.c.id == payload["request_id"])).mappings().one()
-    assert status["callback_status"] == "skipped"
-
-
-def test_request_wait_returns_denied_without_timeout(capfd, monkeypatch):
-    def wait_mock(request_id, *, timeout, poll_interval=2.0):
-        return {"id": request_id, "status": "denied", "request_type": "provision", "secret_name": "WAIT_KEY"}
-
-    monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
-
-    assert cli.cmd_vault_request(_ns(name="WAIT_KEY", wait=30)) == 1
-    payload = json.loads(capfd.readouterr().err)
-    assert payload["code"] == "request_denied"
-    assert payload["details"]["request_id"]
+        assert conn.execute(select(vault_requests.c.callback_status).where(
+            vault_requests.c.id == request_id,
+        )).scalar_one() == "skipped"
 
 
 @pytest.mark.parametrize(
