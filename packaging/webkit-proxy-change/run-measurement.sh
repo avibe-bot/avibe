@@ -22,7 +22,12 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode_26.6.app/Contents/Dev
 echo "label=$label"
 echo "developer_dir=$DEVELOPER_DIR"
 bounded 30 xcodebuild -version | tee "$out/xcode-version.txt"
-bounded 30 xcrun simctl list runtimes available | tee "$out/runtime-inventory.txt"
+# The first simctl call of a job starts CoreSimulator, which took over 30 s
+# twice on 2026-11-28 (run 46132842884): it gets a longer bound and its time
+# is written down; the calls after it keep theirs.
+simctl_started=$SECONDS
+bounded 180 xcrun simctl list runtimes available | tee "$out/runtime-inventory.txt"
+echo "first_simctl_seconds=$((SECONDS - simctl_started))"
 
 select_runtime() {
   local selector=$1
