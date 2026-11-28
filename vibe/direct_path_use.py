@@ -21,8 +21,8 @@ order sessions were first seen since this process started; nothing of its
 identity is logged or kept beyond the key the number stands for. The number
 is a pseudonym, not anonymity: lines with the same number are the same
 session for as long as its key is kept, and a session whose key was dropped
-for a newer one is numbered anew. WebSockets are not counted: a stream is one
-request here, as it is for the page.
+for a newer one is numbered anew. The event socket adapter counts one stream
+open as a request, but not individual frames or page reports from its handshake.
 """
 
 from __future__ import annotations

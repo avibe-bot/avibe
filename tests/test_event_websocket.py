@@ -139,19 +139,20 @@ def test_workbench_socket_runs_http_hooks_and_unsubscribes(monkeypatch, tmp_path
     observed = []
 
     def observe():
-        observed.append((request.method, request.path, request.args.get("after_id")))
+        observed.append((request.method, request.path, request.args.get("after_id"), request.headers.get("x-avibe-page")))
 
     monkeypatch.setattr(ui_server.app, "_before_request_handlers", [
         *ui_server.app._before_request_handlers, observe,
     ])
     before = broker.subscriber_count()
     with ui_server.app.test_client().websocket_connect(
-        "ws://127.0.0.1/api/events?after_id=cursor", headers={"Origin": "http://127.0.0.1", TEST_REMOTE_ADDR_HEADER: "127.0.0.1"},
+        "ws://127.0.0.1/api/events?after_id=cursor",
+        headers={"Origin": "http://127.0.0.1", TEST_REMOTE_ADDR_HEADER: "127.0.0.1", "X-Avibe-Page": "idle"},
     ) as socket:
         assert socket.receive_text() == ": stream connected\n\n"
         assert "event: connected" in socket.receive_text()
         assert broker.subscriber_count() == before + 1
-    assert observed == [("GET", "/api/events", "cursor")]
+    assert observed == [("GET", "/api/events", "cursor", None)]
     assert broker.subscriber_count() == before
 
 

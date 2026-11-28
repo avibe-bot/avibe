@@ -4515,8 +4515,11 @@ async def _event_websocket(websocket: WebSocket, handler: Callable):
         return
 
     async def response():
+        # The adapter counts the accepted stream open as a request, but its
+        # synthetic GET must not carry a page report from the socket handshake.
         scope = {
             **websocket.scope,
+            "headers": [(key, value) for key, value in websocket.scope["headers"] if key.lower() != b"x-avibe-page"],
             "type": "http",
             "method": "GET",
             "scheme": "https" if websocket.scope["scheme"] == "wss" else "http",
