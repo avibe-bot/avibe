@@ -401,7 +401,6 @@ final class DirectPathUseTests: XCTestCase {
         XCTAssertEqual(DirectLossCause(closeText: "LocallyClosed"), .withdrawn)
         XCTAssertEqual(DirectLossCause(closeText: "reset by peer"), .connectionEnded)
         XCTAssertEqual(DirectLossCause(closeText: ""), .connectionEnded)
-        XCTAssertEqual(causes.filter(\.isPeerClose), [.revocation, .closedByPeer])
         // Only a death of the path is one the probation rule counts.
         XCTAssertEqual(causes.filter { $0.linkEnd == .lost }, [.idle, .connectionEnded, .probeTimeout])
     }

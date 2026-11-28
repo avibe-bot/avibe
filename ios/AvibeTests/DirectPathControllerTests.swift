@@ -279,14 +279,21 @@ final class DirectPathControllerTests: XCTestCase {
         harness.transport.report(.usable(generation: "g1"), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
         XCTAssertEqual(harness.probationStore.levels, [:])
-        // It dies ten seconds later: an early death.
+        // It dies ten seconds later: an early death. As with the real
+        // transport, no path is named any more when the loss is reported.
         harness.probationTime.advance(10_000)
+        harness.transport.currentPath = nil
+        harness.transport.selectedPath = nil
         harness.transport.report(.lost(.idle), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
         XCTAssertEqual(harness.probationStore.levels.values.map(\.level), [1])
         XCTAssertEqual(harness.probationStore.levels.values.map(\.rose), [.adopted])
 
-        // The next link waits half a minute.
+        // The next link, a minute later and through the relay, waits half
+        // a minute.
+        harness.pathUseClock.now += 60
+        harness.transport.currentPath = .relay
+        harness.transport.selectedPath = DirectSelectedPath(kind: .relay, local: nil, rttMs: 90)
         harness.transport.report(.usable(generation: "g1"), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
         XCTAssertNil(harness.status("instance-1").path)
@@ -305,25 +312,28 @@ final class DirectPathControllerTests: XCTestCase {
 
         harness.probationTime.advance(1_000)
         try await eventually { harness.status("instance-1").preferred == .direct }
-        XCTAssertEqual(harness.status("instance-1").path, .ipv4)
+        XCTAssertEqual(harness.status("instance-1").path, .relay)
         XCTAssertNotNil(try XCTUnwrap(harness.controller.plan(for: authority)).openDirect)
         // Adopted: its probe has stopped. What is left is the time it must
         // hold to clear the level.
         try await eventually { harness.probationTime.sleeping == 1 }
 
-        // The minute's row: the level, why it rose, and one link held.
+        // Two rows. The minute of the death: the level it raised, under
+        // the kind of path the dead link was on, with nothing held. The
+        // minute after: the same level, and the one link made to wait.
         harness.pathUseClock.now += 60
         let scope = DirectPathUse.Scope(store: harness.websiteDataStore.identifier, host: one)
         let rows = try harness.pathUse.pendingGuard(for: scope).json.map {
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
         }
-        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(Set(try XCTUnwrap(rows.first).keys), ["client", "age_min", "path", "guard_level_s", "guard_rose", "held"])
-        XCTAssertEqual(rows.first?["client"] as? String, "ios")
-        XCTAssertEqual(rows.first?["path"] as? String, "lan")
-        XCTAssertEqual(rows.first?["guard_level_s"] as? Int, 30)
-        XCTAssertEqual(rows.first?["guard_rose"] as? String, "adopted")
-        XCTAssertEqual(rows.first?["held"] as? Int, 1)
+        XCTAssertEqual(rows.map { $0["client"] as? String }, ["ios", "ios"])
+        XCTAssertEqual(rows.map { $0["age_min"] as? Int }, [2, 1])
+        XCTAssertEqual(rows.map { $0["path"] as? String }, ["lan", "relay"])
+        XCTAssertEqual(rows.map { $0["guard_level_s"] as? Int }, [30, 30])
+        XCTAssertEqual(rows.map { $0["guard_rose"] as? String }, ["adopted", "adopted"])
+        XCTAssertEqual(rows.map { $0["held"] as? Int }, [0, 1])
 
         // It holds ten minutes: the level is cleared in the store then, not
         // at the next event, so a launch soon after does not wait again.

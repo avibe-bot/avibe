@@ -1231,14 +1231,15 @@ final class DirectIrohTransport {
             break
         case .failed:
             // A probe also fails on a connection that has just closed. A
-            // close the instance sent, read now, says more than the probe's
-            // failure and comes first: it is not a dead path. After that, a
+            // close the instance sent (or this App's own), read now, says
+            // more than the probe's failure and comes first: it is not a
+            // dead path. After that, a
             // loss the network change's own probe found is the network
             // change's, whatever the connection says of itself; any other
             // probe's failure is the connection's own end if it has one.
             let closed = session.link.connection.closeReason.map(DirectLossCause.init(closeText:))
             let cause: DirectLossCause
-            if let closed, closed.isPeerClose {
+            if let closed, closed.linkEnd == .instanceEnded {
                 cause = closed
             } else if reason == .networkChange {
                 cause = .networkChange

@@ -156,11 +156,6 @@ enum DirectLossCause: String, Equatable, Sendable {
         }
     }
 
-    /// The instance closed the connection itself, whatever its reason.
-    var isPeerClose: Bool {
-        self == .revocation || self == .closedByPeer
-    }
-
     /// What the probation rule is told.
     var linkEnd: DirectLinkEnd {
         switch self {

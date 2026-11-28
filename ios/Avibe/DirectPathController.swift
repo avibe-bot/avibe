@@ -1788,6 +1788,7 @@ final class DirectPathController {
             }
             currentPath = kind
             stickyDropped = false
+            rememberProbationPath()
             if preferred == .direct {
                 sequence += 1
                 notify()
@@ -1962,11 +1963,24 @@ final class DirectPathController {
         stickyDropped = false
         let wasDirect = preferred == .direct
         updatePreference()
+        rememberProbationPath()
         // The same preference on another kind of path is a change too.
         if wasDirect, preferred == .direct, previous != currentPath {
             sequence += 1
             notify()
         }
+    }
+
+    /// The kind of path the link is on while the transport names one, kept
+    /// for the report: at the link's loss the transport names none.
+    private func rememberProbationPath() {
+        let diagnostics = transport.pathDiagnostics
+        guard let kind = diagnostics.current else {
+            return
+        }
+        probationPath = DirectPathUse.Path(
+            kind: kind, local: diagnostics.selected?.kind == kind ? diagnostics.selected?.local : nil
+        )
     }
 
     /// The link ended, and why. Only a loss can raise the level.
@@ -2021,11 +2035,7 @@ final class DirectPathController {
         }
         // The kind the transport names now, or the last it named for this
         // link: at a loss it names none.
-        let diagnostics = transport.pathDiagnostics
-        let seen = DirectPathUse.Path(kind: diagnostics.current, local: diagnostics.selected?.local)
-        if seen != .none {
-            probationPath = seen
-        }
+        rememberProbationPath()
         pathUse.probation(
             scope: useScope(link.host),
             path: probationPath,
