@@ -56,8 +56,8 @@ _SQL_IN_CHUNK_SIZE = 400
 #    brackets).
 _SKIP_SEGMENT_RE = re.compile(
     r"(?P<line_fence>"
-    r"(?:^|\n) {0,3}(?P<lf_bt>`{3,})[^`\n]*(?:\n[\s\S]*?(?:\n {0,3}(?P=lf_bt)`*[ \t]*(?=\n|$)|$)|$)"
-    r"|(?:^|\n) {0,3}(?P<lf_tilde>~{3,})[^\n]*(?:\n[\s\S]*?(?:\n {0,3}(?P=lf_tilde)~*[ \t]*(?=\n|$)|$)|$)"
+    r"(?:^|\n)[ \t]*(?P<lf_bt>`{3,})[^`\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*(?P=lf_bt)`*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)"
+    r"|(?:^|\n)[ \t]*(?P<lf_tilde>~{3,})[^\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*(?P=lf_tilde)~*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)"
     r")"
     r"|(?P<fence>"
     r"(?P<f_bt>`{3,})(?:(?!\n\n)[\s\S])*?(?P=f_bt)"
@@ -232,12 +232,15 @@ def _iter_prose_slices(text: str) -> Iterable[tuple[int, int, bool]]:
         if match.start() > pos:
             yield from _split_indented_lines(pos, match.start())
         yield match.start(), match.end(), False
-        if (
-            match.group("line_fence") is not None
-            or match.group("fence") is not None
-            or match.start() == 0
-            or text[match.start() - 1] == "\n"
-        ):
+        if match.group("line_fence") is not None:
+            seg = match.group(0)
+            fence_line = seg[1:] if seg.startswith("\n") else seg
+            in_indented_code = False
+            after_blank = False
+            current_line_is_code = False
+            if not fence_line.startswith(("    ", "\t")):
+                last_non_blank_was_list = False
+        elif match.start() == 0 or text[match.start() - 1] == "\n":
             in_indented_code = False
             after_blank = False
             last_non_blank_was_list = False

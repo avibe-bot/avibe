@@ -114,14 +114,14 @@ export type LinkifyMentionsOptions = {
 const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
 const LIST_ITEM_LINE_RE = /^ {0,3}(?:[-*+]|\d+[.)])[ \t]/;
 const LIST_MARKER_RE = /^(?:[-*+]|\d+[.)])[ \t]/;
-const FENCE_START_RE = /^\n? {0,3}(?:```|~~~)/;
 const INLINE_CODE_SPAN_RE = /(`+)[^`\n]+?\1/g;
 
 // Segments skipped during mention rewriting:
-// 1. Line-start fenced code blocks (closed at a line-start closing fence, or
-//    still open at end-of-text while streaming).
+// 1. Line-start fenced code blocks (any leading indentation so code blocks
+//    inside numbered/nested list items stay intact; empty, CRLF, multi-length,
+//    and still-open streaming fences all handled).
 // 2. Closed mid-line fenced blocks (for backwards compatibility with inline
-//    fences that have an explicit closing fence).
+//    fences that have an explicit closing fence, without crossing blank lines).
 // 3. Inline code spans.
 // 4. Autolinks (`<https://...>`).
 // 5. Full Markdown inline links (`[label](dest)` — so mentions inside an
@@ -131,7 +131,7 @@ const INLINE_CODE_SPAN_RE = /(`+)[^`\n]+?\1/g;
 // 6. Bare link destinations (`](dest)` fallback when a label contains nested
 //    brackets).
 const SKIP_SEGMENT_RE =
-  /(?:^|\n) {0,3}(`{3,})[^`\n]*(?:\n[\s\S]*?(?:\n {0,3}\1`*[ \t]*(?=\n|$)|$)|$)|(?:^|\n) {0,3}(~{3,})[^\n]*(?:\n[\s\S]*?(?:\n {0,3}\2~*[ \t]*(?=\n|$)|$)|$)|(`{3,})(?:(?!\n\n)[\s\S])*?\3|(~{3,})(?:(?!\n\n)[\s\S])*?\4|(`+)[^`\n]+?\5|<https?:\/\/[^>\s]+>|(?<linkLabel>\[[^\]\n]*\])(?<linkDest>\((?:[^()\s]|(?:\([^()\s]*\)))*\))|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
+  /(?<lineFence>(?:^|\n)[ \t]*(`{3,})[^`\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*\2`*[ \t\r]*(?=\n|$)|[\s\S]*$)|$)|(?:^|\n)[ \t]*(~{3,})[^\n]*(?:\n(?:(?:[\s\S]*?\n)??[ \t]*\3~*[ \t\r]*(?=\n|$)|[\s\S]*$)|$))|(`{3,})(?:(?!\n\n)[\s\S])*?\4|(~{3,})(?:(?!\n\n)[\s\S])*?\5|(`+)[^`\n]+?\6|<https?:\/\/[^>\s]+>|(?<linkLabel>\[[^\]\n]*\])(?<linkDest>\((?:[^()\s]|(?:\([^()\s]*\)))*\))|\]\((?:[^()\s]|(?:\([^()\s]*\)))*\)/g;
 
 /**
  * Rewrite `@<…>` / `#<…>` (and, in Agent replies, resolved bare `#ses...`)
@@ -348,9 +348,19 @@ export function linkifyMentions(
     } else {
       result += seg;
     }
-    // Update block state when a skipped segment begins at a line start or is a
-    // fenced code block.
-    if (FENCE_START_RE.test(seg) || m.index === 0 || text[m.index - 1] === '\n') {
+    // Update block state only for line-start fenced blocks or inline skipped
+    // segments beginning at column 0 — never for mid-line inline fences or
+    // mid-line code spans, so enclosing indented code / list state is preserved.
+    const isLineFence = m.groups?.lineFence !== undefined;
+    if (isLineFence) {
+      const fenceLine = seg.startsWith('\n') ? seg.slice(1) : seg;
+      inIndentedCode = false;
+      afterBlank = false;
+      currentLineIsCode = false;
+      if (!INDENTED_CODE_LINE_RE.test(fenceLine)) {
+        lastNonBlankWasList = false;
+      }
+    } else if (m.index === 0 || text[m.index - 1] === '\n') {
       inIndentedCode = false;
       afterBlank = false;
       lastNonBlankWasList = false;

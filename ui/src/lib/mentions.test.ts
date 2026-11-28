@@ -185,6 +185,30 @@ describe('linkifyMentions', () => {
     expect(text).toContain('````markdown\n```\n#<sesw34zgzgcvp>\n```\n#<sesw34zgzgcvp>\n#<sesmissing99>\n````');
   });
 
+  it('in agentReply mode, skips indented fenced blocks in lists, closes empty and CRLF fences, and keeps state across mid-line fences', () => {
+    const input =
+      '10. Step\n\n    ```py\n    x=1\n\n    print("#<sesw34zgzgcvp>")\n    ```\n\n'
+      + '1. Step\n   - sub\n\n     ```py\n     x=1\n\n     print("#<sesw34zgzgcvp>")\n     ```\n\n'
+      + '```\n```\nSee #<sesw34zgzgcvp>\n\n'
+      + '```py\r\nx=1\r\n```\r\nAfter CRLF #<sesw34zgzgcvp>\n\n'
+      + 'Intro\n\n    a ```x``` b\n    more #<sesw34zgzgcvp>\n\n'
+      + '- run ```cmd``` first\n\n    continuation #<sesw34zgzgcvp>';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('print("#<sesw34zgzgcvp>")');
+    expect(text).toContain('    more #<sesw34zgzgcvp>');
+  });
+
   it('in agentReply mode, still resolves nested 4-space bullets, list/paragraph continuations, and prose after mid-sentence triple backticks', () => {
     const input =
       '- parent\n'

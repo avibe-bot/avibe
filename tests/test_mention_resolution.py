@@ -109,6 +109,12 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "Code span `#<sescode00001>` and `#sescode00002` stay untouched.\n"
         "```\n#<sesfence0001>\n#sesfence0002\n```\n"
         "````markdown\n```\n#<sesnestedf01>\n```\n#<sesnestedf02>\n````\n"
+        "10. Step\n\n    ```py\n    x=1\n\n    print('#<seslistf0001>')\n    ```\n\n"
+        "1. Step\n   - sub\n\n     ```py\n     x=1\n\n     print('#<seslistf0002>')\n     ```\n\n"
+        "```\n```\nSee #<sesemptyf001>\n\n"
+        "```py\r\nx=1\r\n```\r\nAfter CRLF #<sescrlf00001>\n\n"
+        "Intro\n\n    a ```x``` b\n    more #<sesmidf00001>\n\n"
+        "- run ```cmd``` first\n\n    continuation #<seslistmid01>\n\n"
         "~~~\n#sestilde0001\n~~~\n"
         "\n"
         "    #<sesindent001>\n"
@@ -128,6 +134,9 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "sesloose00001",
         "seslazy000001",
         "sesafterbt001",
+        "sesemptyf001",
+        "sescrlf00001",
+        "seslistmid01",
     ]
     assert bots == ["product"]
 
@@ -141,6 +150,9 @@ def test_extract_mention_candidates_skips_code_and_urls_and_reads_bare_in_cjk():
         "sesordered001",
         "seslazy000001",
         "sesafterbt001",
+        "sesemptyf001",
+        "sescrlf00001",
+        "seslistmid01",
     ]
     assert bots_bracket_only == ["product"]
 
