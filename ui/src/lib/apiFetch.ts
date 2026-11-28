@@ -332,7 +332,6 @@ export async function recoverRemoteAuthFromSessionProbe(response: Response): Pro
   const session = payload as {
     remote?: boolean;
     authenticated?: boolean;
-    authorization_refresh_required?: boolean;
     authorization_state?: 'current' | 'revoked' | 'unavailable';
   } | null;
   if (session?.authorization_state === 'revoked') {
@@ -347,11 +346,10 @@ export async function recoverRemoteAuthFromSessionProbe(response: Response): Pro
     reportRemoteAuthorizationState('current');
     return;
   }
-  if (
-    session?.remote === true
-    && session.authenticated === false
-    && session.authorization_refresh_required === true
-  ) {
+  // The instance answers an ended session with `authenticated: false` alone; a
+  // page whose only reads are this probe and the stream (the setup wizard)
+  // must take the same sign-in path as a page whose reads get a 401.
+  if (session?.remote === true && session.authenticated === false) {
     reportRemoteAuthorizationState('login_required');
   }
 }

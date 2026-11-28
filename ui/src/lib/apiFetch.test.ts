@@ -469,11 +469,11 @@ describe('apiFetch remote auth recovery', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('recovers from a successful session probe that requires authorization refresh', async () => {
+  it('sends a session probe answering an ended session to sign-in', async () => {
+    // What vibe/ui_server.py api_session answers for a missing or expired session.
     await recoverRemoteAuthFromSessionProbe(Response.json({
       remote: true,
       authenticated: false,
-      authorization_refresh_required: true,
     }));
 
     expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith('login_required');

@@ -3918,7 +3918,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       failWorkbenchEventStream();
       // EventSource does not expose a failed response's status or JSON body.
       // Probe through apiFetch, then inspect the successful /api/session form;
-      // both 401s and the 200 refresh payload enter the shared login recovery.
+      // both 401s and a 200 `authenticated: false` enter the shared login recovery.
       void apiFetch('/api/session', { cache: 'no-store' })
         .then(recoverRemoteAuthFromSessionProbe)
         .catch(() => undefined);
