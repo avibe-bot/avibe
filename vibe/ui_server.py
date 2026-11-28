@@ -1577,6 +1577,8 @@ def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
         (str(identity.get("sub")), str(identity.get("browser_session_id"))),
         direct=direct,
         owner=owner,
+        page=(direct_path_use.page_sample(request.headers.getlist("x-avibe-page"))
+              if request.path.startswith("/api/") else None),
     )
 
 

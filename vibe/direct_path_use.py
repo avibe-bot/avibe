@@ -15,7 +15,8 @@ rest it checks the host name the request carries, not where the request came
 from. In practice that is the tunnel, but the number is not a verified count
 of tunnel traffic.
 
-Counts only. A session is named in the log by a small number given in the
+Optional page-reported reasons and return holds are separate from those counts.
+A session is named in the log by a small number given in the
 order sessions were first seen since this process started; nothing of its
 identity is logged or kept beyond the key the number stands for. The number
 is a pseudonym, not anonymity: lines with the same number are the same
@@ -30,12 +31,61 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
 _MAX_SESSIONS = 256
 _MAX_SESSIONS_PER_MINUTE = 64
+
+_PAGE_WORDS = frozenset({
+    "no_path", "on_path", "not_ready", "verdict", "spacing", "cap", "quiet_request",
+    "quiet_socket", "quiet_frame", "not_ours", "asked", "idle",
+})
+_MAX_PAGE_LENGTH = max(map(len, _PAGE_WORDS)) + len(";hold=1000")
+
+
+def page_sample(fields: list[str]) -> tuple[str, int | None] | None:
+    """Decode exactly one X-Avibe-Page field; a bad hold invalidates its word too."""
+    if len(fields) != 1 or len(fields[0]) > _MAX_PAGE_LENGTH:
+        return None
+    word, sep, ms = fields[0].partition(";hold=")
+    if word not in _PAGE_WORDS:
+        return None
+    if not sep:
+        return word, None
+    if not (1 <= len(ms) <= 4 and ms.isascii() and ms.isdecimal()):
+        return None
+    hold = int(ms)
+    return (word, hold) if hold <= 1000 and str(hold) == ms else None
+
+
+@dataclass(slots=True)
+class _PageMinute:
+    last: str
+    seen: set[str] = field(default_factory=set)
+    holds: int = 0
+    max_ms: int = 0
+
+    def note(self, word: str, hold: int | None) -> None:
+        self.last = word
+        self.seen.add(word)
+        if hold is not None:
+            self.holds += 1
+            self.max_ms = max(self.max_ms, hold)
+
+    def suffix(self) -> str:
+        suffix = f" page_last={self.last} page_seen={','.join(sorted(self.seen))} hold_count={self.holds}"
+        return suffix + (f" hold_max_ms={self.max_ms}" if self.holds else "")
+
+
+@dataclass(slots=True)
+class _Minute:
+    role: str
+    direct: int = 0
+    other: int = 0
+    page: _PageMinute | None = None
 
 
 class IngressCounts:
@@ -47,10 +97,9 @@ class IngressCounts:
         # Session key -> its number in the log. The key never leaves this map.
         self._numbers: OrderedDict[Any, int] = OrderedDict()
         self._next_number = 1
-        # Minute -> session number -> [role, direct, other].
-        self._minutes: dict[int, dict[int, list[Any]]] = {}
+        self._minutes: dict[int, dict[int, _Minute]] = {}
 
-    def note(self, session: Any, *, direct: bool, owner: bool) -> None:
+    def note(self, session: Any, *, direct: bool, owner: bool, page: tuple[str, int | None] | None = None) -> None:
         """Count one request of an accepted remote session, and log the minutes that are over."""
         with self._lock:
             # The clock is read under the lock: a minute that a drain found
@@ -70,10 +119,18 @@ class IngressCounts:
             # Past the bound, the rest of the minute's sessions share one line.
             if number not in sessions and len(sessions) >= _MAX_SESSIONS_PER_MINUTE:
                 number = 0
-            counts = sessions.setdefault(number, ["owner" if owner else "member", 0, 0])
-            if number == 0:
-                counts[0] = "several"
-            counts[1 if direct else 2] += 1
+            counts = sessions.get(number)
+            if counts is None:
+                role = ("owner" if owner else "member") if number else "several"
+                counts = sessions[number] = _Minute(role)
+            if direct:
+                counts.direct += 1
+            else:
+                counts.other += 1
+            if number and page is not None:
+                if counts.page is None:
+                    counts.page = _PageMinute(page[0])
+                counts.page.note(*page)
         _log(lines)
 
     def flush(self) -> None:
@@ -82,20 +139,20 @@ class IngressCounts:
             lines = self._drain_locked(int(self._clock() // 60))
         _log(lines)
 
-    def _drain_locked(self, current: int) -> list[tuple[int, str, int, int, int]]:
+    def _drain_locked(self, current: int) -> list[tuple[int, int, _Minute]]:
         # A minute before the current one is over: nothing more is counted in it.
         lines = []
         for minute in [minute for minute in self._minutes if minute < current]:
-            for number, (role, direct, other) in sorted(self._minutes.pop(minute).items()):
-                lines.append((number, role, current - minute, direct, other))
+            for number, counts in sorted(self._minutes.pop(minute).items()):
+                lines.append((number, current - minute, counts))
         return lines
 
 
-def _log(lines: list[tuple[int, str, int, int, int]]) -> None:
-    for number, role, minutes_ago, direct, other in lines:
+def _log(lines: list[tuple[int, int, _Minute]]) -> None:
+    for number, minutes_ago, counts in lines:
         logger.info(
-            "direct path_use ingress session=%d role=%s minutes_ago=%d direct=%d other=%d",
-            number, role, minutes_ago, direct, other,
+            "direct path_use ingress session=%d role=%s minutes_ago=%d direct=%d other=%d%s",
+            number, counts.role, minutes_ago, counts.direct, counts.other, counts.page.suffix() if counts.page else "",
         )
 
 
