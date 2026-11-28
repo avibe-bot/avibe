@@ -404,6 +404,7 @@ def test_listener_consumers_alone_do_not_trigger_install_regressions(path):
     ('desktop/src-tauri/src/direct/offer.rs', 'desktop/src-tauri/tests/direct/cross_network.rs'),
     ('desktop/src-tauri/src/direct/shell_windows.rs', 'desktop/src-tauri/src/lib.rs'),
     ('desktop/new-product-area/new-file.rs',),
+    ('.github/workflows/desktop-shell.yml',),
 ])
 def test_desktop_directory_requires_desktop_shell_only_beyond_linux(paths):
     from scripts.ci_fast_pr import LINUX, selected

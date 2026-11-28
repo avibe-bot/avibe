@@ -346,7 +346,13 @@ const ActivityAssistantRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
       <Sparkles className="mt-0.5 size-3.5 shrink-0 text-mint-ink" aria-hidden="true" />
       <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground/90 [&_p]:my-0.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto">
         {row.text ? (
-          <Markdown content={row.text} className="vr-markdown--inherit-size" citations={citations} />
+          <Markdown
+            content={row.text}
+            className="vr-markdown--inherit-size"
+            citations={citations}
+            references={row.references}
+            agentMentions
+          />
         ) : (
           <span className="text-muted">—</span>
         )}

@@ -8267,22 +8267,22 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
     [
         pytest.param(
             "agent_run", {"source_kind": "agent", "source_actor": "sescaller01"},
-            "[Harness: agent run run-1 from #sescaller01; agent run run-2 from #sescaller01]",
+            "[Harness: agent run run-1 from #<sescaller01>; agent run run-2 from #<sescaller01>]",
             # Where the result goes, once per distinct target (docs/plans/bots.md D4).
             ["[Write back when the work is done, when you need a decision, or when a problem changes the plan; "
-             "not for progress. Open with which of the three it is. Report to #sescaller01 with "
+             "not for progress. Open with which of the three it is. Report to #<sescaller01> with "
              "`vibe agent run --session-id sescaller01 --message ...`.]"],
             id="agent-runs-from-one-caller",
         ),
         pytest.param(
             "agent_run", {"source_kind": "agent", "source_actor": "sescaller01", "no_reply": True},
-            "[Harness: agent run run-1 from #sescaller01; agent run run-2 from #sescaller01]",
+            "[Harness: agent run run-1 from #<sescaller01>; agent run run-2 from #<sescaller01>]",
             ["[No reply needed.]"],
             id="informational-runs-from-one-caller",
         ),
         pytest.param(
             "agent_run", {"source_kind": "callback", "source_session_id": "seschild01"},
-            "[Harness: callback of run run-1 from #seschild01; callback of run run-2 from #seschild01]",
+            "[Harness: callback of run run-1 from #<seschild01>; callback of run run-2 from #<seschild01>]",
             [],
             id="callbacks-from-one-session",
         ),

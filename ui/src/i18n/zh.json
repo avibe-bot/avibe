@@ -4131,6 +4131,7 @@
     "sessionsEmpty": "项目里还没有会话。",
     "sessionsLoadMore": "加载更多",
     "untitledSession": "未命名会话",
+    "sessionMentionName": "#{{title}}",
     "sessionStatus": {
       "idle": "空闲",
       "running": "运行中",

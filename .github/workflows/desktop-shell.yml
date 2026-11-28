@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -30,10 +31,8 @@ jobs:
         include:
           - os: macos-26
             developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            cache_scope: xcode-26.6-default-target-
           - os: windows-latest
             developer_dir: ""
-            cache_scope: ""
     defaults:
       run:
         working-directory: desktop
@@ -71,17 +70,76 @@ jobs:
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
 
-      # PR shell jobs may read an existing entry but never write one. Release
-      # warm-ups own the desktop cache namespace so PR traffic cannot evict
-      # release inputs from the repository's shared cache budget.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      # Pin the interpreter before the first pip install: the runner image's own Python moves
+      # ahead of the wheels this job pins (macos-26's `python` is now 3.15; PyYAML 6.0.3 has wheels only up to 3.14).
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target
-          key: ${{ runner.os }}-${{ matrix.cache_scope }}desktop-cargo-${{ hashFiles('desktop/Cargo.lock') }}
+          python-version: "3.12"
+
+      # Both PRs and merged master compile debug/test. Release caches contain
+      # a different profile, path list, and often different target triples.
+      - name: Identify the native desktop dependency build
+        id: cargo-key
+        shell: bash
+        env:
+          BUILD_INPUTS: ${{ hashFiles('desktop/Cargo.lock', 'desktop/**/Cargo.toml', '**/.cargo/config*', '**/rust-toolchain*', '.github/workflows/desktop-shell.yml') }}
+        run: |
+          set -euo pipefail
+          test -n "$BUILD_INPUTS"
+          digest=$({
+            rustc -vV; cargo -V; clippy-driver --version
+            printf '%s\n' "$RUNNER_OS/$RUNNER_ARCH/${ImageOS:-}/${ImageVersion:?}" "$BUILD_INPUTS" "${RUSTFLAGS:-}" "${SDKROOT:-}"
+            if [[ "$RUNNER_OS" == macOS ]]; then xcodebuild -version; xcrun --sdk macosx --show-sdk-version; fi
+          } | python -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+          echo "key=desktop-pr-debug-v1-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Find an exact debug-profile entry on master
+        id: trusted
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: python
+        env:
+          PREFIX: ${{ steps.cargo-key.outputs.key }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import json, os, re, subprocess
+          from datetime import datetime, timezone
+          from urllib.parse import urlencode
+          prefix = os.environ['PREFIX'] + '-'
+          query = urlencode({'ref': 'refs/heads/master', 'key': prefix, 'per_page': 100, 'sort': 'created_at', 'direction': 'desc'})
+          endpoint = 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/caches?' + query
+          rows = json.loads(subprocess.check_output(['gh','api',endpoint]))['actions_caches']
+          for row in rows:
+              if row['ref'] == 'refs/heads/master' and re.fullmatch(re.escape(prefix) + r'[0-9]+-[0-9]+', row['key']):
+                  age = datetime.now(timezone.utc) - datetime.fromisoformat(row['created_at'])
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+                      print('key=' + row['key'], file=out)
+                      print('fresh=' + str(0 <= age.total_seconds() < 86400).lower(), file=out)
+                  break
+
+      - name: Restore desktop debug dependencies on PRs only
+        id: cargo-read
+        if: github.event_name == 'pull_request' && steps.trusted.outputs.key != ''
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/desktop-debug-deps.tar.gz
+          key: ${{ steps.trusted.outputs.key }}
+
+      - name: Stage cached dependencies before use
+        id: reuse
+        if: github.event_name == 'pull_request' && steps.cargo-read.outputs.cache-hit == 'true'
+        continue-on-error: true
+        shell: python
+        run: |
+          import os, pathlib, tarfile, tempfile
+          archive = pathlib.Path(os.environ['RUNNER_TEMP'], 'desktop-debug-deps.tar.gz')
+          with tempfile.TemporaryDirectory(dir='.') as staging, tarfile.open(archive, 'r:gz') as tar:
+              tar.extractall(staging, filter='data')
+              pathlib.Path('target').mkdir(exist_ok=True)
+              pathlib.Path(staging, 'debug').rename('target/debug')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              print('Desktop Cargo: installed exact debug-profile dependency cache.', file=summary)
 
       - name: Report toolchain
         run: |
@@ -101,12 +159,6 @@ jobs:
 
       - name: Test the bootstrap page's connection rule
         run: npm run test:bootstrap
-
-      # Pin the interpreter before the first pip install: the runner image's own Python moves
-      # ahead of the wheels this job pins (macos-26's `python` is now 3.15; PyYAML 6.0.3 has wheels only up to 3.14).
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: "3.12"
 
       - name: Install pinned driver validation dependency
         working-directory: .
@@ -283,3 +335,66 @@ jobs:
             --set "AVIBE_CARET_PROBE_URL=$page" || status=$?
           kill "$(cat "$RUNNER_TEMP/composer-caret-ui.pid")" || true
           exit "$status"
+
+      # Measure real compressed bytes on the existing, successful post-merge
+      # build. Reserve room for BOTH hosts and never buy space or evict a
+      # release entry to fit. A cache failure is not a product failure.
+      - name: Measure trusted debug dependency cache
+        id: cargo-size
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.trusted.outputs.fresh != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Remove every local crate, including path dependencies outside the
+          # workspace membership. The reader builds its own code and fixtures.
+          cargo metadata --locked --all-features --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          metadata = pathlib.Path(os.environ['RUNNER_TEMP'], 'cargo-metadata.json')
+          packages = json.loads(metadata.read_bytes())['packages']
+          for package in packages:
+              if package['source'] is None:
+                  subprocess.run(['cargo', 'clean', '-p', package['id']], check=True)
+          PY
+          archive="$RUNNER_TEMP/desktop-debug-deps.tar.gz"
+          tar -czf - -C target debug/.fingerprint debug/build debug/deps > "$archive"
+          bytes=$(wc -c < "$archive" | tr -d ' ')
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" --jq '.actions_caches[] | [.ref,.key,.size_in_bytes] | @tsv' > "$RUNNER_TEMP/desktop-cache-inventory.tsv"
+          read -r used own sibling < <(awk -F '\t' -v prefix="desktop-pr-debug-v1-$RUNNER_OS-" '
+            { total += $3 }
+            $1 == "refs/heads/master" && index($2,"desktop-pr-debug-v1-") == 1 {
+              if (index($2,prefix) == 1) own += $3; else sibling += $3
+            }
+            END { printf "%.0f %.0f %.0f\n", total, own, sibling }' "$RUNNER_TEMP/desktop-cache-inventory.tsv")
+          # Margin for two observed ~375 MB manifest writes. Not a global reservation.
+          reserve=$((550000000 - sibling)); (( reserve >= 0 )) || reserve=0
+          printf 'Desktop Cargo %s/%s: %s compressed bytes, %s repository bytes in use.\n' "$RUNNER_OS" "$RUNNER_ARCH" "$bytes" "$used" >> "$GITHUB_STEP_SUMMARY"
+          if (( own + bytes <= 550000000 && used + bytes + reserve + 800000000 <= 10000000000 )); then
+            echo 'fits=true' >> "$GITHUB_OUTPUT"
+          elif (( bytes > 0 && bytes <= 550000000 && own > 0 )); then
+            # Only a measurement travels to maintenance, never the archive.
+            printf '%s\n' "$bytes" > "$RUNNER_TEMP/desktop-debug-measurement.txt"
+            echo "blocked_bytes=$bytes" >> "$GITHUB_OUTPUT"
+          else
+            echo '::notice::Desktop debug cache not saved: exceeds the measured operating budget.'
+          fi
+
+      - name: Publish measured cache pressure for trusted maintenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.blocked_bytes != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: debug-room-${{ github.run_attempt }}-${{ steps.cargo-key.outputs.key }}-${{ steps.cargo-size.outputs.blocked_bytes }}
+          path: ${{ runner.temp }}/desktop-debug-measurement.txt
+          retention-days: 1
+
+      - name: Save trusted desktop debug dependencies
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.fits == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/desktop-debug-deps.tar.gz
+          key: ${{ steps.cargo-key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}

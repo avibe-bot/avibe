@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { linkifyMentions, parseMentionHref, referenceToMarker, type MentionReference } from './mentions';
+import { formatMentionsPlainText, linkifyMentions, parseMentionHref, referenceToMarker, type MentionReference } from './mentions';
 
 const REFERENCES: MentionReference[] = [
   { kind: 'agent', name: 'claude' },
@@ -118,6 +118,187 @@ describe('linkifyMentions', () => {
 
     expect(text).toBe('Ask [@cso](avibe-mention:bot:cso).');
   });
+
+  it('in agentReply mode, links resolved bracketed and bare sessions, keeps unresolved plain text, and tracks exact edits', () => {
+    const input = '好，已经起了一个后台 Agent（#sesw34zgzgcvp），另看 #<ses6jr7c5h2q6>、@<bot:product>，忽略 #<sesmissing99>、#sesmissing88 和 `#sesw34zgzgcvp`。';
+    const { text, edits } = linkifyMentions(
+      input,
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+        { kind: 'session', session_id: 'ses6jr7c5h2q6', title: 'Bridge', openable: true },
+        { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+      ],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#sesw34zgzgcvp', '[#登录跳转修复](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<ses6jr7c5h2q6>', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+      ['@<bot:product>', '[@产品伙伴](avibe-mention:bot:product)'],
+      ['#<sesmissing99>', '#\\<sesmissing99>'],
+    ]);
+    // Unresolved bare id and inline code remain completely untouched.
+    expect(text).toContain('#sesmissing88');
+    expect(text).toContain('`#sesw34zgzgcvp`');
+  });
+
+  it('in agentReply mode, skips URL fragments, markdown links, real indented code blocks, and line-start unclosed fences', () => {
+    const input =
+      'See https://example.com/#sesw34zgzgcvp, [see #sesw34zgzgcvp](https://example.com), '
+      + '[notes for #<sesw34zgzgcvp>](https://example.com), '
+      + '[doc](#sesw34zgzgcvp), and #sesw34zgzgcvp.\n\n'
+      + '    #<sesw34zgzgcvp>\n    #<sesmissing99>\n\t#sesw34zgzgcvp\n\n'
+      + '```ts\n#sesw34zgzgcvp\n#<sesmissing99>';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '#\\<sesw34zgzgcvp>'],
+      ['#sesw34zgzgcvp', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('https://example.com/#sesw34zgzgcvp');
+    expect(text).toContain('[see #sesw34zgzgcvp](https://example.com)');
+    expect(text).toContain('[notes for #\\<sesw34zgzgcvp>](https://example.com)');
+    expect(text).toContain('[doc](#sesw34zgzgcvp)');
+    expect(text).toContain('    #<sesw34zgzgcvp>\n    #<sesmissing99>\n\t#sesw34zgzgcvp');
+    expect(text).toContain('```ts\n#sesw34zgzgcvp\n#<sesmissing99>');
+  });
+
+  it('in agentReply mode, matches closing fence length so 4-backtick fences protect inner 3-backtick examples', () => {
+    const input =
+      '````markdown\n```\n#<sesw34zgzgcvp>\n```\n#<sesw34zgzgcvp>\n#<sesmissing99>\n````\n\nAfter #<sesw34zgzgcvp>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('````markdown\n```\n#<sesw34zgzgcvp>\n```\n#<sesw34zgzgcvp>\n#<sesmissing99>\n````');
+  });
+
+  it('in agentReply mode, skips indented fenced blocks in lists, closes empty and CRLF fences, and keeps state across mid-line fences', () => {
+    const input =
+      '10. Step\n\n    ```py\n    x=1\n\n    print("#<sesw34zgzgcvp>")\n    ```\n\n'
+      + '1. Step\n   - sub\n\n     ```py\n     x=1\n\n     print("#<sesw34zgzgcvp>")\n     ```\n\n'
+      + '```\n```\nSee #<sesw34zgzgcvp>\n\n'
+      + '```py\r\nx=1\r\n```\r\nAfter CRLF #<sesw34zgzgcvp>\n\n'
+      + 'Intro\n\n    a ```x``` b\n    more #<sesw34zgzgcvp>\n\n'
+      + '- run ```cmd``` first\n\n    continuation #<sesw34zgzgcvp>';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('print("#<sesw34zgzgcvp>")');
+    expect(text).toContain('    more #<sesw34zgzgcvp>');
+  });
+
+  it('in agentReply mode, preserves multiline inline code spans and backtick spans with inner backticks', () => {
+    const input =
+      'Run `echo\n#<sesw34zgzgcvp>\n#sesw34zgzgcvp` and ``quote ` #<sesmissing99>\n#<sesw34zgzgcvp>`` then #<sesw34zgzgcvp>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+    expect(text).toContain('`echo\n#<sesw34zgzgcvp>\n#sesw34zgzgcvp`');
+    expect(text).toContain('``quote ` #<sesmissing99>\n#<sesw34zgzgcvp>``');
+  });
+
+  it('in agentReply mode, still resolves nested 4-space bullets, list/paragraph continuations, and prose after mid-sentence triple backticks', () => {
+    const input =
+      '- parent\n'
+      + '    - child sees #<sesw34zgzgcvp> and #ses6jr7c5h2q6\n'
+      + '1. step\n'
+      + '    ordered continuation #<sesw34zgzgcvp>\n'
+      + '\n'
+      + '    loose list continuation #ses6jr7c5h2q6\n'
+      + '\n'
+      + 'Para line\n'
+      + '    lazy continuation #<sesw34zgzgcvp>\n'
+      + '\n'
+      + 'Use ``` to open a fence. Then #<ses6jr7c5h2q6>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Auth Fix', openable: true },
+        { kind: 'session', session_id: 'ses6jr7c5h2q6', title: 'Bridge', openable: true },
+      ],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#ses6jr7c5h2q6', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#ses6jr7c5h2q6', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+      ['#<sesw34zgzgcvp>', '[#Auth Fix](avibe-mention:session:sesw34zgzgcvp)'],
+      ['#<ses6jr7c5h2q6>', '[#Bridge](avibe-mention:session:ses6jr7c5h2q6)'],
+    ]);
+  });
+
+  it('escapes angle brackets and backticks in resolved titles so autolinks cannot nest', () => {
+    const input = 'See #<sesw34zgzgcvp>.';
+    const { text, edits } = linkifyMentions(
+      input,
+      [{ kind: 'session', session_id: 'sesw34zgzgcvp', title: 'Check <https://evil.test> `code`', openable: true }],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['#<sesw34zgzgcvp>', '[#Check \\<https://evil.test\\> \\`code\\`](avibe-mention:session:sesw34zgzgcvp)'],
+    ]);
+  });
+
+  it('in agentReply mode, renders @<agent:name> and marker-destination links [label](#<id>) as mentions while keeping ordinary links and images untouched', () => {
+    const input =
+      'See [3.2.9 发版前检查](#<sesw34zgzgcvp>), [伙伴](@<bot:product>), @<agent:vibey>, [v](@<agent:vibey>), '
+      + '@<agent:ghost>, [missing](#<sesmissing99>), ![img](#<sesw34zgzgcvp>), and [anchor](#sesw34zgzgcvp).';
+    const { text, edits } = linkifyMentions(
+      input,
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+        { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+        { kind: 'agent', name: 'vibey' },
+      ],
+      { agentReply: true },
+    );
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced).toEqual([
+      ['[3.2.9 发版前检查](#<sesw34zgzgcvp>)', '[#登录跳转修复](avibe-mention:session:sesw34zgzgcvp)'],
+      ['[伙伴](@<bot:product>)', '[@产品伙伴](avibe-mention:bot:product)'],
+      ['@<agent:vibey>', '[@vibey](avibe-mention:agent:vibey)'],
+      ['[v](@<agent:vibey>)', '[@vibey](avibe-mention:agent:vibey)'],
+      ['@<agent:ghost>', '@\\<agent:ghost>'],
+    ]);
+    expect(text).toContain('[missing](#<sesmissing99>)');
+    expect(text).toContain('![img](#<sesw34zgzgcvp>)');
+    expect(text).toContain('[anchor](#sesw34zgzgcvp)');
+  });
 });
 
 describe('referenceToMarker', () => {
@@ -125,5 +306,21 @@ describe('referenceToMarker', () => {
     expect(referenceToMarker({ kind: 'bot', handle: 'cso', display_name: '首席安全官' })).toBe('@<bot:cso>');
     expect(referenceToMarker({ kind: 'agent', name: 'reviewer' })).toBe('@<agent:reviewer>');
     expect(referenceToMarker({ kind: 'session', session_id: 'ses6jr7c5h2q6' })).toBe('#<ses6jr7c5h2q6>');
+  });
+});
+
+describe('formatMentionsPlainText', () => {
+  it('replaces resolved Session, Bot, Agent, and marker-destination link mentions while preserving code and unresolved ids', () => {
+    const out = formatMentionsPlainText(
+      'Check [发版检查](#<sesw34zgzgcvp>), #sesuntitled01, @<bot:product>, @<agent:vibey>, @<vibey>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.',
+      [
+        { kind: 'session', session_id: 'sesw34zgzgcvp', title: '登录跳转修复', openable: true },
+        { kind: 'session', session_id: 'sesuntitled01', title: null, openable: true },
+        { kind: 'bot', handle: 'product', display_name: '产品伙伴' },
+        { kind: 'agent', name: 'vibey' },
+      ],
+      '未命名会话',
+    );
+    expect(out).toBe('Check 登录跳转修复, 未命名会话, @产品伙伴, @vibey, @<vibey>, #<sesmissing99>, and `#<sesw34zgzgcvp>`.');
   });
 });

@@ -1,6 +1,7 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 import type { CitationSource } from './citations';
 import { hostedActivityFrom, type HostedActivity } from './hostedActivity';
+import type { MentionReference } from './mentions';
 import { specFor } from './messageTypes';
 import { timestampOrderTimeMs } from './transcriptOrder';
 
@@ -29,6 +30,7 @@ export type ActivityRow = {
   // Source sidecar for an agent narration row whose text carries citation links
   // (see lib/citations). Absent on every other row, live or durable.
   citations?: CitationSource[];
+  references?: MentionReference[];
   // A hosted tool call's card (lib/hostedActivity); its ``text`` is then the IM line.
   hosted?: HostedActivity;
 };
@@ -175,6 +177,7 @@ export type TurnActivityGroupWire = {
     ended_at?: string | null;
     duration_ms?: number | null;
     citations?: CitationSource[];
+    references?: MentionReference[];
     hosted?: unknown;
   }>;
 };
@@ -192,6 +195,7 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
     id: r.id, kind: r.kind, text: r.text, created_at: r.created_at,
     ...stepFields(r),
     citations: r.citations,
+    references: r.references,
     hosted: hostedActivityFrom(r.hosted),
   })),
 });
@@ -205,6 +209,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
   created_at: msg.created_at,
   ...stepFields((msg.content as { activity?: unknown } | null | undefined)?.activity),
   citations: (msg.content as { citations?: CitationSource[] } | null | undefined)?.citations,
+  references: (msg.content as { references?: MentionReference[] } | null | undefined)?.references,
   hosted: hostedActivityFrom((msg.content as { hosted?: unknown } | null | undefined)?.hosted),
 });
 

@@ -77,6 +77,9 @@ jobs:
 
   desktop-shell:
     needs: changes
+    permissions:
+      contents: read
+      actions: read  # post-merge cache inventory; no cache-management writes
     if: fromJSON(needs.changes.outputs.dispatch_jobs)['desktop-shell'] == 'run'
     uses: ./.github/workflows/desktop-shell.yml
 

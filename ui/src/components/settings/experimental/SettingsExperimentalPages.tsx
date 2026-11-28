@@ -3,7 +3,7 @@
 // cannot turn an experiment on by mistake. Source filter is the first experiment
 // (`docs/plans/vibey-source-filter-hooks.md`): the owner's tool hooks. Script names open the
 // existing Editor app; this page never uploads, creates or runs code. Details live in the guide.
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, BookOpen, Check, ChevronRight, Copy, Filter, TriangleAlert } from 'lucide-react';
@@ -129,7 +129,9 @@ export const SettingsSourceFilterPage: React.FC = () => {
   const [openError, setOpenError] = useState<string | null>(null);
   const launchApp = useAppLaunch('deep-link');
   const openRequest = useRef(0);
-  useEffect(() => () => { openRequest.current += 1; }, [status?.dir, status?.enabled]);
+  // Retire the previous panel's requests during commit, before its replacement can be clicked.
+  // Passive cleanup can run after that click and otherwise discard the new request too.
+  useLayoutEffect(() => () => { openRequest.current += 1; }, [status?.dir, status?.enabled]);
   const openScript = async (file: string) => {
     if (!status?.enabled) return;
     const request = ++openRequest.current;
