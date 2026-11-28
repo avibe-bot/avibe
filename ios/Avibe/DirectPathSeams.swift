@@ -221,9 +221,10 @@ private final class DirectMeasureAnswer {
 ///   attempt. The caller tracks that instant (`listenerDownSince`).
 ///
 /// A bootstrap begins at an open, at a return to the foreground, and at
-/// each drop. Nothing is reloaded when the link arrives: the controller
-/// closes the host's tunnel connections and tells the page, which opens its
-/// connections again on the link (`DirectPathController.cutover`).
+/// each drop. These rules ask for no reload when the link arrives: the
+/// controller closes the host's tunnel connections and tells the page,
+/// which opens its connections again on the link; only a page whose
+/// document was still loading is loaded again (`DirectPathController.cutover`).
 struct DirectOnlyRevertRules: Equatable {
     static let unlinkedRendezvousLimit: UInt64 = 2
     static let pageWithoutLink: Duration = .seconds(20)

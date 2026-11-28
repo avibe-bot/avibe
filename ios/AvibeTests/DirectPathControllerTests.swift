@@ -426,6 +426,65 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
     }
 
+    /// A page whose document is still loading when the cut-over closes its
+    /// tunnel cannot make the cut load again: the shell is told to load the
+    /// page again, once, and no closure is reported to a document that is
+    /// being replaced. What the shell says is asked before the close: a cut
+    /// load ends the navigation, so asked afterwards the page looks loaded.
+    @MainActor
+    func testACutoverThatCutsALoadingPageAsksTheShellToLoadItAgain() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 0.5), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let page = LoopbackClient(port: port)
+        defer { page.close() }
+        let tunnel = try await establishPublic(page, harness: harness)
+        // As in the App: the navigation is under way until its load is cut.
+        harness.loadingDocument = { !tunnel.isCancelled }
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let busy = Task {
+            while !Task.isCancelled {
+                try? await page.send("x")
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { busy.cancel() }
+        try await eventually(timeout: .seconds(5)) { tunnel.isCancelled }
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        try await eventually { harness.loadingPageCuts == [runtime] }
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .open, "the load the shell makes is not held")
+    }
+
+    /// Nothing closed, nothing to load again: a page that is loading while
+    /// the link arrives, with no tunnel connection of its own left.
+    @MainActor
+    func testACutoverThatClosesNothingLeavesALoadingPageAlone() async throws {
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           cutoverQuietSeconds: 0.5), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.loadingDocument = { true }
+        harness.transport.currentPath = .ipv4
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(harness.loadingPageCuts, [])
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+    }
+
     /// The page's requests to the control plane's host (avibe.bot: voice)
     /// reach the listener too, because that host is the parent domain of
     /// the instance's. With the instance strict and linked, they are carried
@@ -2762,6 +2821,10 @@ private final class Harness {
     /// How many times the controller said a load gate may have changed.
     private(set) var availabilityChanges = 0
     private(set) var lastOpened: MobileRuntimeContext?
+    /// What the shell answers when asked whether the page's document is
+    /// still loading, and the runtimes it was told to load again.
+    var loadingDocument: () -> Bool = { false }
+    private(set) var loadingPageCuts: [MobileRuntimeContext] = []
 
     /// This harness's own account of path use, on a clock the test moves.
     let pathUseClock = DirectPathUseTestClock()
@@ -2788,6 +2851,12 @@ private final class Harness {
         },
         onAvailabilityChanged: { [unowned self] in
             self.availabilityChanges += 1
+        },
+        isLoadingDocument: { [unowned self] _ in
+            self.loadingDocument()
+        },
+        onLoadingPageCut: { [unowned self] in
+            self.loadingPageCuts.append($0)
         }
     )
 

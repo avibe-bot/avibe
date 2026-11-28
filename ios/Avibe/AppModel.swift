@@ -603,6 +603,12 @@ final class AppModel: ObservableObject {
                 },
                 onAvailabilityChanged: { [weak self] in
                     self?.directAvailabilityDidChange()
+                },
+                isLoadingDocument: { [weak self] runtime in
+                    self?.isLoadingDocument(of: runtime) ?? false
+                },
+                onLoadingPageCut: { [weak self] runtime in
+                    self?.reloadPageCutWhileLoading(runtime)
                 }
             )
         }
@@ -2733,6 +2739,32 @@ final class AppModel: ObservableObject {
             return false
         }
         return directPathController.bypassListener(forInstanceURL: runtime.instance.url)
+    }
+
+    /// Whether `runtime`'s document is being loaded by the open under way:
+    /// its navigation has started (`.connecting`), committed
+    /// (`.loadingPage`), or its cached page waits covered for the instance
+    /// (`.showingCached`), and it has not finished. A script, stylesheet or
+    /// first read cut there is not made again by WebKit or the page.
+    private func isLoadingDocument(of runtime: MobileRuntimeContext) -> Bool {
+        guard let attempt = runtimeOpenAttempt, attempt.runtime == runtime else {
+            return false
+        }
+        return [.connecting, .loadingPage, .showingCached].contains(attempt.phase)
+    }
+
+    /// A change of connection choice closed connections of `runtime`'s page
+    /// while its document was still loading (`DirectPathController.cutover`:
+    /// the link of 「仅直连和中继」 arriving on a slow network): the page is
+    /// loaded again, where it is, on the policy now in force.
+    private func reloadPageCutWhileLoading(_ runtime: MobileRuntimeContext) {
+        guard
+            runtimeOpenAttempt?.runtime == runtime,
+            sessionCoordinator.isSelectedRuntime(runtime)
+        else {
+            return
+        }
+        runtimeController?.reloadInstancePage()
     }
 
     /// 「仅直连和中继」 back to automatic for an open that is about to be

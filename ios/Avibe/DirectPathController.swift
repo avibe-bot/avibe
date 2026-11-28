@@ -606,6 +606,13 @@ final class DirectPathController {
     /// listener was closed for the background, a return was settled, an
     /// attempt to bind the listener's port again failed, or one succeeded.
     private let onAvailabilityChanged: () -> Void
+    /// Whether the shell is still loading this runtime's document (its
+    /// navigation has started and not finished). Asked just before a
+    /// cut-over closes the host's tunnel connections.
+    private let isLoadingDocument: (MobileRuntimeContext) -> Bool
+    /// A cut-over closed connections of this runtime's page while its
+    /// document was still loading: the shell loads the page again.
+    private let onLoadingPageCut: (MobileRuntimeContext) -> Void
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     private var listener: DirectConnectListener?
@@ -910,8 +917,12 @@ final class DirectPathController {
         pathUse: DirectPathUse = .shared,
         controlPlaneHost: String? = MobileControlPlaneConfiguration().baseURL.host,
         onStatusChanged: @escaping () -> Void,
-        onAvailabilityChanged: @escaping () -> Void = {}
+        onAvailabilityChanged: @escaping () -> Void = {},
+        isLoadingDocument: @escaping (MobileRuntimeContext) -> Bool,
+        onLoadingPageCut: @escaping (MobileRuntimeContext) -> Void
     ) {
+        self.isLoadingDocument = isLoadingDocument
+        self.onLoadingPageCut = onLoadingPageCut
         self.pathUse = pathUse
         self.controlPlaneHost = controlPlaneHost?.lowercased()
         self.websiteDataStore = websiteDataStore
@@ -1523,15 +1534,21 @@ final class DirectPathController {
 
     /// One change of policy at a time per host. It first waits, for a
     /// bounded time, until the host's tunnel connections carry nothing: the
-    /// page has just opened and may still be loading, and a load cut there
-    /// is not made again. Plans go on as they were meanwhile; a load the
-    /// shell would start waits (`loadGate`). Then the drain: new plans
-    /// wait; in-flight plans also fail their commit check. Sample the
-    /// latest choice after the drain so a late completion cannot reverse a
-    /// newer choice or touch another store.
+    /// page has just opened and may still be using them. Plans go on as
+    /// they were meanwhile; a load the shell would start waits
+    /// (`loadGate`). Then the drain: new plans wait; in-flight plans also
+    /// fail their commit check. Sample the latest choice after the drain so
+    /// a late completion cannot reverse a newer choice or touch another
+    /// store.
     ///
-    /// The page is told of what was closed as of any other closure, so it
-    /// opens its stream again and catches up. Nothing is reloaded.
+    /// A page that has loaded is told of what was closed as of any other
+    /// closure: it opens its stream again and catches up, and nothing is
+    /// reloaded. A page whose document was still loading cannot make a cut
+    /// script, stylesheet or first read again (a slow network: the wait ran
+    /// out, or a request was waiting for its answer through the quiet
+    /// second), so the shell loads it again, on the new policy. Whether it
+    /// was loading is asked before the drain, never after: a cut load ends
+    /// the navigation, and the page would look loaded.
     private func cutover(_ host: String) {
         let store = websiteDataStore.identifier
         guard routeOwner.routes(host, store: store), let listener, let port = listenerPort,
@@ -1544,6 +1561,10 @@ final class DirectPathController {
                 quietSeconds: Self.handoverQuietSeconds, waitSeconds: quietWait
             )
             guard let self else { return }
+            let loading = self.runtime.flatMap { runtime in
+                DirectAuthority(instanceURL: runtime.instance.url)?.host == host
+                    && self.isLoadingDocument(runtime) ? runtime : nil
+            }
             self.rewriting.insert(host)
             let drained = await listener.drainHost(host)
             self.rewriting.remove(host)
@@ -1562,7 +1583,13 @@ final class DirectPathController {
             // After the policy is in force: the connections the page opens
             // in answer are planned under it.
             if drained > 0 {
-                self.recordClosure(hosts: [host])
+                if let loading, self.runtime == loading {
+                    // The gate is open again; the load goes by the policy
+                    // now in force. No closure: that document is replaced.
+                    self.onLoadingPageCut(loading)
+                } else {
+                    self.recordClosure(hosts: [host])
+                }
             }
             self.onAvailabilityChanged()
         }
