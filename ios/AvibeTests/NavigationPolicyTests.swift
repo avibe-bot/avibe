@@ -5263,11 +5263,18 @@ extension NavigationPolicyTests {
         try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
         title = try await webView.evaluateJavaScript("document.title") as? String
         XCTAssertEqual(title, "new build")
-        XCTAssertEqual(documents.count, 2)
+        // The comparison's fetch, the live load, and the capture of the live
+        // page that follows it (`capturePage`).
+        try await waitUntil { documents.count == 3 }
         XCTAssertFalse(events.contains { $0.stage == .failed })
         // Asked again, nothing more is loaded.
         controller.directAvailabilityDidChange()
-        XCTAssertEqual(documents.count, 2)
+        let after = clock.now.advanced(by: .seconds(1))
+        while clock.now < after {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(documents.count, 3)
+        XCTAssertEqual(events.filter { $0.stage == .started && !$0.fromCache }.count, 1)
 
         // The same stale build again in this launch: kept.
         var secondConnected = 0
@@ -5301,12 +5308,16 @@ extension NavigationPolicyTests {
     private static let replayedShell =
         #"<script>document.documentElement.dataset.avibeReplayedShell = '1'</script>"#
 
+    private static func markedCachedBody(head: String) -> String {
+        #"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#
+            + head + "</head>"
+    }
+
     private static func markedCachedPage(_ origin: WebOrigin, head: String) -> RuntimeCachedPage {
         RuntimeCachedPage(
             url: origin.url,
             headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#.utf8
-                + Data(head.utf8) + Data("</head>".utf8)),
+            body: Data(markedCachedBody(head: head).utf8),
             capturedAt: Date(),
             keepsShellUnreachable: true
         )
@@ -5328,8 +5339,10 @@ extension NavigationPolicyTests {
             case "/api/session":
                 return reachable.value ? .json(#"{"authenticated":true}"#) : .status(530)
             case "/":
+                // The same build as the cached page: once connected, the
+                // currency check finds it current and nothing replaces it.
                 _ = documents.next()
-                return .html("<!doctype html><title>live</title>")
+                return .html(Self.markedCachedBody(head: Self.replayedShell))
             case "/no-content":
                 return LocalHTTPResponse(
                     status: 204,
