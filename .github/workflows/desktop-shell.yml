@@ -90,8 +90,9 @@ jobs:
           } | python -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
           echo "key=desktop-pr-debug-v1-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Find the archive digest published on master
+      - name: Find an exact debug-profile entry on master
         id: trusted
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         continue-on-error: true
         shell: python
         env:
@@ -99,47 +100,43 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           import json, os, re, subprocess
+          from datetime import datetime, timezone
           from urllib.parse import urlencode
           prefix = os.environ['PREFIX'] + '-'
           query = urlencode({'ref': 'refs/heads/master', 'key': prefix, 'per_page': 100, 'sort': 'created_at', 'direction': 'desc'})
           endpoint = 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/caches?' + query
           rows = json.loads(subprocess.check_output(['gh','api',endpoint]))['actions_caches']
           for row in rows:
-              match = re.fullmatch(re.escape(prefix) + '([a-f0-9]{64})', row['key'])
-              if row['ref'] == 'refs/heads/master' and match:
+              if row['ref'] == 'refs/heads/master' and re.fullmatch(re.escape(prefix) + r'[0-9]+-[0-9]+', row['key']):
+                  age = datetime.now(timezone.utc) - datetime.fromisoformat(row['created_at'])
                   with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-                      print('key=' + row['key'], 'digest=' + match[1], sep='\n', file=out)
+                      print('key=' + row['key'], file=out)
+                      print('fresh=' + str(0 <= age.total_seconds() < 86400).lower(), file=out)
                   break
 
-      - name: Restore desktop debug dependencies
+      - name: Restore desktop debug dependencies on PRs only
         id: cargo-read
-        if: steps.trusted.outputs.key != ''
+        if: github.event_name == 'pull_request' && steps.trusted.outputs.key != ''
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ runner.temp }}/desktop-debug-deps.tar.gz
           key: ${{ steps.trusted.outputs.key }}
 
-      - name: Verify master digest and stage dependencies before use
+      - name: Stage cached dependencies before use
         id: reuse
-        if: steps.cargo-read.outputs.cache-hit == 'true'
+        if: github.event_name == 'pull_request' && steps.cargo-read.outputs.cache-hit == 'true'
         continue-on-error: true
         shell: python
-        env:
-          EXPECTED: ${{ steps.trusted.outputs.digest }}
         run: |
-          import hashlib, os, pathlib, tarfile, tempfile
+          import os, pathlib, tarfile, tempfile
           archive = pathlib.Path(os.environ['RUNNER_TEMP'], 'desktop-debug-deps.tar.gz')
-          with archive.open('rb') as source:
-              if hashlib.file_digest(source, 'sha256').hexdigest() != os.environ['EXPECTED']:
-                  raise ValueError('Unverified desktop archive; building cold')
-              source.seek(0)
-              with tempfile.TemporaryDirectory(dir='.') as staging, tarfile.open(fileobj=source, mode='r:gz') as tar:
-                  tar.extractall(staging, filter='data')
-                  pathlib.Path('target').mkdir(exist_ok=True)
-                  pathlib.Path(staging, 'debug').rename('target/debug')
+          with tempfile.TemporaryDirectory(dir='.') as staging, tarfile.open(archive, 'r:gz') as tar:
+              tar.extractall(staging, filter='data')
+              pathlib.Path('target').mkdir(exist_ok=True)
+              pathlib.Path(staging, 'debug').rename('target/debug')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              print('Desktop Cargo: verified master payload.', file=summary)
+              print('Desktop Cargo: installed exact debug-profile dependency cache.', file=summary)
 
       - name: Report toolchain
         run: |
@@ -371,7 +368,7 @@ jobs:
       # release entry to fit. A cache failure is not a product failure.
       - name: Measure trusted debug dependency cache
         id: cargo-size
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-read.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.trusted.outputs.fresh != 'true'
         continue-on-error: true
         shell: bash
         env:
@@ -403,7 +400,6 @@ jobs:
           reserve=$((550000000 - sibling)); (( reserve >= 0 )) || reserve=0
           printf 'Desktop Cargo %s/%s: %s compressed bytes, %s repository bytes in use.\n' "$RUNNER_OS" "$RUNNER_ARCH" "$bytes" "$used" >> "$GITHUB_STEP_SUMMARY"
           if (( own + bytes <= 550000000 && used + bytes + reserve + 800000000 <= 10000000000 )); then
-            python -c 'import hashlib,sys; print("digest=" + hashlib.file_digest(open(sys.argv[1], "rb"), "sha256").hexdigest())' "$archive" >> "$GITHUB_OUTPUT"
             echo 'fits=true' >> "$GITHUB_OUTPUT"
           else
             echo '::notice::Desktop debug cache not saved: exceeds the measured operating budget.'
@@ -415,4 +411,4 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ runner.temp }}/desktop-debug-deps.tar.gz
-          key: ${{ steps.cargo-key.outputs.key }}-${{ steps.cargo-size.outputs.digest }}
+          key: ${{ steps.cargo-key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}

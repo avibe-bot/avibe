@@ -329,7 +329,12 @@ def test_pr_shell_cache_is_restore_only_and_cannot_create_pr_entries():
     save = next(item for item in shell['jobs']['shell']['steps'] if 'cache/save@' in item.get('uses', ''))
     assert save['with']['path'] == cache['with']['path']
     assert cache['with']['key'] == '${{ steps.trusted.outputs.key }}'
-    assert save['with']['key'] == '${{ steps.cargo-key.outputs.key }}-${{ steps.cargo-size.outputs.digest }}'
+    assert cache['if'] == "github.event_name == 'pull_request' && steps.trusted.outputs.key != ''"
+    steps = shell['jobs']['shell']['steps']
+    ids = {s['id']: s for s in steps if 'id' in s}
+    assert ids['reuse']['if'] == "github.event_name == 'pull_request' && steps.cargo-read.outputs.cache-hit == 'true'"
+    assert ids['cargo-size']['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.trusted.outputs.fresh != 'true'"
+    assert save['with']['key'] == '${{ steps.cargo-key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}'
     assert save['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.fits == 'true'"
 
 
@@ -371,9 +376,36 @@ def test_closed_pr_cleanup_rechecks_identity_and_state_before_deleting(monkeypat
     assert deleted == [['gh', 'api', '--include', '--method', 'DELETE', f'repos/fixture/repo/actions/caches/{i}'] for i in (2, 8)]
 
 
-@pytest.mark.parametrize('mode', ['warm', 'wrong digest', 'truncated'])
-def test_debug_cache_installs_only_verified_complete_archive(tmp_path, monkeypatch, mode):
-    import hashlib
+@pytest.mark.parametrize('age_hours,fresh', [(1, 'true'), (25, 'false')])
+def test_cache_lookup_selects_only_master_and_matching_generation(tmp_path, monkeypatch, age_hours, fresh):
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import parse_qs, urlsplit
+
+    step = next(s for s in workflow('desktop-shell.yml')['jobs']['shell']['steps'] if s.get('id') == 'trusted')
+    created = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat()
+    output = tmp_path / 'outputs'
+    monkeypatch.setenv('PREFIX', 'test-profile')
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'example/repo')
+    monkeypatch.setenv('GITHUB_OUTPUT', str(output))
+
+    def read_cache(cmd):
+        assert cmd[:2] == ['gh', 'api']
+        query = parse_qs(urlsplit(cmd[2]).query)
+        assert query['ref'] == ['refs/heads/master'] and query['key'] == ['test-profile-']
+        return json.dumps({'actions_caches': [
+            {'ref': ref, 'key': key, 'created_at': created} for ref, key in [
+                ('refs/pull/1/merge', 'test-profile-99-1'), ('refs/heads/master', 'test-profile-other-1'),
+                ('refs/heads/master', 'test-profile-42-1'),
+            ]
+        ]})
+
+    monkeypatch.setattr(subprocess, 'check_output', read_cache)
+    exec(step['run'], {})
+    assert output.read_text().splitlines() == ['key=test-profile-42-1', f'fresh={fresh}']
+
+
+@pytest.mark.parametrize('mode', ['warm', 'missing debug directory', 'truncated'])
+def test_debug_cache_install_is_staged_or_leaves_a_cold_build(tmp_path, monkeypatch, mode):
     import tarfile
 
     steps = workflow('desktop-shell.yml')['jobs']['shell']['steps']
@@ -386,14 +418,13 @@ def test_debug_cache_installs_only_verified_complete_archive(tmp_path, monkeypat
     data.write_bytes(b'fixture')
     archive = tmp_path / 'desktop-debug-deps.tar.gz'
     with tarfile.open(archive, 'w:gz') as tar:
-        tar.add(data, arcname='debug/deps/libfixture.rlib')
+        tar.add(data, arcname='other' if mode == 'missing debug directory' else 'debug/deps/libfixture.rlib')
     if mode == 'truncated':
         archive.write_bytes(archive.read_bytes()[:20])
-    monkeypatch.setenv('EXPECTED', hashlib.sha256(archive.read_bytes()).hexdigest() if mode != 'wrong digest' else '0' * 64)
     if mode == 'warm':
         exec(step['run'], {})
         assert (tmp_path / 'target/debug/deps/libfixture.rlib').read_bytes() == b'fixture'
     else:
-        with pytest.raises((ValueError, tarfile.TarError, EOFError)):
+        with pytest.raises((FileNotFoundError, tarfile.TarError, EOFError)):
             exec(step['run'], {})
         assert not (tmp_path / 'target/debug').exists()
