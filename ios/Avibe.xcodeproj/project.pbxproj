@@ -24,11 +24,14 @@
 		1000000000000000000000F1 /* DirectPathController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F1 /* DirectPathController.swift */; };
 		100000000000000000000163 /* DirectMeasure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000163 /* DirectMeasure.swift */; };
 		100000000000000000000165 /* DirectPathUse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000165 /* DirectPathUse.swift */; };
+		100000000000000000000167 /* DirectProbation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000167 /* DirectProbation.swift */; };
 		1000000000000000000000F2 /* DirectTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F2 /* DirectTransport.swift */; };
 		1000000000000000000000F3 /* DirectConnectListenerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F3 /* DirectConnectListenerTests.swift */; };
 		1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F4 /* DirectPathControllerTests.swift */; };
 		100000000000000000000164 /* DirectMeasureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000164 /* DirectMeasureTests.swift */; };
 		100000000000000000000166 /* DirectPathUseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000166 /* DirectPathUseTests.swift */; };
+		100000000000000000000168 /* DirectProbationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000168 /* DirectProbationTests.swift */; };
+		100000000000000000000169 /* direct_probation_cases.json in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000169 /* direct_probation_cases.json */; };
 		1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F5 /* DirectPathAppTests.swift */; };
 		1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F6 /* DirectPublicBackend.swift */; };
 		1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F7 /* DirectPublicBackendTests.swift */; };
@@ -240,11 +243,14 @@
 		2000000000000000000000F1 /* DirectPathController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathController.swift; sourceTree = "<group>"; };
 		200000000000000000000163 /* DirectMeasure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectMeasure.swift; sourceTree = "<group>"; };
 		200000000000000000000165 /* DirectPathUse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathUse.swift; sourceTree = "<group>"; };
+		200000000000000000000167 /* DirectProbation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectProbation.swift; sourceTree = "<group>"; };
 		2000000000000000000000F2 /* DirectTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectTransport.swift; sourceTree = "<group>"; };
 		2000000000000000000000F3 /* DirectConnectListenerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListenerTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000F4 /* DirectPathControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathControllerTests.swift; sourceTree = "<group>"; };
 		200000000000000000000164 /* DirectMeasureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectMeasureTests.swift; sourceTree = "<group>"; };
 		200000000000000000000166 /* DirectPathUseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathUseTests.swift; sourceTree = "<group>"; };
+		200000000000000000000168 /* DirectProbationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectProbationTests.swift; sourceTree = "<group>"; };
+		200000000000000000000169 /* direct_probation_cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "../tests/fixtures/direct_probation_cases.json"; sourceTree = "<group>"; };
 		2000000000000000000000F5 /* DirectPathAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathAppTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000F6 /* DirectPublicBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackend.swift; sourceTree = "<group>"; };
 		2000000000000000000000F7 /* DirectPublicBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackendTests.swift; sourceTree = "<group>"; };
@@ -443,6 +449,7 @@
 			children = (
 				700000000000000000000002 /* Avibe */,
 				A15A00000000000000000006 /* contract_vectors.json */,
+				200000000000000000000169 /* direct_probation_cases.json */,
 				700000000000000000000009 /* AvibeSheetFixture */,
 				70000000000000000000000A /* AvibeSheetFixtureTests */,
 				700000000000000000000004 /* AvibeTests */,
@@ -469,6 +476,7 @@
 				2000000000000000000000F1 /* DirectPathController.swift */,
 				200000000000000000000163 /* DirectMeasure.swift */,
 				200000000000000000000165 /* DirectPathUse.swift */,
+				200000000000000000000167 /* DirectProbation.swift */,
 				2000000000000000000000F6 /* DirectPublicBackend.swift */,
 				2000000000000000000000F2 /* DirectTransport.swift */,
 				2000000000000000000000A1 /* FormAccessoryBar.swift */,
@@ -550,6 +558,7 @@
 				3D0000000000000000000008 /* DirectPathSeamsTests.swift */,
 				200000000000000000000164 /* DirectMeasureTests.swift */,
 				200000000000000000000166 /* DirectPathUseTests.swift */,
+				200000000000000000000168 /* DirectProbationTests.swift */,
 				2000000000000000000000F7 /* DirectPublicBackendTests.swift */,
 				2000000000000000000000FA /* DeviceDescriptionTests.swift */,
 				2000000000000000000001F1 /* NativeScreenCaptureTests.swift */,
@@ -884,6 +893,7 @@
 					1000000000000000000000C1 /* native-subscription-key.json in Resources */,
 				1000000000000000000000AB /* relay-apns-envelope.json in Resources */,
 				A15B00000000000000000019 /* contract_vectors.json in Resources */,
+				100000000000000000000169 /* direct_probation_cases.json in Resources */,
 				1000000000000000000000AC /* instance-webpush-receiver.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1068,6 +1078,7 @@
 				1000000000000000000000F1 /* DirectPathController.swift in Sources */,
 				100000000000000000000163 /* DirectMeasure.swift in Sources */,
 				100000000000000000000165 /* DirectPathUse.swift in Sources */,
+				100000000000000000000167 /* DirectProbation.swift in Sources */,
 				1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */,
 				1000000000000000000000F2 /* DirectTransport.swift in Sources */,
 				1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */,
@@ -1137,6 +1148,7 @@
 				3D0000000000000000000007 /* DirectPathSeamsTests.swift in Sources */,
 				100000000000000000000164 /* DirectMeasureTests.swift in Sources */,
 				100000000000000000000166 /* DirectPathUseTests.swift in Sources */,
+				100000000000000000000168 /* DirectProbationTests.swift in Sources */,
 				1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */,
 				1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */,
 				1000000000000000000001F1 /* NativeScreenCaptureTests.swift in Sources */,
