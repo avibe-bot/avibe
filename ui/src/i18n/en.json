@@ -8396,7 +8396,7 @@
       "validUntil": "valid until {{date}}",
       "noCertificate": "no valid certificate",
       "directOnly": "Direct and relay only",
-      "directOnlyHint": "Uses the Cloudflare tunnel once to connect, then only direct and relay.",
+      "directOnlyHint": "Each open first goes through the Cloudflare tunnel to find this computer, then uses only direct and relay; without the tunnel it cannot open.",
       "choiceHintDesktop": "This choice is for this device only. If Direct and relay only then cannot connect, Avibe Desktop goes back to Automatic by itself.",
       "choiceHintDesktopPlain": "This choice is for this device only.",
       "choiceRevertedDirectUndated": "Direct and relay only could not connect, so the App went back to Automatic by itself.",
