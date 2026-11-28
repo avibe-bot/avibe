@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from sqlalchemy import Connection, func, select, update
+from sqlalchemy.exc import OperationalError
 
+from config import paths
 from storage import loop_writers
+from storage.db import create_sqlite_engine
 from storage.models import agent_sessions, scope_settings
 from storage.session_reclaim import (
     OVERRIDABLE_SETTING_COLUMNS,
@@ -914,6 +917,102 @@ def decode_metadata_object(raw: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def load_agent_session_metadata_entry(
+    agent_session_id: str,
+    key: str,
+    *,
+    db_path: Path | None = None,
+) -> Any:
+    """Read one ``metadata_json`` key for ``agent_session_id`` by primary key."""
+
+    cleaned_id = (agent_session_id or "").strip()
+    if not cleaned_id or not key:
+        return None
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return None
+
+    engine = create_sqlite_engine(path, read_only=True)
+    try:
+        with engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(agent_sessions.c.metadata_json)
+                    .where(agent_sessions.c.id == cleaned_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        metadata = decode_metadata_object(row["metadata_json"])
+        return metadata.get(key)
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        logger.debug("Agent session metadata load skipped for %s[%s]: %s", cleaned_id, key, exc)
+        return None
+    except Exception:
+        logger.debug("Agent session metadata load failed for %s[%s]", cleaned_id, key, exc_info=True)
+        return None
+    finally:
+        engine.dispose()
+
+
+def save_agent_session_metadata_entry(
+    agent_session_id: str,
+    key: str,
+    value: Any,
+    *,
+    db_path: Path | None = None,
+) -> bool:
+    """Write one ``metadata_json`` key for ``agent_session_id`` by primary key."""
+
+    cleaned_id = (agent_session_id or "").strip()
+    if not cleaned_id or not key:
+        return False
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return False
+
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = (
+                conn.execute(
+                    select(agent_sessions.c.metadata_json)
+                    .where(agent_sessions.c.id == cleaned_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return False
+            metadata = decode_metadata_object(row["metadata_json"])
+            if metadata.get(key) == value:
+                return True
+            metadata[key] = value
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == cleaned_id)
+                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
+            )
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        logger.debug("Agent session metadata save skipped for %s[%s]: %s", cleaned_id, key, exc)
+        return False
+    except Exception:
+        logger.debug("Agent session metadata save failed for %s[%s]", cleaned_id, key, exc_info=True)
+        return False
+    finally:
+        engine.dispose()
 
 
 def unchanged_text(column: Any, value: Any) -> Any:
