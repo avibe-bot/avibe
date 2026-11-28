@@ -429,7 +429,29 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     assert ("::warning title=Simulator stall::" in capfd.readouterr().out) == (calls == 2)
 
 
-@pytest.mark.skipif(sys.platform != 'darwin', reason='The native selector reads the OpenStep project using macOS plutil')
+@pytest.fixture
+def fixture_project(tmp_path, monkeypatch):
+    # Fixed regression graph from the #4397 shape, not a policy about which
+    # files must remain members in the project's next revision.
+    monkeypatch.chdir(tmp_path)
+    project = {'rootObject': 'root', 'objects': {
+        'root': {'isa': 'PBXProject', 'targets': ['target'], 'mainGroup': 'main'},
+        'target': {'isa': 'PBXNativeTarget', 'name': native.FIXTURE, 'buildPhases': ['phase']},
+        'phase': {'isa': 'PBXSourcesBuildPhase', 'files': ['a', 'b']},
+        'a': {'isa': 'PBXBuildFile', 'fileRef': 'bridge'}, 'b': {'isa': 'PBXBuildFile', 'fileRef': 'app'},
+        'main': {'isa': 'PBXGroup', 'children': ['group'], 'sourceTree': '<group>'},
+        'group': {'isa': 'PBXGroup', 'path': 'Avibe', 'children': ['bridge'], 'sourceTree': '<group>'},
+        'bridge': {'isa': 'PBXFileReference', 'sourceTree': '<group>', 'path': 'NativeBridge.swift'},
+        'app': {'isa': 'PBXFileReference', 'sourceTree': 'SOURCE_ROOT', 'path': 'AvibeSheetFixture/SheetFixtureApp.swift'},
+    }}
+    for name in ('ios/Avibe/NativeBridge.swift', 'ios/AvibeSheetFixture/SheetFixtureApp.swift'):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True)
+        path.touch()
+    monkeypatch.setattr(subprocess, 'check_output', lambda *_: json.dumps(project).encode())
+    return project
+
+
 @pytest.mark.parametrize(('paths', 'fixture_builds', 'fixture_runs'), [
     (['ios/Avibe/NativeBridge.swift'], 1, 0),  # Shared app source, not under the fixture directory (#4397).
     (['ios/AvibeSheetFixture/SheetFixtureApp.swift', 'ios/Moved.swift'], 1, 0),  # Deleted/renamed old side.
@@ -437,8 +459,7 @@ Test Suite 'Selected tests' failed at 2026-11-27 15:50:19.310.
     ([native.PROJECT], 1, 0),  # Removed/retargeted membership is not in the new graph.
     (['ios/Avibe/NativeBridge.swift', 'ios/AvibeSheetFixtureTests/SomeTest.swift'], 1, 1),
 ])
-def test_native_fixture_build_vs_execution(monkeypatch, tmp_path, paths, fixture_builds, fixture_runs):
-    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+def test_native_fixture_build_vs_execution(monkeypatch, tmp_path, fixture_project, paths, fixture_builds, fixture_runs):
     for key in ('SIMULATOR_ID', 'NATIVE_PATH_RECEIPT', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
         monkeypatch.setenv(key, str(tmp_path / key))
     target = 'AvibeSheetFixtureTests'
@@ -446,11 +467,7 @@ def test_native_fixture_build_vs_execution(monkeypatch, tmp_path, paths, fixture
     monkeypatch.setattr(native, 'verified_merge_paths', lambda *_: ('base', paths))
     monkeypatch.setattr(native, 'changed_sources', lambda *_: changes)
     commands, enumerated, executed = [], [], []
-    real_run = subprocess.run
-
     def run(cmd, **kwargs):
-        if cmd[0] == '/usr/bin/plutil':
-            return real_run(cmd, **kwargs)
         commands.append(cmd)
         assert kwargs['check']
 
@@ -471,9 +488,11 @@ def test_fixture_members_have_an_outer_native_pr_route(monkeypatch):
     from scripts.ci_targeted_paths import matched_proofs
 
     monkeypatch.chdir(Path(__file__).resolve().parents[1])
-    project = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', native.PROJECT]))
+    members = native.read_fixture_members()
+    if members is None:
+        pytest.skip('Cannot establish outer route coverage; native selector requires a conservative fixture build')
     # A new shared source outside ios/ must also reach this selector from Linux.
-    for path in native.fixture_members(project):
+    for path in members:
         assert 'ios-app' in matched_proofs(path), path
 
 

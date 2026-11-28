@@ -398,11 +398,12 @@ def fixture_members(project):
         while True:
             obj = objects[ref]
             part = obj.get('path', '')
-            if ref in seen or obj['sourceTree'] != '<group>' or '$' in part or Path(part).is_absolute():
+            tree = obj['sourceTree']
+            if ref in seen or tree not in ('<group>', 'SOURCE_ROOT') or '$' in part or Path(part).is_absolute():
                 raise ValueError('Unknown fixture source location')
             parts.append(part)
             seen.add(ref)
-            if ref == root['mainGroup']:
+            if tree == 'SOURCE_ROOT' or ref == root['mainGroup']:
                 break
             ref, = parents[ref]
         path = Path(os.path.normpath(os.path.join('ios', *reversed(parts))))
@@ -412,6 +413,15 @@ def fixture_members(project):
     return members
 
 
+def read_fixture_members():
+    try:
+        project = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', PROJECT]))
+        return fixture_members(project)
+    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        print(f'Cannot establish fixture source membership; building {FIXTURE}: {exc}', flush=True)
+        return None  # Unknown, never an empty inventory.
+
+
 def needs_fixture_build(paths):
     # A project edit can remove or move an old member; never rely on the new
     # inventory alone. --no-renames in verified_merge_paths includes both names.
@@ -419,12 +429,8 @@ def needs_fixture_build(paths):
         p.startswith('ios/Avibe.xcodeproj/xcshareddata/xcschemes/') for p in paths
     ):
         return True
-    try:
-        project = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', PROJECT]))
-        return not fixture_members(project).isdisjoint(paths)
-    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as exc:
-        print(f'Cannot establish fixture source membership; building {FIXTURE}: {exc}', flush=True)
-        return True
+    members = read_fixture_members()
+    return members is None or not members.isdisjoint(paths)
 
 
 def main():
