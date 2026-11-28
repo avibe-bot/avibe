@@ -69,7 +69,7 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
     if '.github/request-sensitive-checks.md' in paths:
         return set(PROOFS), set(LINUX | EXTRA)
     named = set().union(*(matched_proofs(p) for p in paths))
-    desktop = any(p.startswith('desktop/') for p in paths)
+    desktop = any(p.startswith('desktop/') or p == '.github/workflows/desktop-shell.yml' for p in paths)
     if not named:
         return ({'desktop'}, set(LINUX | PROOFS['desktop'])) if desktop else (set(), set(LINUX))
     if named == {'ios-app'}:
@@ -77,6 +77,8 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
         groups = {'ios', 'desktop'} if desktop else {'ios'}
         return groups, set(LINUX).union(*(PROOFS[g] for g in groups))
     groups = set().union(*(path_groups(p) for p in paths))
+    if desktop:
+        groups.add('desktop')
     if 'engine-publication' in named:
         groups.add('shared')
     if 'ios-app' in named:

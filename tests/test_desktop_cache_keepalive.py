@@ -327,7 +327,9 @@ def test_pr_shell_cache_is_restore_only_and_cannot_create_pr_entries():
     text = (ROOT / ".github/workflows/desktop-shell.yml").read_text(encoding="utf-8")
     assert "actions/cache@" not in text
     save = next(item for item in shell['jobs']['shell']['steps'] if 'cache/save@' in item.get('uses', ''))
-    assert save['with'] == cache['with']
+    assert save['with']['path'] == cache['with']['path']
+    assert cache['with']['key'] == '${{ steps.trusted.outputs.key }}'
+    assert save['with']['key'] == '${{ steps.cargo-key.outputs.key }}-${{ steps.cargo-size.outputs.digest }}'
     assert save['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-size.outputs.fits == 'true'"
 
 
@@ -339,7 +341,8 @@ def test_closed_pr_cleanup_rechecks_identity_and_state_before_deleting(monkeypat
 
     rows = [entry(i, f'refs/pull/{i}/merge') for i in range(1, 5)]
     rows += [entry(5, 'refs/heads/master'), entry(6, 'refs/tags/v1'), entry(7, 'refs/pull/7/head')]
-    replies = {1: ['open'], 2: ['closed', 'closed'], 3: ['closed', 'open'], 4: ['closed']}
+    rows += [entry(8, 'refs/pull/8/merge')]
+    replies = {1: ['open'], 2: ['closed', 'closed'], 3: ['closed', 'open'], 4: ['closed'], 8: ['closed', 'closed']}
     deleted = []
 
     def read(cmd):
@@ -357,6 +360,40 @@ def test_closed_pr_cleanup_rechecks_identity_and_state_before_deleting(monkeypat
 
     monkeypatch.setenv('GITHUB_REPOSITORY', 'fixture/repo')
     monkeypatch.setattr(subprocess, 'check_output', read)
-    monkeypatch.setattr(subprocess, 'run', lambda cmd, check: deleted.append(cmd))
+    def delete(cmd, capture_output):
+        deleted.append(cmd)
+        if cmd[-1].endswith('/2'):
+            return subprocess.CompletedProcess(cmd, 1, b'HTTP/2.0 404 Not Found\r\n')
+        return subprocess.CompletedProcess(cmd, 0, b'HTTP/2.0 204 No Content\r\n')
+
+    monkeypatch.setattr(subprocess, 'run', delete)
     exec(script, {})
-    assert deleted == [['gh', 'api', '--method', 'DELETE', 'repos/fixture/repo/actions/caches/2']]
+    assert deleted == [['gh', 'api', '--include', '--method', 'DELETE', f'repos/fixture/repo/actions/caches/{i}'] for i in (2, 8)]
+
+
+@pytest.mark.parametrize('mode', ['warm', 'wrong digest', 'truncated'])
+def test_debug_cache_installs_only_verified_complete_archive(tmp_path, monkeypatch, mode):
+    import hashlib
+    import tarfile
+
+    steps = workflow('desktop-shell.yml')['jobs']['shell']['steps']
+    step = next(s for s in steps if s.get('id') == 'reuse')
+    assert step['continue-on-error'] is True
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('RUNNER_TEMP', str(tmp_path))
+    monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(tmp_path / 'summary'))
+    data = tmp_path / 'dep'
+    data.write_bytes(b'fixture')
+    archive = tmp_path / 'desktop-debug-deps.tar.gz'
+    with tarfile.open(archive, 'w:gz') as tar:
+        tar.add(data, arcname='debug/deps/libfixture.rlib')
+    if mode == 'truncated':
+        archive.write_bytes(archive.read_bytes()[:20])
+    monkeypatch.setenv('EXPECTED', hashlib.sha256(archive.read_bytes()).hexdigest() if mode != 'wrong digest' else '0' * 64)
+    if mode == 'warm':
+        exec(step['run'], {})
+        assert (tmp_path / 'target/debug/deps/libfixture.rlib').read_bytes() == b'fixture'
+    else:
+        with pytest.raises((ValueError, tarfile.TarError, EOFError)):
+            exec(step['run'], {})
+        assert not (tmp_path / 'target/debug').exists()

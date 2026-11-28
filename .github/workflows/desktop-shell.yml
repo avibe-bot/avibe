@@ -67,6 +67,12 @@ jobs:
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
 
+      # Pin the interpreter before the first pip install: the runner image's own Python moves
+      # ahead of the wheels this job pins (macos-26's `python` is now 3.15; PyYAML 6.0.3 has wheels only up to 3.14).
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
       # Both PRs and merged master compile debug/test. Release caches contain
       # a different profile, path list, and often different target triples.
       - name: Identify the native desktop dependency build
@@ -78,27 +84,62 @@ jobs:
           set -euo pipefail
           test -n "$BUILD_INPUTS"
           digest=$({
-            rustc -vV; cargo -V; cargo clippy -V
+            rustc -vV; cargo -V; clippy-driver --version
             printf '%s\n' "$RUNNER_OS/$RUNNER_ARCH/${ImageOS:-}/${ImageVersion:?}" "$BUILD_INPUTS" "${RUSTFLAGS:-}" "${SDKROOT:-}"
             if [[ "$RUNNER_OS" == macOS ]]; then xcodebuild -version; xcrun --sdk macosx --show-sdk-version; fi
           } | python -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
           echo "key=desktop-pr-debug-v1-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
 
+      - name: Find the archive digest published on master
+        id: trusted
+        continue-on-error: true
+        shell: python
+        env:
+          PREFIX: ${{ steps.cargo-key.outputs.key }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import json, os, re, subprocess
+          from urllib.parse import urlencode
+          prefix = os.environ['PREFIX'] + '-'
+          query = urlencode({'ref': 'refs/heads/master', 'key': prefix, 'per_page': 100, 'sort': 'created_at', 'direction': 'desc'})
+          endpoint = 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/caches?' + query
+          rows = json.loads(subprocess.check_output(['gh','api',endpoint]))['actions_caches']
+          for row in rows:
+              match = re.fullmatch(re.escape(prefix) + '([a-f0-9]{64})', row['key'])
+              if row['ref'] == 'refs/heads/master' and match:
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+                      print('key=' + row['key'], 'digest=' + match[1], sep='\n', file=out)
+                  break
+
       - name: Restore desktop debug dependencies
         id: cargo-read
+        if: steps.trusted.outputs.key != ''
+        continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ runner.temp }}/desktop-debug-deps.tar.gz
-          key: ${{ steps.cargo-key.outputs.key }}
+          key: ${{ steps.trusted.outputs.key }}
 
-      - name: Reuse dependencies, never a workspace product or test result
+      - name: Verify master digest and stage dependencies before use
+        id: reuse
         if: steps.cargo-read.outputs.cache-hit == 'true'
-        shell: bash
+        continue-on-error: true
+        shell: python
+        env:
+          EXPECTED: ${{ steps.trusted.outputs.digest }}
         run: |
-          set -euo pipefail
-          mkdir -p target
-          tar -xzf - -C target < "$RUNNER_TEMP/desktop-debug-deps.tar.gz"
-          echo 'Desktop Cargo: exact debug dependency cache restored.' >> "$GITHUB_STEP_SUMMARY"
+          import hashlib, os, pathlib, tarfile, tempfile
+          archive = pathlib.Path(os.environ['RUNNER_TEMP'], 'desktop-debug-deps.tar.gz')
+          with archive.open('rb') as source:
+              if hashlib.file_digest(source, 'sha256').hexdigest() != os.environ['EXPECTED']:
+                  raise ValueError('Unverified desktop archive; building cold')
+              source.seek(0)
+              with tempfile.TemporaryDirectory(dir='.') as staging, tarfile.open(fileobj=source, mode='r:gz') as tar:
+                  tar.extractall(staging, filter='data')
+                  pathlib.Path('target').mkdir(exist_ok=True)
+                  pathlib.Path(staging, 'debug').rename('target/debug')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              print('Desktop Cargo: verified master payload.', file=summary)
 
       - name: Report toolchain
         run: |
@@ -118,12 +159,6 @@ jobs:
 
       - name: Test the bootstrap page's connection rule
         run: npm run test:bootstrap
-
-      # Pin the interpreter before the first pip install: the runner image's own Python moves
-      # ahead of the wheels this job pins (macos-26's `python` is now 3.15; PyYAML 6.0.3 has wheels only up to 3.14).
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: "3.12"
 
       - name: Install pinned driver validation dependency
         working-directory: .
@@ -345,7 +380,7 @@ jobs:
           set -euo pipefail
           # Remove every local crate, including path dependencies outside the
           # workspace membership. The reader builds its own code and fixtures.
-          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          cargo metadata --locked --all-features --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
           python - <<'PY'
           import json, os, pathlib, subprocess
           metadata = pathlib.Path(os.environ['RUNNER_TEMP'], 'cargo-metadata.json')
@@ -364,9 +399,11 @@ jobs:
               if (index($2,prefix) == 1) own += $3; else sibling += $3
             }
             END { printf "%.0f %.0f %.0f\n", total, own, sibling }' "$RUNNER_TEMP/desktop-cache-inventory.tsv")
-          reserve=$((900000000 - sibling)); (( reserve >= 0 )) || reserve=0
+          # Margin for two observed ~375 MB manifest writes. Not a global reservation.
+          reserve=$((550000000 - sibling)); (( reserve >= 0 )) || reserve=0
           printf 'Desktop Cargo %s/%s: %s compressed bytes, %s repository bytes in use.\n' "$RUNNER_OS" "$RUNNER_ARCH" "$bytes" "$used" >> "$GITHUB_STEP_SUMMARY"
-          if (( own + bytes <= 900000000 && used + bytes + reserve + 100000000 <= 10000000000 )); then
+          if (( own + bytes <= 550000000 && used + bytes + reserve + 800000000 <= 10000000000 )); then
+            python -c 'import hashlib,sys; print("digest=" + hashlib.file_digest(open(sys.argv[1], "rb"), "sha256").hexdigest())' "$archive" >> "$GITHUB_OUTPUT"
             echo 'fits=true' >> "$GITHUB_OUTPUT"
           else
             echo '::notice::Desktop debug cache not saved: exceeds the measured operating budget.'
@@ -378,4 +415,4 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ runner.temp }}/desktop-debug-deps.tar.gz
-          key: ${{ steps.cargo-key.outputs.key }}
+          key: ${{ steps.cargo-key.outputs.key }}-${{ steps.cargo-size.outputs.digest }}

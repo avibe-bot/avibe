@@ -87,7 +87,10 @@ jobs:
               if not any(all(v[k] == row[k] for k in ('id','ref','key','version')) for v in caches(ref)):
                   continue
               if closed():
-                  subprocess.run(['gh', 'api', '--method', 'DELETE', repo + '/actions/caches/' + str(row['id'])], check=True)
+                  result = subprocess.run(['gh', 'api', '--include', '--method', 'DELETE', repo + '/actions/caches/' + str(row['id'])], capture_output=True)
+                  if result.returncode and re.match(rb'HTTP/\S+ 404(?:\s|$)', result.stdout):
+                      continue  # Already gone. Never ignore other HTTP or transport errors.
+                  result.check_returncode()
                   print(f"Removed cache {row['id']} from closed PR {match[1]}.")
 
   prune-desktop-caches:
