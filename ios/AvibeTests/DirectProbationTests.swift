@@ -54,7 +54,7 @@ enum DirectProbationCases {
         var events = 0
         for item in cases {
             let name = item["name"] as? String ?? "?"
-            var rule = DirectProbationGuard()
+            var rule = DirectProbationGuard(stored: [:])
             var wallOffset: Int64 = 0
             var adoptions: [String: Int] = [:]
             for event in item["events"] as? [[String: Any]] ?? [] {

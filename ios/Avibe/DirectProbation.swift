@@ -80,7 +80,7 @@ struct DirectProbationGuard: Sendable {
 
     /// A new process: the stored levels, no link, in the background until
     /// told otherwise.
-    init(stored: [String: DirectProbationRecord] = [:]) {
+    init(stored: [String: DirectProbationRecord]) {
         self.stored = stored.filter { Self.levelsSeconds.indices.contains($0.value.level) }
     }
 
@@ -164,14 +164,6 @@ struct DirectProbationGuard: Sendable {
     /// The current link is up and adopted.
     func isAdopted(_ key: String) -> Bool {
         links[key]?.adoptedAt != nil
-    }
-
-    /// The current link, if it is still waiting.
-    func waitingLink(_ key: String) -> Int? {
-        guard let link = links[key], link.adoptedAt == nil else {
-            return nil
-        }
-        return link.id
     }
 
     /// What time alone decides: the expiry, then "held".

@@ -739,7 +739,7 @@ final class DirectPathController {
     private var probationWake: Task<Void, Never>?
     private var probationProbe: Task<Void, Never>?
     /// How often a waiting link is asked whether it still answers.
-    static let probationProbeMs: Int64 = 60_000
+    private static let probationProbeMs: Int64 = 60_000
     /// The kind of path the usable transport's connection runs on, as last
     /// reported; nil when none is usable or the transport cannot tell.
     private var currentPath: DirectPathKind?
