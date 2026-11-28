@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -101,14 +102,76 @@ def test_production_capture_uses_isolated_direct_mcp(monkeypatch, tmp_path):
     assert calls[0][0] == [str(tmp_path / "cua-driver.exe"), "mcp", "--direct"]
 
 
-def test_production_capture_is_wired_into_the_existing_windows_job():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-shell.yml").read_text())
-    steps = workflow["jobs"]["shell"]["steps"]
-    source = next(step for step in steps if step.get("name") == "Verify Windows Cua Driver security boundary as ordinary user")
+def driver_job():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/windows-driver.yml").read_text())
+    return workflow["jobs"]["verify"]
+
+
+def test_production_capture_is_a_required_parallel_windows_job():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/desktop-shell.yml").read_text())["jobs"]
+    (caller,) = (job for job in jobs.values() if job.get("uses") == "./.github/workflows/windows-driver.yml")
+    job = driver_job()
+    for required in (caller, job):
+        assert not {"if", "needs", "continue-on-error"}.intersection(required)
+    assert job["runs-on"] == "windows-latest"
+    steps = job["steps"]
+    (checkout,) = (s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    assert all("continue-on-error" not in step and ("if" not in step or step["if"] == "always()") for step in steps)
+    (source,) = (step for step in steps if "test-windows-driver-source.ps1" in step.get("run", ""))
     assert "-CaptureProductionDriver" in source["run"]
     upload = next(step for step in steps if step.get("with", {}).get("name", "").startswith("windows-cua-driver-production-"))
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["path"].strip().endswith("production/**")
+
+
+@pytest.mark.parametrize("path", [
+    ".github/workflows/windows-driver.yml",
+    ".github/workflows/desktop-shell.yml",
+    "tests/test_windows_driver_source_harness.py",
+])
+def test_driver_gate_changes_require_native_execution(path):
+    from scripts.ci_docs_only import scope_of
+    from scripts.ci_fast_pr import selected
+
+    _, jobs = selected(scope_of([("M", "100644", "100644", path)], True))
+    assert "desktop-shell" in jobs
+
+
+@pytest.mark.parametrize("fault", [None, "checkout", "provenance", "binary", "receipts"])
+def test_receipt_index_binds_candidate_binary_and_native_results(tmp_path, fault):
+    (step,) = (s for s in driver_job()["steps"] if s.get("shell") == "python")
+    root = tmp_path / "avibe-windows-driver-security-fixture"
+    (root / "production").mkdir(parents=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    binary_digest = hashlib.sha256(b"binary").hexdigest()
+    (root / "production/cua-driver.exe").write_bytes(b"binary" if fault != "binary" else b"different")
+    (root / "provenance.json").write_text(json.dumps({
+        "avibe_head": head if fault != "provenance" else "a" * 40,
+        "production_binary_sha256": binary_digest,
+    }))
+    receipts = {"junit-no-skip-count-guard.xml": b"guard", "junit-case.xml": b"case"}
+    for name, content in receipts.items():
+        if fault != "receipts" or name != "junit-case.xml":
+            (root / name).write_bytes(content)
+    result = subprocess.run(
+        [sys.executable, "-c", step["run"]], cwd=ROOT, capture_output=True, text=True,
+        env={**os.environ, "RUNNER_TEMP": str(tmp_path), "GITHUB_SHA": head if fault != "checkout" else "b" * 40},
+    )
+    index = root / "candidate.json"
+    if fault:
+        expected = {
+            "checkout": "candidate checkout", "provenance": "candidate checkout",
+            "binary": "Production binary", "receipts": "Missing native test receipts",
+        }
+        assert result.returncode != 0 and expected[fault] in result.stderr
+        assert not index.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(index.read_text()) == {
+            "candidate_sha": head, "production_binary_sha256": binary_digest,
+            "junit_sha256": {k: hashlib.sha256(v).hexdigest() for k, v in receipts.items()},
+        }
 
 
 def test_windows_manifest_records_ordered_final_patch():
@@ -133,15 +196,14 @@ def test_native_evidence_upload_is_bounded():
     # the native job. Do not pretend that finding their implementation spelling
     # in a script proves they execute. This check owns only the published
     # artifact-name/path contract in the parsed workflow configuration.
-    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-shell.yml").read_text())
-    steps = workflow["jobs"]["shell"]["steps"]
+    steps = driver_job()["steps"]
     upload = next(
         step for step in steps if step.get("with", {}).get("name", "").startswith("windows-cua-driver-security-")
     )
     assert upload["with"]["if-no-files-found"] == "error"
     paths = upload["with"]["path"].splitlines()
-    assert len(paths) == 3
     assert [path.rsplit("*/", 1)[-1] for path in paths] == [
+        "candidate.json",
         "provenance.json",
         "junit-*.xml",
         "logs/**",
