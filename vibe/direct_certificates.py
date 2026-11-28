@@ -167,6 +167,26 @@ class _HostOrders:
                    self.starts[-1] + _OPAQUE_FAILURE_GAP if self.starts else 0,
                    self.starts[0] + _ORDER_WINDOW if len(self.starts) == _ORDER_LIMIT else 0)
 
+    @classmethod
+    def replacement_floor(cls, hostname: str) -> float:
+        # Separate from pairing/key state, and from the fixed-shape ledger
+        # older clients must still be able to read on downgrade.
+        try:
+            value = json.loads(_read_private(cls.path(hostname).with_suffix('.floor'), 128))
+        except FileNotFoundError:
+            return 0.0
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError('invalid certificate replacement floor')
+        return value
+
+    @classmethod
+    def defer_replacement(cls, hostname: str, floor: float) -> None:
+        if floor > cls.replacement_floor(hostname):
+            write_atomic(cls.path(hostname).with_suffix('.floor'), json.dumps(floor))
+
+    def start_deadline(self, hostname: str) -> float:
+        return max(self.deadline(), self.replacement_floor(hostname))
+
     def record_failure(self, hostname: str, now: float) -> None:
         if not self.starts:  # Existing order from a version without a reservation.
             self.starts.append(now)
@@ -588,7 +608,7 @@ class DirectCertificateClient:
             else:
                 # A known budget wait is not an HTTP attempt. Don't increment
                 # failures or push its request lease past the effective deadline.
-                deadline = _HostOrders.load(state.hostname).deadline()
+                deadline = _HostOrders.load(state.hostname).start_deadline(state.hostname)
                 if now < deadline:
                     state.order_not_before = max(state.order_not_before, deadline)
                     _save(state)
@@ -628,8 +648,9 @@ class DirectCertificateClient:
                     return CertificateResult('superseded')
                 admitted_at = time.time()
                 budget = _HostOrders.load(live.hostname)
-                if admitted_at < budget.deadline():
-                    live.order_not_before = max(live.order_not_before, budget.deadline())
+                deadline = max(due_at, live.order_not_before, budget.start_deadline(live.hostname))
+                if admitted_at < deadline:
+                    live.order_not_before = max(live.order_not_before, deadline)
                     _save(live)
                     return _result(live, admitted_at)
                 reservation = [*budget.starts, admitted_at]
@@ -839,20 +860,30 @@ class DirectCertificateClient:
                 state.last_error_code = 'order_failed'
                 return changed
         if not current and status == 'failed':
-            budget = _HostOrders.load(state.hostname)
-            if server_fault:
-                charge = state.start_charge
-                if charge and budget.starts == sorted(charge)[-_ORDER_LIMIT:]:
-                    budget.starts = charge[:-1]
-                    budget.save(state.hostname)
-                state.server_failures = min(8, state.server_failures + 1)
-                state.order_not_before = max(state.order_not_before,
-                                             now + min(_MAX_BACKOFF, 60 * 2 ** (state.server_failures - 1)))
-            else:
-                state.server_failures = 0
-                budget.record_failure(state.hostname, now)
+            failures = min(8, state.server_failures + 1) if server_fault else 0
+            floor = max(retry_at, now + min(_MAX_BACKOFF, 60 * 2 ** (failures - 1)) if failures else 0.0)
+            # The hostname floor must be durable before releasing any charge.
+            # On storage failure retain the validated order ID and advance that
+            # same order again (even if this was an immediate start response).
+            try:
+                if floor:
+                    _HostOrders.defer_replacement(state.hostname, floor)
+                budget = _HostOrders.load(state.hostname)
+                if server_fault:
+                    charge = state.start_charge
+                    if charge and budget.starts == sorted(charge)[-_ORDER_LIMIT:]:
+                        budget.starts = charge[:-1]
+                        budget.save(state.hostname)
+                else:
+                    budget.record_failure(state.hostname, now)
+            except (OSError, ValueError, TypeError):
+                state.status, state.last_error_code = 'pending', 'local_state_unavailable'
+                state.order_not_before = max(state.order_not_before, floor)
+                state.next_poll_at = max(next_poll, state.request_not_before)
+                return changed
+            state.server_failures = failures
             state.start_charge = None
-            state.order_not_before = max(state.order_not_before, retry_at, budget.deadline())
+            state.order_not_before = max(state.order_not_before, floor, budget.deadline())
         elif changed and pem is not None:
             state.server_failures = 0
             # Recovery succeeded. Ordinary renewal/rotation isn't a failed-order

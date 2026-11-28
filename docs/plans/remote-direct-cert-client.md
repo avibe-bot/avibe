@@ -92,7 +92,11 @@ a rotation; these are one-shot commands, not settings.
   Only then does the client release that order's own start reservation (if known);
   earlier starts, including unknown writes, remain charged. Replacement orders
   back off for one minute, doubling to one hour, and wait until a valid server
-  `retry_at` when later. Cleanup still advances the same order. A missing or
+  `retry_at` when later. The floor is stored by hostname before a refund and is
+  checked again immediately before a new start. Re-pairing cannot clear a
+  committed floor. If settlement cannot be saved, the same order remains
+  pollable rather than turning a storage error into permission for a new start.
+  Cleanup still advances the same order. A missing or
   unknown origin, a malformed retry floor, or a lost reply is not a server-fault
   exemption. Older persisted failures are not retroactively reclassified.
 - A conflict resumes the supplied order if its key is still held (an active-key

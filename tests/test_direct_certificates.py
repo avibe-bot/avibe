@@ -878,6 +878,62 @@ def test_server_marker_on_cleanup_pending_does_not_refund_or_replace_order(setup
     assert len(certificates._HostOrders.load(HOST).starts) == 1
 
 
+@pytest.mark.parametrize('fail_suffix', ['.floor', '.json'])
+def test_server_settlement_write_failure_keeps_order_pollable_and_floor(setup, monkeypatch, fail_suffix):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    floor = queued.next_poll_at + 8 * 3600
+    env.backend.advance_response = dict(status='failed', public_key_fingerprint=fp, certificate_pem=None,
+                                        failure_origin='server', retry_at=datetime.fromtimestamp(floor, timezone.utc).isoformat())
+    target = certificates._HostOrders.path(HOST).with_suffix(fail_suffix)
+    original = certificates.write_atomic
+    def fail_once(path, data, **kwargs):
+        if path == target:
+            monkeypatch.setattr(certificates, 'write_atomic', original)
+            raise OSError('synthetic write failure')
+        return original(path, data, **kwargs)
+    monkeypatch.setattr(certificates, 'write_atomic', fail_once)
+    pending = due(env, queued)
+    assert pending.status == 'pending' and pending.last_error_code == 'local_state_unavailable'
+    assert pending.next_poll_at >= floor
+    env.client = DirectCertificateClient()
+    env.clock.now = floor - 1
+    calls = len(env.backend.calls)
+    env.client.poll(allowed=True, retry=True)
+    assert len(env.backend.calls) == calls
+    assert due(env, pending).status == 'failed' and env.backend.calls[-1][1].endswith('/advance')
+    assert not certificates._HostOrders.load(HOST).starts
+
+
+def test_server_floor_survives_repair_and_is_checked_at_final_admission(setup, monkeypatch):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    floor = queued.next_poll_at + 8 * 3600
+    env.backend.advance_response = dict(status='failed', public_key_fingerprint=fp, certificate_pem=None,
+                                        failure_origin='server', retry_at=datetime.fromtimestamp(floor, timezone.utc).isoformat())
+    assert due(env, queued).next_poll_at == floor
+    discard_direct_certificates()
+    env.config.remote_access.vibe_cloud.instance_secret = 'replacement-fixture'
+    env.config.save()
+    env.client = DirectCertificateClient()
+    env.clock.now = floor - 100
+    calls = len(env.backend.calls)
+    assert env.client.poll(allowed=True).next_poll_at == floor and len(env.backend.calls) == calls
+    env.clock.now = floor
+    real_save = certificates._save
+    def rewind_after_intent(state):
+        real_save(state)
+        monkeypatch.setattr(certificates, '_save', real_save)
+        env.clock.now = floor - 100  # Selection passed; actual HTTP admission has not.
+    monkeypatch.setattr(certificates, '_save', rewind_after_intent)
+    waiting = env.client.poll(allowed=True)
+    assert waiting.next_poll_at >= floor and len(env.backend.calls) == calls
+    assert certificates._HostOrders.load(HOST).starts == []
+    assert due(env, waiting).status == 'queued' and env.backend.calls[-1][1] == 'certificates/orders'
+
+
 def test_server_fault_restores_displaced_start_without_erasing_prior_history(setup):
     env = setup
     history = [env.clock.now - t for t in (300, 200, 100)]
