@@ -723,7 +723,7 @@ Agent rules:
 
 ```markdown
 ### Mentions
-`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session; an untyped `@<name>` in older messages is an Agent. The interface shows them as names and titles, linked, so write them this way when you name one to the user; a bare id tells them nothing. In a user's message a mention says whom they pointed at, not what to do, and one of yourself needs no command. Bare `@` or `#` text is not a mention.
+`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session; an untyped `@<name>` in older messages is an Agent. The interface shows Bots and Sessions as names and titles, linked, so write those this way when you name one to the user; a bare id tells them nothing. In a user's message a mention says whom they pointed at, not what to do, and one of yourself needs no command. Bare `@` or `#` text is not a mention.
 ```
 
 ### You are a Bot (Bot Sessions only)
