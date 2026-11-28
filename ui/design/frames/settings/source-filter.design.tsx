@@ -1,5 +1,5 @@
-// Settings › Experimental › Source filter (docs/plans/vibey-source-filter-hooks.md). Experimental is a list of
-// experiments; Source filter is one row that opens its own page (owner decision 2026-11-27). The page shows the
+// Settings › Experimental › Information cocoon (docs/plans/vibey-source-filter-hooks.md). Experimental is a list of
+// experiments; Information cocoon is one row that opens its own page (owner decision 2026-11-27). The page shows the
 // switch, the guide link and, when on, the hook folder and each script's state. The phone's section list with the
 // new row is settings/sections/phone. The failure shown is an example.
 import {
@@ -34,7 +34,7 @@ const on: SourceFilterStatus = {
     before_fetch: { found: false, last_failure: null },
     after_fetch: {
       found: true,
-      last_failure: { at: new Date(DESIGN_NOW - 28 * 60_000).toISOString(), reason: 'it timed out after 60 s' },
+      last_failure: { at: new Date(DESIGN_NOW - 28 * 60_000).toISOString(), reason: 'it timed out after 600 s' },
     },
   },
 };
@@ -67,13 +67,13 @@ const page = (device: Device, status: SourceFilterStatus, title: string, height:
 });
 
 const designFrames = frames([
-  list('phone', off, '手机 · 实验性 · 项目列表（信源过滤关闭）', IPHONE_17_PRO.height),
-  list('phone', on, '手机 · 实验性 · 项目列表（信源过滤已开启）', IPHONE_17_PRO.height),
-  page('phone', off, '手机 · 实验性 › 信源过滤 · 关闭（默认）', IPHONE_17_PRO.height),
-  page('phone', on, '手机 · 实验性 › 信源过滤 · 打开：已找到、未找到、上次运行失败', IPHONE_17_PRO.height),
-  list('desktop', on, '桌面 · 实验性 · 项目列表（信源过滤已开启）', 760),
-  page('desktop', off, '桌面 · 实验性 › 信源过滤 · 关闭（默认）', 760),
-  page('desktop', on, '桌面 · 实验性 › 信源过滤 · 打开：已找到、未找到、上次运行失败', 900),
+  list('phone', off, '手机 · 实验性 · 项目列表（信息茧房关闭）', IPHONE_17_PRO.height),
+  list('phone', on, '手机 · 实验性 · 项目列表（信息茧房已开启）', IPHONE_17_PRO.height),
+  page('phone', off, '手机 · 实验性 › 信息茧房 · 关闭（默认）', IPHONE_17_PRO.height),
+  page('phone', on, '手机 · 实验性 › 信息茧房 · 打开：已找到、未找到、上次运行失败', IPHONE_17_PRO.height),
+  list('desktop', on, '桌面 · 实验性 · 项目列表（信息茧房已开启）', 760),
+  page('desktop', off, '桌面 · 实验性 › 信息茧房 · 关闭（默认）', 760),
+  page('desktop', on, '桌面 · 实验性 › 信息茧房 · 打开：已找到、未找到、上次运行失败', 900),
 ]);
 
 export default designFrames;

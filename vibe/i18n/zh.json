@@ -1183,10 +1183,10 @@
       "upstream_error": "供应商返回错误。"
     },
     "sourceFilter": {
-      "blocked": "已被信源过滤拦截：{reason}",
-      "blockedNoReason": "已被信源过滤拦截。",
-      "failed": "信源过滤脚本 {hook} 运行失败，这次调用已拦下：{reason}。",
-      "refused": "信源过滤改写后的参数未通过检查（{code}）。"
+      "blocked": "已被信息茧房拦截：{reason}",
+      "blockedNoReason": "已被信息茧房拦截。",
+      "failed": "信息茧房脚本 {hook} 运行失败，这次调用已拦下：{reason}。",
+      "refused": "信息茧房改写后的参数未通过检查（{code}）。"
     },
     "hostedTools": {
       "noExecutor": {
@@ -1813,8 +1813,8 @@
       "fetch_refused": "网页请求被拒绝",
       "fetch_unavailable": "网页不可用",
       "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了",
-      "source_filter_blocked": "信源过滤拦下了这次调用",
-      "source_filter_failed": "信源过滤脚本运行失败，这次调用已拦下"
+      "source_filter_blocked": "信息茧房拦下了这次调用",
+      "source_filter_failed": "信息茧房脚本运行失败，这次调用已拦下"
     },
     "tool": {
       "web_search": "网页搜索",

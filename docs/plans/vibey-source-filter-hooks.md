@@ -1,4 +1,4 @@
-# Vibey source filter hooks
+# Vibey information cocoon hooks
 
 Status: **implemented** (phase 1 in #4351, phase 2: gateway access for hooks, §5.5). Where the design notes below
 and the implementation differ, the "Implementation" sections win.
@@ -30,7 +30,7 @@ and the implementation differ, the "Implementation" sections win.
 
 ## 中文摘要
 
-- 设置 → 实验性 是一个可扩展的项目列表，信源过滤是其中可点击的一行；点进去才看到它的全部开关和详细配置，并可返回列表。信源过滤默认关。打开后，Vibey 的 `web_search` 和 `web_fetch` 全部走 Avibe 的工具执行路径，主模型不再收到这两个工具的原生声明。工具总开关、代搜和读链服务、回退顺序、计费都照旧。开关在下一轮生效。关闭后恢复原配置，因为开关只是一层覆盖，不改写已有设置。
+- 设置 → 实验性 是一个可扩展的项目列表，信息茧房是其中可点击的一行；点进去才看到它的全部开关和详细配置，并可返回列表。信息茧房默认关。打开后，Vibey 的 `web_search` 和 `web_fetch` 全部走 Avibe 的工具执行路径，主模型不再收到这两个工具的原生声明。工具总开关、代搜和读链服务、回退顺序、计费都照旧。开关在下一轮生效。关闭后恢复原配置，因为开关只是一层覆盖，不改写已有设置。
 - 钩子对工具的输入和输出有完整的拦截和改写能力，没有字段或来源白名单：
   - before 可以改参数、直接返回自定义结果（不发上游）、阻断；
   - after 可以替换整份输出，无论成功还是失败。after_search 可以新增任意来源或替换全部结果；after_fetch 可以改来源 URL、最终 URL 和整份结果；
@@ -44,7 +44,7 @@ and the implementation differ, the "Implementation" sections win.
 - 只管这两个工具，不声称约束 bash、MCP、浏览器或其他工具的联网。
 - 模型代搜（已决定）：保留网关的"模型代搜"候选，前后都过滤。搜索服务、模型代搜，以及它们之间的回退，共用同一对调用级钩子：before 在第一个候选之前跑一次，after 在最终输出上跑一次，不为每个候选重复执行。代搜模型在网关内部仍使用自身的原生搜索，所以本功能保证的是"模型看到的每份输出都经过了钩子"，而不是"没有任何供应商内置搜索被执行"（§8）。
 - 脚本环境：Python 优先。纯标准库的脚本无需安装。有依赖时，四个脚本共用该目录下的一套 `pyproject.toml` + `uv.lock`，由作者或机主显式运行 `uv sync --locked` 生成 `.venv`。热路径直接启动 `.venv/bin/python`，搜索时从不临时装包。JS 等其他语言以后按需支持，沿用同一 JSON 协议，现在不做。
-- 已决定（未实现）：信源过滤打开时，钩子进程总会多出 `AVIBE_GATEWAY_URL` 和 `AVIBE_GATEWAY_KEY` 两个变量，用于调用本机网关的 chat/completions。模型 ID 由脚本在请求里自己指定，没有默认模型选择；`AVIBE_GATEWAY_MODEL` 只是曾讨论过的未来可选项，不属于本草案的契约。
+- 已决定（未实现）：信息茧房打开时，钩子进程总会多出 `AVIBE_GATEWAY_URL` 和 `AVIBE_GATEWAY_KEY` 两个变量，用于调用本机网关的 chat/completions。模型 ID 由脚本在请求里自己指定，没有默认模型选择；`AVIBE_GATEWAY_MODEL` 只是曾讨论过的未来可选项，不属于本草案的契约。
   - 以下是实现建议和验收目标，尚未验证，界面也不作承诺：钥匙只在本次钩子运行内有效、只能用于推理，不能用托管工具（所以不会递归触发钩子）；
   - 计费单独记录；
   - 不注入上游钥匙，也不注入主会话 token。
@@ -69,9 +69,9 @@ privileges.
 
 ## 2. The setting
 
-- **Location:** Settings → Experimental is an extensible list of items (owner decision). Source filter is one
+- **Location:** Settings → Experimental is an extensible list of items (owner decision). Information cocoon is one
   clickable row in that list. Opening it shows all of its switches and detailed configuration, with a way back
-  to the list. The source filter switch is off by default.
+  to the list. The information cocoon switch is off by default.
   - Proposed storage: an optional V2 key such as `vibey.experimental.source_filter.enabled: bool` (the name is
     open).
   - A missing or malformed value reads as off and logs a warning. Startup never fails because of it.
@@ -188,7 +188,7 @@ The run facts (attempts, usage, cost) are not part of the request (§6).
   are the canonical argument check (for example an empty query) and, for fetch, the full safety gate
   (`web-fetch.md` §3.1). A check that fails becomes the gateway's ordinary error output, which then reaches
   `after_*`.
-- **What the model sees on `block`:** a tool error "blocked by source filter", with the hook's `reason` (truncated)
+- **What the model sees on `block`:** a tool error "blocked by information cocoon", with the hook's `reason` (truncated)
   if it gave one.
 
 ### 5.4 Python environment
@@ -219,7 +219,7 @@ Vibey request on the gateway; there is no per-call hook attribution on the tool 
 This lets a hook ask a model for a judgement, for example "is this source trustworthy", through the local Model
 Hub gateway, without holding any provider key.
 
-- **No separate switch (owner decision).** While the source filter is on, every hook run gets both variables
+- **No separate switch (owner decision).** While the information cocoon is on, every hook run gets both variables
   below. Settings has no extra grant control and no default-model picker.
 - **Variables injected into the hook process:**
   - `AVIBE_GATEWAY_URL`: the local gateway's OpenAI-compatible base URL. The script calls
@@ -293,7 +293,7 @@ added, it follows the same rule: one call-level pair of hooks.
 
 ## 9. UI and docs brief (for Product to finalize)
 
-- **Settings → Experimental:** a list where Source filter is one clickable row. Its detail page holds everything
+- **Settings → Experimental:** a list where Information cocoon is one clickable row. Its detail page holds everything
   below and links back to the list:
   - the switch;
   - one row per hook with found / not found and its path;
@@ -468,7 +468,7 @@ else:
 
 §5.5 (adopted):
 
-16. While the source filter is on, every hook run gets only `AVIBE_GATEWAY_URL` and
+16. While the information cocoon is on, every hook run gets only `AVIBE_GATEWAY_URL` and
     `AVIBE_GATEWAY_KEY`; the model comes from the script's request. Target, to be verified by the
     implementation: the key works only for `chat/completions`
     during that hook run, refuses hosted tools, and stops working after the run.
@@ -491,7 +491,7 @@ else:
 | Item | State |
 | --- | --- |
 | Proxy `web_search` / `web_fetch`, services, executors, fallback, billing | shipped |
-| Source filter switch, hook directory, protocol, actions, UI, docs | draft (this file) |
+| Information cocoon switch, hook directory, protocol, actions, UI, docs | draft (this file) |
 | `.venv` / `uv.lock` hook environment | draft |
 | Gateway access for hooks (`AVIBE_GATEWAY_*`) | adopted, not implemented |
 | Hooks in other languages (JS) | possible later; not designed |

@@ -3328,11 +3328,11 @@
     },
     "experimental": {
       "subtitle": "这些功能还在试用，可能随版本调整。",
-      "loadFailed": "读取信源过滤失败，请重试。",
+      "loadFailed": "读取信息茧房失败，请重试。",
       "sourceFilter": {
-        "title": "信源过滤",
+        "title": "信息茧房",
         "summary": "用你自己的脚本处理 Vibey 的网页搜索和网页读取。",
-        "use": "启用信源过滤",
+        "use": "启用信息茧房",
         "guide": "脚本怎么写",
         "scripts": "脚本",
         "scriptsHint": "放在下面的目录里，没放的会跳过。",
@@ -6193,8 +6193,8 @@
           "fetch_refused": "网页请求被拒绝。",
           "fetch_unavailable": "网页不可用。",
           "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了。",
-          "source_filter_blocked": "信源过滤拦下了这次调用。",
-          "source_filter_failed": "信源过滤脚本运行失败，这次调用已拦下。"
+          "source_filter_blocked": "信息茧房拦下了这次调用。",
+          "source_filter_failed": "信息茧房脚本运行失败，这次调用已拦下。"
         },
         "mode": {
           "native": "原生 · {{provider}}",

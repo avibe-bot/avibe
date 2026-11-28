@@ -1183,10 +1183,10 @@
       "upstream_error": "The provider returned an error."
     },
     "sourceFilter": {
-      "blocked": "Blocked by the source filter: {reason}",
-      "blockedNoReason": "Blocked by the source filter.",
-      "failed": "The source filter script {hook} failed, so this call was blocked: {reason}.",
-      "refused": "The arguments the source filter wrote were refused ({code})."
+      "blocked": "Blocked by the information cocoon: {reason}",
+      "blockedNoReason": "Blocked by the information cocoon.",
+      "failed": "The information cocoon script {hook} failed, so this call was blocked: {reason}.",
+      "refused": "The arguments the information cocoon wrote were refused ({code})."
     },
     "hostedTools": {
       "noExecutor": {
@@ -1813,8 +1813,8 @@
       "fetch_refused": "the page request was refused",
       "fetch_unavailable": "the page is unavailable",
       "fetch_sources_blocked": "all page-reading sources are blocked or disabled",
-      "source_filter_blocked": "the source filter blocked this call",
-      "source_filter_failed": "a source filter script failed, so this call was blocked"
+      "source_filter_blocked": "the information cocoon blocked this call",
+      "source_filter_failed": "an information cocoon script failed, so this call was blocked"
     },
     "tool": {
       "web_search": "Web search",
