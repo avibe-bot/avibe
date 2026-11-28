@@ -93,7 +93,7 @@ describe('ConnectionPage · in an Avibe Desktop window of another computer\'s in
     // 2 and the instance has direct on: 「仅直连和中继」 is offered, and the hint says that the
     // desktop app sets it back itself.
     const group = await screen.findByRole('radiogroup', { name: '这台设备' });
-    expect(Array.from(group.querySelectorAll('[role="radio"]')).map((each) => each.textContent?.split(/[哪不建]/)[0])).toEqual(['自动', '仅 Cloudflare 隧道', '仅直连和中继']);
+    expect(Array.from(group.querySelectorAll('[role="radio"]')).map((each) => each.textContent?.split(/[哪不每]/)[0])).toEqual(['自动', '仅 Cloudflare 隧道', '仅直连和中继']);
     expect(within(group).getByRole('radio', { name: /^自动/ }).getAttribute('aria-checked')).toBe('true');
     expect(within(group).getByRole('radio', { name: /^仅直连和中继/ }).getAttribute('aria-checked')).toBe('false');
     expect(group.parentElement!.textContent).toContain('这个选择只管这台设备。');
