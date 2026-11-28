@@ -688,6 +688,43 @@ def test_invalid_path_use_batches_are_ignored_in_full(instance, caplog):
     assert not any("path_use" in line for line in caplog.messages)
 
 
+def test_public_fault_and_route_fallback_counts_are_bounded_independent_receipts(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready"
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    causes = ["address_benchmark", "address_private", "address_other", "dns_failed", "connect_timeout",
+              "connect_refused", "connect_other"]
+    faults = [{"cause": cause, "count": 1} for cause in causes]
+    reasons = ["open_failed", "open_timed_out", "retry"]
+    fallbacks = [{"reason": reason, "count": 2**31-1} for reason in reasons]
+
+    def ask(a, b):
+        caplog.clear()
+        reply = _post(client, {**_body(), "public_faults": a, "route_fallbacks": b, "path_use": [_path_use()]})
+        assert reply.status_code == 200 and reply.get_json() == baseline
+        assert any("direct rendezvous path_use " in line for line in caplog.messages)
+        return [line for line in caplog.messages if line.startswith(("direct rendezvous public_fault ",
+                                                                     "direct rendezvous route_fallback "))]
+
+    fault_lines = [f"direct rendezvous public_fault cause={cause} count=1" for cause in causes]
+    fallback_lines = [f"direct rendezvous route_fallback reason={reason} count=2147483647" for reason in reasons]
+    assert ask(faults[:5], fallbacks) == fault_lines[:5] + fallback_lines
+    assert ask(faults[5:], []) == fault_lines[5:]
+    assert ask(faults[:1] * 2, fallbacks) == fallback_lines
+    for key, valid in (("cause", faults[0]), ("reason", fallbacks[0])):
+        for bad in (None, [], valid, [valid] * 6, [valid, None], [valid, {key: valid[key]}],
+                    [valid, {**valid, "host": "example.invalid"}], [valid, {**valid, key: []}],
+                    [valid, {**valid, key: "unexpected"}],
+                    *([valid, {**valid, "count": count}] for count in (False, True, 0, -1, 1.0, "1", 2**31))):
+            if key == "cause":
+                assert ask(bad, fallbacks) == fallback_lines
+            else:
+                assert ask(faults[:1], bad) == fault_lines[:1]
+
+
 def test_path_guard_batch_is_independent_of_path_use_and_the_offer(instance, caplog):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
