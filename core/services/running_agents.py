@@ -6,9 +6,9 @@ liveness source it reads is controller in-memory state:
 
 - Claude: ``controller.claude_sessions`` (composite_key -> SDK client),
   ``claude_active_sessions`` (active turn set), ``session_last_activity``.
-- Codex: ``CodexAgent._session_mgr`` / ``_turn_registry`` / ``transport_for_session``
-  (one transport/pid per working dir, shared by many sessions).
-- OpenCode: ``OpenCodeAgent._active_requests`` (no OS subprocess / pid).
+- Other registered ``BaseAgent`` backends (Codex, OpenCode, Vibey, Antigravity,
+  and future backends): via ``BaseAgent.collect_running_rows(now)``,
+  ``live_session_workdir(base_session_id)``, and ``live_session_state(...)``.
 - Orphans: the persisted Claude process registry (``claude_processes.json``)
   for ``owner == "session"`` processes that no longer have a live SDK client.
 
@@ -33,39 +33,16 @@ import os
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
+from modules.agents.base import (
+    build_running_agent_row,
+    safe_call as _safe_call,
+    safe_items as _safe_items,
+)
+
 if TYPE_CHECKING:
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_call(fn, default):
-    """Call ``fn`` tolerating ``RuntimeError`` from concurrent mutation.
-
-    Like ``_safe_items`` but for callables that iterate live registries
-    internally (e.g. ``CodexSessionManager.all_base_sessions`` unions three
-    lock-free dicts that the controller loop may mutate while we run in a worker
-    thread). Retries a few times, then returns ``default``.
-    """
-    for _ in range(3):
-        try:
-            return fn()
-        except RuntimeError:
-            continue
-    return default
-
-
-def _safe_items(mapping: Any) -> list:
-    """``list(mapping.items())`` tolerant of concurrent mutation.
-
-    The snapshot runs in a worker thread (``asyncio.to_thread``) while the
-    controller loop may still mutate these registries, so a plain
-    ``list(d.items())`` can raise ``RuntimeError: dictionary changed size during
-    iteration``. Reuses ``_safe_call``'s retry-then-default behavior.
-    """
-    if not hasattr(mapping, "items"):
-        return []
-    return _safe_call(lambda: list(mapping.items()), [])
 
 
 def _base_from_composite(composite_key: str) -> str:
@@ -104,37 +81,19 @@ def _make_row(
     model: Optional[str] = None,
     elapsed_seconds: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Build one normalized running-agent row.
-
-    ``state`` is one of ``active`` (turn in flight), ``idle`` (connected but no
-    active turn), ``orphan`` (process in registry with no live session).
-    ``elapsed_seconds`` reads as "busy for" on active rows (seconds since the
-    current turn went active) and "idle for" on idle/orphan rows (seconds since
-    the last activity); ``None`` when the baseline is unknown.
-    """
-    return {
-        "backend": backend,
-        "state": state,
-        "base_session_id": base_session_id,
-        "composite_key": composite_key,
-        "workdir": workdir,
-        "pid": pid,
-        "pid_shared": pid_shared,
-        "native_session_id": native_session_id,
-        "model": model,
-        "elapsed_seconds": (round(elapsed_seconds, 1) if isinstance(elapsed_seconds, (int, float)) else None),
-        # Filled by _enrich_from_db when a matching agent_sessions row exists.
-        "session_id": None,
-        "title": None,
-        "platform": None,
-        "scope_type": None,
-        "scope_display_name": None,
-        "scope_id": None,
-        "visibility": None,
-        "trigger_source": None,
-        "agent_name": None,
-        "openable_in_chat": False,
-    }
+    """Build one normalized running-agent row."""
+    return build_running_agent_row(
+        backend=backend,
+        state=state,
+        base_session_id=base_session_id,
+        composite_key=composite_key,
+        workdir=workdir,
+        pid=pid,
+        pid_shared=pid_shared,
+        native_session_id=native_session_id,
+        model=model,
+        elapsed_seconds=elapsed_seconds,
+    )
 
 
 def _collect_claude(
@@ -199,152 +158,27 @@ def _collect_claude(
     return rows
 
 
-def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    agent = _get_agent(controller, "codex")
-    if agent is None:
-        return rows
-    session_mgr = getattr(agent, "_session_mgr", None)
-    turn_registry = getattr(agent, "_turn_registry", None)
-    transport_for_session = getattr(agent, "transport_for_session", None)
-    if session_mgr is None or not callable(transport_for_session):
-        return rows
+_PREFERRED_AGENT_SNAPSHOT_ORDER = ("codex", "opencode", "vibey", "antigravity")
 
-    # ``all_base_sessions`` unions three lock-free dicts internally, so guard it
-    # against concurrent mutation (we run in a worker thread, §to_thread).
-    base_ids = list(_safe_call(session_mgr.all_base_sessions, []))
-    # Resolve each base's app-server once, then count sessions per process (so
-    # the UI can flag a pid shared across sessions).
-    entries: list[tuple[str, Optional[str], bool, Any]] = []
-    transport_session_count: dict[int, int] = {}
-    for base in base_ids:
-        cwd = session_mgr.get_cwd(base)
-        active_turn = turn_registry.get_active_turn(base) if turn_registry is not None else None
-        # A request already holds the Workbench/runtime turn while ``turn/start`` is
-        # in flight, but ``get_active_turn`` stays empty until the turn id finalizes.
-        # Treat that pending-start window as active too — otherwise the UI offers
-        # Disconnect and the idle ``_end_codex`` path bypasses the canonical stop /
-        # terminal-result release and can leave the runtime gate stuck.
-        has_pending = (
-            bool(turn_registry.has_pending_turn_start(base))
-            if turn_registry is not None and hasattr(turn_registry, "has_pending_turn_start")
-            else False
-        )
-        is_active = bool(active_turn) or has_pending
-        transport = _safe_call(lambda base=base: transport_for_session(base), None)
-        # A transport object can outlive its app-server when the process exits out
-        # of band (crash / reader-task failure): it stays bound with ``is_alive``
-        # False until a later cleanup removes it. Treat a dead transport as no
-        # live transport so it can't surface as a phantom idle row.
-        if transport is not None and not getattr(transport, "is_alive", True):
-            transport = None
-        # Idle eviction drops the app-server transport but preserves cwd/session
-        # mappings for resume bookkeeping. Such bases are not live and must not
-        # appear as phantom idle rows; keep only a transport-backed base or a still
-        # active (or pending-start) turn that needs to remain visible.
-        if transport is None and not is_active:
+
+def _collect_registered_agents(controller: "Controller", now: float) -> list[dict[str, Any]]:
+    service = getattr(controller, "agent_service", None)
+    agents = getattr(service, "agents", None)
+    if not agents:
+        return []
+    items = dict(_safe_items(agents))
+    ordered_names: list[str] = [name for name in _PREFERRED_AGENT_SNAPSHOT_ORDER if name in items]
+    ordered_names.extend(
+        sorted(name for name in items if name != "claude" and name not in _PREFERRED_AGENT_SNAPSHOT_ORDER)
+    )
+    rows: list[dict[str, Any]] = []
+    for name in ordered_names:
+        agent = items.get(name)
+        if agent is None or getattr(agent, "name", name) == "claude":
             continue
-        entries.append((base, cwd, is_active, transport))
-        if transport is not None:
-            transport_session_count[id(transport)] = transport_session_count.get(id(transport), 0) + 1
-
-    for base, cwd, is_active, transport in entries:
-        pid = getattr(transport, "pid", None) if transport is not None else None
-        # No per-session elapsed for codex: an app-server's activity time is shared
-        # across every session on that process and is touched on every streaming
-        # event, so it reflects neither this session's turn duration nor its idle
-        # time. Report ``None`` rather than a misleading value; the row still
-        # shows backend / state / pid_shared.
-        rows.append(
-            _make_row(
-                backend="codex",
-                state="active" if is_active else "idle",
-                base_session_id=base,
-                workdir=cwd,
-                pid=pid,
-                pid_shared=bool(transport is not None and transport_session_count.get(id(transport), 0) > 1),
-                elapsed_seconds=None,
-            )
-        )
-    return rows
-
-
-def _collect_opencode(controller: "Controller") -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    agent = _get_agent(controller, "opencode")
-    if agent is None:
-        return rows
-    # OpenCode has no owned subprocess (HTTP server + poll loop), so no pid.
-    # ``_active_requests`` only holds IN-FLIGHT turn tasks (popped in a finally
-    # once the turn settles), so OpenCode only ever surfaces as ``active`` here —
-    # connected-but-idle OpenCode sessions are not represented (D2 is honored for
-    # claude/codex; OpenCode has no idle-session registry to enumerate).
-    active_requests = getattr(agent, "_active_requests", {}) or {}
-    for base, task in _safe_items(active_requests):
-        if bool(getattr(task, "done", lambda: False)()):
-            continue  # finishing — being popped; not a live turn
-        rows.append(
-            _make_row(
-                backend="opencode",
-                state="active",
-                base_session_id=base,
-            )
-        )
-    return rows
-
-
-def _collect_vibey(controller: "Controller") -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    agent = _get_agent(controller, "vibey")
-    if agent is None:
-        return rows
-    # Vibey runs in process, so no pid. A Session's runtime holds its Turn's run
-    # until the run settles; like OpenCode, Vibey only ever surfaces as ``active``.
-    for _session_id, runtime in _safe_items(getattr(agent, "_runtimes", {}) or {}):
-        run = getattr(runtime, "run", None)
-        if run is None or run.settled:
-            continue
-        rows.append(
-            _make_row(
-                backend="vibey",
-                state="active",
-                base_session_id=run.request.base_session_id,
-                workdir=run.cwd or None,
-            )
-        )
-    return rows
-
-
-def _collect_antigravity(controller: "Controller", now: float) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    agent = _get_agent(controller, "antigravity")
-    if agent is None:
-        return rows
-    sessions = getattr(agent, "_sessions", {}) or {}
-    for runtime_key, session in _safe_items(sessions):
-        turn = session.active_turn
-        is_active = bool(turn is not None and not turn.settled)
-        alive = not session.retired and session.client.is_alive
-        if not alive and not is_active:
-            continue
-        if is_active:
-            ts = session.turn_started_at if isinstance(session.turn_started_at, (int, float)) else session.last_activity
-        else:
-            ts = session.last_activity
-        elapsed = (now - ts) if isinstance(ts, (int, float)) else None
-        rows.append(
-            _make_row(
-                backend="antigravity",
-                state="active" if is_active else "idle",
-                base_session_id=session.base_session_id,
-                composite_key=runtime_key,
-                workdir=session.workdir or None,
-                pid=session.client.pid,
-                native_session_id=session.native_session_id,
-                model=session.current_model,
-                elapsed_seconds=elapsed,
-            )
-        )
+        collect = getattr(agent, "collect_running_rows", None)
+        if callable(collect):
+            rows.extend(collect(now))
     return rows
 
 
@@ -745,57 +579,10 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     agent = _get_agent(controller, "opencode")
     if agent is None:
         return {"ok": False, "error": "opencode_unavailable"}
-    active_requests = getattr(agent, "_active_requests", {}) or {}
-    task = active_requests.get(base_session_id)
-    session_mgr = getattr(agent, "_session_manager", None)
-    get_req = getattr(session_mgr, "get_request_session", None)
-    req_info = get_req(base_session_id) if callable(get_req) else None
-    if task is not None and not task.done():
-        # Active End has already gone through the canonical stop path. Finish
-        # interrupting its native poll, but do not retire a shared server here.
-        try:
-            # Only the generation running this native turn can abort it.
-            bound = getattr(agent, "_bound_generation", None)
-            server = bound(base_session_id) if callable(bound) else None
-            if req_info and server is not None:
-                await server.abort_session(req_info[0], req_info[1])
-        except Exception:  # noqa: BLE001
-            logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
-        task.cancel()
-        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
-
-    retire_req = getattr(session_mgr, "retire_request_session", None)
-    if callable(retire_req):
-        retire_req(base_session_id)
-    else:
-        pop_req = getattr(session_mgr, "pop_request_session", None)
-        if callable(pop_req):
-            pop_req(base_session_id)
-    getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
-    list_all = getattr(session_mgr, "list_all", None)
-    if not callable(list_all) or list_all():
-        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
-    if any(not request.done() for request in active_requests.values()):
-        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
-
-    # The serve process is shared across Sessions. Retiring the current
-    # generation stops it now when idle; work bound to any generation keeps
-    # that process until the work drains.
-    retire = getattr(agent, "retire_current_generation", None)
-    if not callable(retire):
-        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
-    try:
-        outcome = await retire()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
-        return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
-    outcome = getattr(outcome, "value", outcome)
-    if outcome == "failed":
-        # The stop ran and the process survived; its record stays for a retry.
-        return {"ok": False, "error": "runtime_retirement_failed", "detail": "OpenCode server did not exit"}
-    # "draining": a lease or other work still binds the process, which stops
-    # once that drains. Only a confirmed stop reports a killed process.
-    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": outcome == "stopped"}
+    end_session = getattr(agent, "end_session", None)
+    if not callable(end_session):
+        return {"ok": False, "error": "opencode_registries_unavailable"}
+    return await end_session(base_session_id)
 
 
 async def _settle_workbench_turn(
@@ -862,34 +649,12 @@ def _live_workdir_for_backend(
     composite_key: Optional[str],
 ) -> Optional[str]:
     workdir = _workdir_from_composite(composite_key)
-    if workdir or not base_session_id:
+    if workdir or not base_session_id or not backend or backend == "claude":
         return workdir
-    if backend == "codex":
-        agent = _get_agent(controller, "codex")
-        session_mgr = getattr(agent, "_session_mgr", None)
-        get_cwd = getattr(session_mgr, "get_cwd", None)
-        if callable(get_cwd):
-            try:
-                return get_cwd(base_session_id)
-            except Exception:  # noqa: BLE001
-                logger.debug("end: failed to resolve codex cwd for %s", base_session_id, exc_info=True)
-    elif backend == "opencode":
-        agent = _get_agent(controller, "opencode")
-        session_mgr = getattr(agent, "_session_manager", None)
-        get_req = getattr(session_mgr, "get_request_session", None)
-        if callable(get_req):
-            try:
-                req_info = get_req(base_session_id)
-            except Exception:  # noqa: BLE001
-                req_info = None
-            if req_info and len(req_info) >= 2:
-                return req_info[1]
-    elif backend == "antigravity":
-        agent = _get_agent(controller, "antigravity")
-        sessions = getattr(agent, "_sessions", {}) or {}
-        for _key, session in _safe_items(sessions):
-            if session.base_session_id == base_session_id and session.workdir:
-                return session.workdir
+    agent = _get_agent(controller, backend)
+    getter = getattr(agent, "live_session_workdir", None)
+    if callable(getter):
+        return getter(base_session_id)
     return None
 
 
@@ -1255,47 +1020,11 @@ def _resolve_live_state(
             return None
         return "active" if ck in active else "idle"
 
-    if backend == "codex":
-        agent = _get_agent(controller, "codex")
-        registry = getattr(agent, "_turn_registry", None)
-        if registry is None or not base_session_id:
-            return None
-        try:
-            if registry.get_active_turn(base_session_id):
-                return "active"
-            if hasattr(registry, "has_pending_turn_start") and registry.has_pending_turn_start(base_session_id):
-                return "active"
-        except Exception:  # noqa: BLE001
-            logger.debug("end: codex live-state check failed for %s", base_session_id, exc_info=True)
-            return None
-        return "idle"
-
-    if backend == "opencode":
-        agent = _get_agent(controller, "opencode")
-        active_requests = getattr(agent, "_active_requests", {}) or {}
-        task = active_requests.get(base_session_id) if base_session_id else None
-        if task is None:
-            return "idle"
-        try:
-            return "idle" if bool(task.done()) else "active"
-        except Exception:  # noqa: BLE001
-            return "active"
-
-    if backend == "antigravity":
-        agent = _get_agent(controller, "antigravity")
-        sessions = getattr(agent, "_sessions", {}) or {}
-        matched = False
-        for key, session in _safe_items(sessions):
-            if (composite_key and key == composite_key) or (
-                base_session_id and session.base_session_id == base_session_id
-            ):
-                turn = session.active_turn
-                is_active = bool(turn is not None and not turn.settled)
-                if is_active:
-                    return "active"
-                if not session.retired and session.client.is_alive:
-                    matched = True
-        return "idle" if matched else None
+    if backend:
+        agent = _get_agent(controller, backend)
+        resolver = getattr(agent, "live_session_state", None)
+        if callable(resolver):
+            return resolver(composite_key=composite_key, base_session_id=base_session_id)
 
     return None
 
@@ -1464,10 +1193,7 @@ def snapshot_running_agents(
     seen_pids: set[int] = set()
     rows: list[dict[str, Any]] = []
     rows.extend(_collect_claude(controller, now, seen_native, seen_pids))
-    rows.extend(_collect_codex(controller))
-    rows.extend(_collect_opencode(controller))
-    rows.extend(_collect_vibey(controller))
-    rows.extend(_collect_antigravity(controller, now))
+    rows.extend(_collect_registered_agents(controller, now))
     rows.extend(_collect_orphans(seen_native, seen_pids))
 
     _enrich_from_db(rows)

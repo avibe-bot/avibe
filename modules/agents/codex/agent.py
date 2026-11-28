@@ -65,7 +65,12 @@ from core.runtime_ownership import (
     RuntimeSessionBinding,
     wake_runtime_ownership,
 )
-from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.base import (
+    AgentRequest,
+    BaseAgent,
+    build_running_agent_row,
+    safe_call,
+)
 from modules.im.base import FileAttachment
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -350,6 +355,103 @@ class CodexAgent(BaseAgent):
         if transport is None:
             return None
         return self._transport_alive(transport)
+
+    def collect_running_rows(self, now: float) -> list[dict[str, Any]]:
+        del now
+        rows: list[dict[str, Any]] = []
+        session_mgr = getattr(self, "_session_mgr", None)
+        turn_registry = getattr(self, "_turn_registry", None)
+        if session_mgr is None:
+            return rows
+
+        # ``all_base_sessions`` unions three lock-free dicts internally, so guard it
+        # against concurrent mutation (snapshot may run in a worker thread).
+        base_ids = list(safe_call(session_mgr.all_base_sessions, []))
+        # Resolve each base's app-server once, then count sessions per process (so
+        # the UI can flag a pid shared across sessions).
+        entries: list[tuple[str, Optional[str], bool, Any]] = []
+        transport_session_count: dict[int, int] = {}
+        for base in base_ids:
+            cwd = session_mgr.get_cwd(base)
+            active_turn = turn_registry.get_active_turn(base) if turn_registry is not None else None
+            # A request already holds the Workbench/runtime turn while ``turn/start`` is
+            # in flight, but ``get_active_turn`` stays empty until the turn id finalizes.
+            # Treat that pending-start window as active too — otherwise the UI offers
+            # Disconnect and the idle ``_end_codex`` path bypasses the canonical stop /
+            # terminal-result release and can leave the runtime gate stuck.
+            has_pending = (
+                bool(turn_registry.has_pending_turn_start(base))
+                if turn_registry is not None and hasattr(turn_registry, "has_pending_turn_start")
+                else False
+            )
+            is_active = bool(active_turn) or has_pending
+            transport = safe_call(lambda base=base: self.transport_for_session(base), None)
+            # A transport object can outlive its app-server when the process exits out
+            # of band (crash / reader-task failure): it stays bound with ``is_alive``
+            # False until a later cleanup removes it. Treat a dead transport as no
+            # live transport so it can't surface as a phantom idle row.
+            if transport is not None and not getattr(transport, "is_alive", True):
+                transport = None
+            # Idle eviction drops the app-server transport but preserves cwd/session
+            # mappings for resume bookkeeping. Such bases are not live and must not
+            # appear as phantom idle rows; keep only a transport-backed base or a still
+            # active (or pending-start) turn that needs to remain visible.
+            if transport is None and not is_active:
+                continue
+            entries.append((base, cwd, is_active, transport))
+            if transport is not None:
+                transport_session_count[id(transport)] = transport_session_count.get(id(transport), 0) + 1
+
+        for base, cwd, is_active, transport in entries:
+            pid = getattr(transport, "pid", None) if transport is not None else None
+            # No per-session elapsed for codex: an app-server's activity time is shared
+            # across every session on that process and is touched on every streaming
+            # event, so it reflects neither this session's turn duration nor its idle
+            # time. Report ``None`` rather than a misleading value; the row still
+            # shows backend / state / pid_shared.
+            rows.append(
+                build_running_agent_row(
+                    backend="codex",
+                    state="active" if is_active else "idle",
+                    base_session_id=base,
+                    workdir=cwd,
+                    pid=pid,
+                    pid_shared=bool(transport is not None and transport_session_count.get(id(transport), 0) > 1),
+                    elapsed_seconds=None,
+                )
+            )
+        return rows
+
+    def live_session_workdir(self, base_session_id: str) -> Optional[str]:
+        session_mgr = getattr(self, "_session_mgr", None)
+        get_cwd = getattr(session_mgr, "get_cwd", None)
+        if not callable(get_cwd):
+            return None
+        try:
+            return get_cwd(base_session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("end: failed to resolve codex cwd for %s", base_session_id, exc_info=True)
+            return None
+
+    def live_session_state(
+        self,
+        *,
+        composite_key: Optional[str] = None,
+        base_session_id: Optional[str] = None,
+    ) -> Optional[str]:
+        del composite_key
+        registry = getattr(self, "_turn_registry", None)
+        if registry is None or not base_session_id:
+            return None
+        try:
+            if registry.get_active_turn(base_session_id):
+                return "active"
+            if hasattr(registry, "has_pending_turn_start") and registry.has_pending_turn_start(base_session_id):
+                return "active"
+        except Exception:  # noqa: BLE001
+            logger.debug("end: codex live-state check failed for %s", base_session_id, exc_info=True)
+            return None
+        return "idle"
 
     @staticmethod
     def _transport_alive(transport: CodexTransport) -> Optional[bool]:

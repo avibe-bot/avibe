@@ -2220,6 +2220,72 @@ class AntigravityAgent(BaseAgent):
             return None
         return lambda: session.exit_failure
 
+    def collect_running_rows(self, now: float) -> list[dict[str, Any]]:
+        from modules.agents.base import build_running_agent_row, safe_items
+
+        rows: list[dict[str, Any]] = []
+        sessions = getattr(self, "_sessions", {}) or {}
+        for runtime_key, session in safe_items(sessions):
+            turn = session.active_turn
+            is_active = bool(turn is not None and not turn.settled)
+            alive = not session.retired and session.client.is_alive
+            if not alive and not is_active:
+                continue
+            if is_active:
+                ts = (
+                    session.turn_started_at
+                    if isinstance(session.turn_started_at, (int, float))
+                    else session.last_activity
+                )
+            else:
+                ts = session.last_activity
+            elapsed = (now - ts) if isinstance(ts, (int, float)) else None
+            rows.append(
+                build_running_agent_row(
+                    backend="antigravity",
+                    state="active" if is_active else "idle",
+                    base_session_id=session.base_session_id,
+                    composite_key=runtime_key,
+                    workdir=session.workdir or None,
+                    pid=session.client.pid,
+                    native_session_id=session.native_session_id,
+                    model=session.current_model,
+                    elapsed_seconds=elapsed,
+                )
+            )
+        return rows
+
+    def live_session_workdir(self, base_session_id: str) -> Optional[str]:
+        from modules.agents.base import safe_items
+
+        sessions = getattr(self, "_sessions", {}) or {}
+        for _key, session in safe_items(sessions):
+            if session.base_session_id == base_session_id and session.workdir:
+                return session.workdir
+        return None
+
+    def live_session_state(
+        self,
+        *,
+        composite_key: Optional[str] = None,
+        base_session_id: Optional[str] = None,
+    ) -> Optional[str]:
+        from modules.agents.base import safe_items
+
+        sessions = getattr(self, "_sessions", {}) or {}
+        matched = False
+        for key, session in safe_items(sessions):
+            if (composite_key and key == composite_key) or (
+                base_session_id and session.base_session_id == base_session_id
+            ):
+                turn = session.active_turn
+                is_active = bool(turn is not None and not turn.settled)
+                if is_active:
+                    return "active"
+                if not session.retired and session.client.is_alive:
+                    matched = True
+        return "idle" if matched else None
+
     def record_runtime_turn_start(
         self,
         *,

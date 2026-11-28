@@ -27,6 +27,74 @@ AGENT_RUNTIME_TURN_TOKEN = "agent_runtime_turn_token"
 AGENT_TURN_TOKEN = "turn_token"
 
 
+def safe_call(fn: Callable[[], Any], default: Any) -> Any:
+    """Call ``fn`` tolerating ``RuntimeError`` from concurrent mutation.
+
+    Used by read-only inspection helpers that run in worker threads
+    (``asyncio.to_thread``) while the controller loop may mutate lock-free
+    registries concurrently. Retries a few times, then returns ``default``.
+    """
+    for _ in range(3):
+        try:
+            return fn()
+        except RuntimeError:
+            continue
+    return default
+
+
+def safe_items(mapping: Any) -> list[tuple[Any, Any]]:
+    """``list(mapping.items())`` tolerant of concurrent mutation."""
+    if not hasattr(mapping, "items"):
+        return []
+    return safe_call(lambda: list(mapping.items()), [])
+
+
+def build_running_agent_row(
+    *,
+    backend: str,
+    state: str,
+    base_session_id: Optional[str] = None,
+    composite_key: Optional[str] = None,
+    workdir: Optional[str] = None,
+    pid: Optional[int] = None,
+    pid_shared: bool = False,
+    native_session_id: Optional[str] = None,
+    model: Optional[str] = None,
+    elapsed_seconds: Optional[float] = None,
+) -> dict[str, Any]:
+    """Build one normalized running-agent row.
+
+    ``state`` is one of ``active`` (turn in flight), ``idle`` (connected but no
+    active turn), ``orphan`` (process in registry with no live session).
+    ``elapsed_seconds`` reads as "busy for" on active rows (seconds since the
+    current turn went active) and "idle for" on idle/orphan rows (seconds since
+    the last activity); ``None`` when the baseline is unknown.
+    """
+    return {
+        "backend": backend,
+        "state": state,
+        "base_session_id": base_session_id,
+        "composite_key": composite_key,
+        "workdir": workdir,
+        "pid": pid,
+        "pid_shared": pid_shared,
+        "native_session_id": native_session_id,
+        "model": model,
+        "elapsed_seconds": (round(elapsed_seconds, 1) if isinstance(elapsed_seconds, (int, float)) else None),
+        # Filled by _enrich_from_db when a matching agent_sessions row exists.
+        "session_id": None,
+        "title": None,
+        "platform": None,
+        "scope_type": None,
+        "scope_display_name": None,
+        "scope_id": None,
+        "visibility": None,
+        "trigger_source": None,
+        "agent_name": None,
+        "openable_in_chat": False,
+    }
+
+
 def message_with_files(message: str, files: Sequence[FileAttachment] | None) -> str:
     """Use the same attachment context for new turns and native steering."""
     local_files = [file for file in files or () if file.local_path]
@@ -220,6 +288,28 @@ class BaseAgent(ABC):
     ) -> Callable[[], tuple[str, str] | None] | None:
         """Optionally bind a visible diagnosis to the accepted runtime generation."""
 
+        return None
+
+    def collect_running_rows(self, now: float) -> list[dict[str, Any]]:
+        """Return read-only running-agent snapshot rows for this backend.
+
+        May run in a worker thread (``asyncio.to_thread``) while the controller
+        event loop mutates runtime registries; implementations must be
+        read-only and tolerate concurrent mutation.
+        """
+        return []
+
+    def live_session_workdir(self, base_session_id: str) -> Optional[str]:
+        """Return the live working directory for ``base_session_id``, if known."""
+        return None
+
+    def live_session_state(
+        self,
+        *,
+        composite_key: Optional[str] = None,
+        base_session_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Return live ``"active"`` / ``"idle"`` state, or ``None`` if unknown."""
         return None
 
     def mark_runtime_turn_started(

@@ -2395,19 +2395,25 @@ class Controller:
                 self._loop.close()
                 self._loop = None
 
-    def _get_idle_cleanup_timeouts(self) -> tuple[int, int]:
-        """Return normalized idle cleanup timeouts for Claude and Codex."""
-        claude_config = getattr(self.config, "claude", None)
-        codex_config = getattr(self.config, "codex", None)
-        claude_timeout = int(
-            max(0, getattr(claude_config, "idle_timeout_seconds", DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS) or 0)
-        )
-        codex_timeout = (
-            int(max(0, getattr(codex_config, "idle_timeout_seconds", DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS) or 0))
-            if codex_config is not None
+    def _idle_cleanup_timeout_for(self, backend: str) -> int:
+        """Return normalized idle cleanup timeout in seconds for a backend."""
+        backend_config = getattr(self.config, backend, None)
+        if backend == "claude":
+            return int(
+                max(0, getattr(backend_config, "idle_timeout_seconds", DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS) or 0)
+            )
+        return (
+            int(max(0, getattr(backend_config, "idle_timeout_seconds", DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS) or 0))
+            if backend_config is not None
             else 0
         )
-        return claude_timeout, codex_timeout
+
+    def _get_idle_cleanup_timeouts(self) -> tuple[int, int]:
+        """Return normalized idle cleanup timeouts for Claude and Codex."""
+        return (
+            self._idle_cleanup_timeout_for("claude"),
+            self._idle_cleanup_timeout_for("codex"),
+        )
 
     _AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS = 3600
 
@@ -2623,7 +2629,7 @@ class Controller:
         try:
             while True:
                 await asyncio.sleep(_IDLE_SWEEP_INTERVAL_SECONDS)
-                claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
+                claude_timeout, _ = self._get_idle_cleanup_timeouts()
 
                 try:
                     # A disabled backend's processes whose stop failed.
@@ -2656,36 +2662,14 @@ class Controller:
                     except Exception as e:
                         logger.error("Claude orphan reaper failed: %s", e, exc_info=True)
 
-                if codex_timeout > 0:
-                    codex_agent = self.agent_service.agents.get("codex")
-                    if codex_agent and hasattr(codex_agent, "evict_idle_transports"):
+                for agent in list(getattr(self.agent_service, "agents", {}).values()):
+                    evict = getattr(agent, "evict_idle_transports", None)
+                    timeout = self._idle_cleanup_timeout_for(agent.name)
+                    if callable(evict) and timeout > 0:
                         try:
-                            await codex_agent.evict_idle_transports(codex_timeout)
+                            await evict(timeout)
                         except Exception as e:
-                            logger.error("Codex idle cleanup failed: %s", e, exc_info=True)
-
-                antigravity_agent = self.agent_service.agents.get("antigravity")
-                if antigravity_agent and hasattr(antigravity_agent, "evict_idle_transports"):
-                    antigravity_config = getattr(self.config, "antigravity", None)
-                    antigravity_timeout = (
-                        int(
-                            max(
-                                0,
-                                getattr(
-                                    antigravity_config,
-                                    "idle_timeout_seconds",
-                                    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
-                                )
-                                or 0,
-                            )
-                        )
-                        if antigravity_config is not None
-                        else 0
-                    )
-                    try:
-                        await antigravity_agent.evict_idle_transports(antigravity_timeout)
-                    except Exception as e:
-                        logger.error("Antigravity idle cleanup failed: %s", e, exc_info=True)
+                            logger.error("%s idle cleanup failed: %s", agent.name, e, exc_info=True)
         except asyncio.CancelledError:
             logger.info("Idle cleanup loop stopped.")
             raise

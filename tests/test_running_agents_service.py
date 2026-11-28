@@ -76,18 +76,49 @@ class _FakeTask:
         return self._done
 
 
-def _make_controller(*, claude=None, codex=None, opencode=None):
+def _make_controller(*, claude=None, codex=None, opencode=None, vibey=None, extra_agents=None):
     agents = {}
     if codex is not None:
         agents["codex"] = codex
     if opencode is not None:
         agents["opencode"] = opencode
+    if vibey is not None:
+        agents["vibey"] = vibey
+    if extra_agents:
+        agents.update(extra_agents)
     controller = types.SimpleNamespace()
     controller.agent_service = types.SimpleNamespace(agents=agents)
     controller.claude_sessions = (claude or {}).get("sessions", {})
     controller.claude_active_sessions = (claude or {}).get("active", set())
     controller.session_last_activity = (claude or {}).get("last_activity", {})
     return controller
+
+
+def _codex_shell(session_mgr, turn_registry, **attributes):
+    """A real ``CodexAgent`` without ``__init__``, holding the given registries."""
+    from modules.agents.codex.agent import CodexAgent
+
+    agent = init_generation_state(object.__new__(CodexAgent))
+    agent._registered_runtime = False
+    agent._session_mgr = session_mgr
+    agent._turn_registry = turn_registry
+    for name, value in attributes.items():
+        setattr(agent, name, value)
+    return agent
+
+
+def _opencode_shell(*, active_requests=None, session_manager=None, **attributes):
+    """A real ``OpenCodeAgent`` without ``__init__``, holding the given registries."""
+    from modules.agents.opencode.agent import OpenCodeAgent
+
+    agent = object.__new__(OpenCodeAgent)
+    agent._active_requests = {} if active_requests is None else active_requests
+    agent._session_manager = session_manager
+    agent._session_generations = {}
+    agent._session_last_activity = {}
+    for name, value in attributes.items():
+        setattr(agent, name, value)
+    return agent
 
 
 @pytest.fixture(autouse=True)
@@ -274,9 +305,9 @@ def _transport_by_cwd(mgr, transports):
 def test_codex_shared_pid_one_row_per_session():
     mgr = _FakeSessionMgr({"base-1": "/work/x", "base-2": "/work/x", "base-3": "/work/y"})
     turns = _FakeTurnRegistry({"base-1": "turn-1"})  # base-1 active, others idle
-    codex = types.SimpleNamespace(
-        _session_mgr=mgr,
-        _turn_registry=turns,
+    codex = _codex_shell(
+        mgr,
+        turns,
         transport_for_session=_transport_by_cwd(mgr, {"/work/x": _FakeTransport(7001), "/work/y": _FakeTransport(7002)}),
     )
     controller = _make_controller(codex=codex)
@@ -294,9 +325,9 @@ def test_codex_shared_pid_one_row_per_session():
 def test_codex_skips_evicted_idle_base_without_transport():
     mgr = _FakeSessionMgr({"live": "/work/live", "evicted": "/work/gone", "active": "/work/active"})
     turns = _FakeTurnRegistry({"active": "turn-1"})
-    codex = types.SimpleNamespace(
-        _session_mgr=mgr,
-        _turn_registry=turns,
+    codex = _codex_shell(
+        mgr,
+        turns,
         transport_for_session=_transport_by_cwd(mgr, {"/work/live": _FakeTransport(7001)}),
     )
     controller = _make_controller(codex=codex)
@@ -315,9 +346,9 @@ def test_codex_skips_dead_transport_object():
     # toward pid_shared for a sibling on the same cwd.
     mgr = _FakeSessionMgr({"dead": "/work/x", "alive": "/work/y"})
     turns = _FakeTurnRegistry({})
-    codex = types.SimpleNamespace(
-        _session_mgr=mgr,
-        _turn_registry=turns,
+    codex = _codex_shell(
+        mgr,
+        turns,
         transport_for_session=_transport_by_cwd(mgr, {"/work/x": _FakeTransport(8001, is_alive=False), "/work/y": _FakeTransport(8002)}),
     )
     controller = _make_controller(codex=codex)
@@ -394,9 +425,9 @@ def test_codex_pending_turn_start_counts_as_active():
     # the UI offers Stop and End takes the canonical active path.
     mgr = _FakeSessionMgr({"starting": "/work/p"})
     turns = _FakeTurnRegistry({}, pending={"starting"})  # no active turn yet, pending start
-    codex = types.SimpleNamespace(
-        _session_mgr=mgr,
-        _turn_registry=turns,
+    codex = _codex_shell(
+        mgr,
+        turns,
         transport_for_session=_transport_by_cwd(mgr, {"/work/p": _FakeTransport(9100)}),
     )
     controller = _make_controller(codex=codex)
@@ -406,13 +437,131 @@ def test_codex_pending_turn_start_counts_as_active():
 
 
 def test_opencode_active_requests_have_no_pid():
-    oc = types.SimpleNamespace(_active_requests={"base-oc": _FakeTask(done=False)})
+    oc = _opencode_shell(active_requests={"base-oc": _FakeTask(done=False)})
     controller = _make_controller(opencode=oc)
     snap = running_agents.snapshot_running_agents(controller)
     row = snap["agents"][0]
     assert row["backend"] == "opencode"
     assert row["state"] == "active"
     assert row["pid"] is None
+
+
+def test_snapshot_and_live_hooks_dispatch_to_custom_base_agent_in_deterministic_order():
+    from modules.agents.base import BaseAgent, build_running_agent_row
+
+    class _CustomAgent(BaseAgent):
+        def __init__(self, name: str, base_session_id: str, workdir: str, state: str):
+            self.name = name
+            self._base_session_id = base_session_id
+            self._workdir = workdir
+            self._state = state
+
+        async def handle_message(self, request):
+            raise NotImplementedError
+
+        def collect_running_rows(self, now: float) -> list[dict]:
+            return [
+                build_running_agent_row(
+                    backend=self.name,
+                    state=self._state,
+                    base_session_id=self._base_session_id,
+                    workdir=self._workdir,
+                    elapsed_seconds=1.5 if now >= 0 else None,
+                )
+            ]
+
+        def live_session_workdir(self, base_session_id: str):
+            return self._workdir if base_session_id == self._base_session_id else None
+
+        def live_session_state(self, *, composite_key=None, base_session_id=None):
+            if base_session_id == self._base_session_id:
+                return self._state
+            return None
+
+    mgr = _FakeSessionMgr({"codex-base": "/work/codex"})
+    codex = _codex_shell(
+        mgr,
+        _FakeTurnRegistry({}),
+        transport_for_session=_transport_by_cwd(mgr, {"/work/codex": _FakeTransport(7100)}),
+    )
+    claude_agent = _CustomAgent("claude", "should-be-skipped", "/work/skip", "active")
+    zeta = _CustomAgent("zeta", "zeta-base", "/work/zeta", "active")
+    alpha = _CustomAgent("alpha", "alpha-base", "/work/alpha", "idle")
+    controller = _make_controller(
+        codex=codex,
+        extra_agents={"zeta": zeta, "claude": claude_agent, "alpha": alpha},
+    )
+
+    snap = running_agents.snapshot_running_agents(controller)
+    assert [row["backend"] for row in snap["agents"]] == ["codex", "alpha", "zeta"]
+    assert running_agents._live_workdir_for_backend(controller, "zeta", "zeta-base", None) == "/work/zeta"
+    assert running_agents._live_workdir_for_backend(controller, "zeta", "other", None) is None
+    assert (
+        running_agents._resolve_live_state(
+            controller, backend="zeta", session_id=None, composite_key=None, base_session_id="zeta-base"
+        )
+        == "active"
+    )
+    assert (
+        running_agents._resolve_live_state(
+            controller, backend="alpha", session_id=None, composite_key=None, base_session_id="alpha-base"
+        )
+        == "idle"
+    )
+
+
+def test_vibey_adapter_inspection_methods():
+    from modules.agents.vibey.agent import VibeyAgent
+
+    vibey = object.__new__(VibeyAgent)
+    active_request = types.SimpleNamespace(
+        base_session_id="vibey-live",
+        composite_session_id="vibey-live:/work/vibey",
+        context=types.SimpleNamespace(platform_specific={}),
+    )
+    settled_request = types.SimpleNamespace(
+        base_session_id="vibey-done",
+        composite_session_id="vibey-done:/work/done",
+        context=types.SimpleNamespace(platform_specific={}),
+    )
+    vibey._runtimes = {
+        "ses-1": types.SimpleNamespace(
+            run=types.SimpleNamespace(request=active_request, cwd="/work/vibey", settled=False)
+        ),
+        "ses-2": types.SimpleNamespace(
+            run=types.SimpleNamespace(request=settled_request, cwd="/work/done", settled=True)
+        ),
+    }
+    controller = _make_controller(vibey=vibey)
+
+    snap = running_agents.snapshot_running_agents(controller)
+    assert [(r["backend"], r["base_session_id"], r["workdir"], r["state"]) for r in snap["agents"]] == [
+        ("vibey", "vibey-live", "/work/vibey", "active")
+    ]
+    assert running_agents._live_workdir_for_backend(controller, "vibey", "vibey-live", None) == "/work/vibey"
+    assert running_agents._live_workdir_for_backend(controller, "vibey", "vibey-done", None) is None
+    assert (
+        running_agents._resolve_live_state(
+            controller, backend="vibey", session_id=None, composite_key=None, base_session_id="vibey-live"
+        )
+        == "active"
+    )
+    assert (
+        running_agents._resolve_live_state(
+            controller,
+            backend="vibey",
+            session_id=None,
+            composite_key="vibey-live:/work/vibey",
+            base_session_id=None,
+        )
+        == "active"
+    )
+    assert (
+        running_agents._resolve_live_state(
+            controller, backend="vibey", session_id=None, composite_key=None, base_session_id="vibey-done"
+        )
+        is None
+    )
 
 
 def test_orphan_only_when_native_not_owned(monkeypatch):
@@ -793,19 +942,6 @@ def test_end_claude_session_not_live():
     assert res["error"] == "session_not_live"
 
 
-def _codex_shell(session_mgr, turn_registry, **attributes):
-    """A real ``CodexAgent`` without ``__init__``, holding the given registries."""
-    from modules.agents.codex.agent import CodexAgent
-
-    agent = init_generation_state(object.__new__(CodexAgent))
-    agent._registered_runtime = False
-    agent._session_mgr = session_mgr
-    agent._turn_registry = turn_registry
-    for name, value in attributes.items():
-        setattr(agent, name, value)
-    return agent
-
-
 def _codex_session_mgr(sessions):
     from modules.agents.codex.session import CodexSessionManager
 
@@ -1103,9 +1239,9 @@ def test_end_opencode_cancels_active_task():
             self.cancelled = True
 
     task = _Task()
-    oc = types.SimpleNamespace(
-        _active_requests={"b1": task},
-        _session_manager=types.SimpleNamespace(get_request_session=lambda b: None),
+    oc = _opencode_shell(
+        active_requests={"b1": task},
+        session_manager=types.SimpleNamespace(get_request_session=lambda b: None),
     )
     # OpenCode rows are inherently in-flight (an active request task), so the live
     # recheck classifies this as active: End runs the canonical stop, then
@@ -1138,9 +1274,9 @@ def test_end_idle_opencode_retires_the_current_generation_after_its_last_session
         pop_request_session=lambda base: sessions.pop(base, None),
         list_all=lambda: dict(sessions),
     )
-    agent = types.SimpleNamespace(
-        _active_requests={},
-        _session_manager=manager,
+    agent = _opencode_shell(
+        active_requests={},
+        session_manager=manager,
         retire_current_generation=retired,
     )
 
@@ -1173,9 +1309,9 @@ def test_end_idle_opencode_reports_only_a_confirmed_stop_as_killed(outcome, expe
         pop_request_session=lambda base: None,
         list_all=lambda: {},
     )
-    agent = types.SimpleNamespace(
-        _active_requests={},
-        _session_manager=manager,
+    agent = _opencode_shell(
+        active_requests={},
+        session_manager=manager,
         retire_current_generation=_AsyncFlag(ret=outcome),
     )
 
@@ -1210,9 +1346,9 @@ def test_end_active_opencode_reports_a_retirement_that_failed():
         pop_request_session=lambda base: None,
         list_all=lambda: {},
     )
-    agent = types.SimpleNamespace(
-        _active_requests={"b1": task},
-        _session_manager=manager,
+    agent = _opencode_shell(
+        active_requests={"b1": task},
+        session_manager=manager,
         retire_current_generation=_AsyncFlag(ret="failed"),
     )
 
@@ -1247,9 +1383,9 @@ def test_end_idle_opencode_clears_disposable_session_caches():
     manager._session_locks = {"b1": asyncio.Lock(), "b2": asyncio.Lock()}
     # The backend poll can remove its request mapping before close-after runs.
     manager.pop_request_session("b1")
-    agent = types.SimpleNamespace(
-        _active_requests={},
-        _session_manager=manager,
+    agent = _opencode_shell(
+        active_requests={},
+        session_manager=manager,
         _session_last_activity={"b1": 1.0, "b2": 2.0},
     )
 
@@ -1290,9 +1426,9 @@ def test_end_opencode_settles_durable_owner_after_poll_is_gone(monkeypatch):
         is_in_flight=lambda sid: False,
         cancel=cancel,
     )
-    oc = types.SimpleNamespace(
-        _active_requests={},
-        _session_manager=types.SimpleNamespace(get_request_session=lambda b: None),
+    oc = _opencode_shell(
+        active_requests={},
+        session_manager=types.SimpleNamespace(get_request_session=lambda b: None),
     )
     controller = _make_controller(opencode=oc)
     controller.session_turns = manager

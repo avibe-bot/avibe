@@ -123,7 +123,13 @@ from modules.agents.vibey.native_search_recovery import (
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.vibey.store import AdapterTranscriptStore
 from modules.agents.vibey.tools import ToolSuite, hosted_tools, local_tool_suite
-from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
+from modules.agents.base import (
+    AGENT_RUNTIME_TURN_KEY,
+    AgentRequest,
+    BaseAgent,
+    build_running_agent_row,
+    safe_items,
+)
 from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
@@ -913,6 +919,50 @@ class VibeyAgent(BaseAgent):
     def backend_alive(self, context: Any) -> Optional[bool]:
         runtime = self._runtimes.get(self._session_id(context) or "")
         return True if runtime is not None and runtime.run is not None else None
+
+    def collect_running_rows(self, now: float) -> list[dict[str, Any]]:
+        del now
+        rows: list[dict[str, Any]] = []
+        # Vibey runs in process, so no pid. A Session's runtime holds its Turn's run
+        # until the run settles; like OpenCode, Vibey only ever surfaces as ``active``.
+        for _session_id, runtime in safe_items(getattr(self, "_runtimes", {}) or {}):
+            run = getattr(runtime, "run", None)
+            if run is None or run.settled:
+                continue
+            rows.append(
+                build_running_agent_row(
+                    backend="vibey",
+                    state="active",
+                    base_session_id=run.request.base_session_id,
+                    workdir=run.cwd or None,
+                )
+            )
+        return rows
+
+    def live_session_workdir(self, base_session_id: str) -> Optional[str]:
+        for _session_id, runtime in safe_items(getattr(self, "_runtimes", {}) or {}):
+            run = getattr(runtime, "run", None)
+            if run is None or run.settled:
+                continue
+            if run.request.base_session_id == base_session_id and run.cwd:
+                return run.cwd
+        return None
+
+    def live_session_state(
+        self,
+        *,
+        composite_key: Optional[str] = None,
+        base_session_id: Optional[str] = None,
+    ) -> Optional[str]:
+        for _session_id, runtime in safe_items(getattr(self, "_runtimes", {}) or {}):
+            run = getattr(runtime, "run", None)
+            if run is None or run.settled:
+                continue
+            if (base_session_id and run.request.base_session_id == base_session_id) or (
+                composite_key and self.runtime_turn_key(run.request) == composite_key
+            ):
+                return "active"
+        return None
 
     # --- steering (core.agent_steering) --------------------------------------
 
