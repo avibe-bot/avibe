@@ -9073,6 +9073,40 @@ def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
         assert not any("TEMP B-TREE" in d for d in details), details
 
 
+def test_fifo_probes_keep_the_ordered_index_when_statistics_favor_session_state(managers):
+    """Planner statistics must not turn a FIFO head probe into a sort of every live row."""
+    from sqlalchemy import event
+
+    _, _, engine, *_ = managers
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ANALYZE")
+        conn.exec_driver_sql("DELETE FROM sqlite_stat1 WHERE tbl = 'message_deliveries'")
+        conn.exec_driver_sql(
+            "INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES "
+            "('message_deliveries', 'ix_message_deliveries_session_state', '1000000 100000 2 1 1'), "
+            "('message_deliveries', 'ix_message_deliveries_session_order', '1000000 100000 1 1')"
+        )
+    engine.dispose()  # reconnect so the planner loads the statistics
+    plans = []
+
+    def explain(_conn, cursor, statement, parameters, *_):
+        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+
+    with engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", explain)
+        for probe in (
+            delivery_store.ordering_head,
+            lambda c, s: delivery_store.ordering_head(c, s, include_claimable=False),
+            delivery_store.claimable_fifo_prefix,
+        ):
+            assert not probe(conn, "ses_fsm")
+
+    assert len(plans) == 3
+    for details in plans:
+        assert any("ix_message_deliveries_session_order (session_id=?)" in d for d in details), details
+        assert not any("TEMP B-TREE" in d for d in details), details
+
+
 def test_control_predecessor_lookup_seeks_both_link_ids(managers):
     _, _, engine, *_ = managers
     with engine.connect() as conn:

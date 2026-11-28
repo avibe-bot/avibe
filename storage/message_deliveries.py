@@ -25,6 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
+from sqlalchemy.sql.selectable import TextualSelect
 
 from core.agent_input import HARNESS_SOURCE_FIELDS, is_voice_input
 from core.input_source import source_label
@@ -417,22 +418,23 @@ def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     )
 
 
-def _ordering_rows(session_id: str, *, include_claimable: bool = True) -> Select:
-    predicates = [message_deliveries.c.state.in_(FENCE_STATES)]
+def _ordering_rows(session_id: str, *, include_claimable: bool = True) -> TextualSelect:
+    # Pin the partial FIFO index: it streams live rows in submit order, so a
+    # negative probe stops without a sort. Unpinned, some SQLite builds prefer
+    # ix_message_deliveries_session_state (session_id, state) for the IN terms
+    # and then sort the whole live set (USE TEMP B-TREE FOR ORDER BY). The WHERE
+    # repeats the index predicate verbatim, which INDEXED BY needs for a partial index.
+    states = ", ".join(f"'{state}'" for state in FENCE_STATES)
+    wanted = f"state IN ({states})"
     if include_claimable:
-        predicates.append(
-            and_(
-                message_deliveries.c.priority == "p3",
-                message_deliveries.c.state.in_(CLAIMABLE_QUEUE_STATES),
-            )
-        )
-
-    return (
-        select(message_deliveries)
-        .where(message_deliveries.c.session_id == session_id, text(DELIVERY_SESSION_ORDER_PREDICATE))
-        .where(or_(*predicates))
-        .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
-    )
+        claimable = ", ".join(f"'{state}'" for state in CLAIMABLE_QUEUE_STATES)
+        wanted += f" OR (priority = 'p3' AND state IN ({claimable}))"
+    columns = ", ".join(column.name for column in message_deliveries.c)
+    return text(
+        f"SELECT {columns} FROM message_deliveries INDEXED BY ix_message_deliveries_session_order "
+        f"WHERE session_id = :session_id AND ({DELIVERY_SESSION_ORDER_PREDICATE}) AND ({wanted}) "
+        "ORDER BY submitted_at, id"
+    ).bindparams(session_id=session_id).columns(*message_deliveries.c)
 
 
 def ordering_head(
