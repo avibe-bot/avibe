@@ -197,3 +197,63 @@ struct DirectProbationGuard: Sendable {
         return record
     }
 }
+
+/// Where the levels are kept between launches.
+protocol DirectProbationStoring: AnyObject {
+    func load() -> [String: DirectProbationRecord]
+    func save(_ levels: [String: DirectProbationRecord])
+}
+
+/// The levels in the App's own preferences, keyed as the path choices are:
+/// by account and instance. Nothing of it leaves the device but the level
+/// and why it rose (`DirectPathUse`, `path_guard`).
+final class DirectProbationDefaultsStore: DirectProbationStoring {
+    static let key = "avibe.direct.probation"
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    func load() -> [String: DirectProbationRecord] {
+        guard
+            let data = defaults.data(forKey: Self.key),
+            let levels = try? JSONDecoder().decode([String: DirectProbationRecord].self, from: data)
+        else {
+            return [:]
+        }
+        return levels
+    }
+
+    func save(_ levels: [String: DirectProbationRecord]) {
+        if levels.isEmpty {
+            defaults.removeObject(forKey: Self.key)
+        } else if let data = try? JSONEncoder().encode(levels) {
+            defaults.set(data, forKey: Self.key)
+        }
+    }
+
+    /// The key of one account's instance.
+    static func entry(accountID: String, host: String) -> String {
+        "\(accountID) \(host)"
+    }
+}
+
+/// The clocks a wait runs on. `now` is monotonic, for the wait itself and
+/// for "held" and "early"; `wall` is used for the level's expiry only,
+/// which is all that has to survive a relaunch.
+struct DirectProbationClock: Sendable {
+    /// Milliseconds on a clock that never goes back.
+    var now: @Sendable () -> Int64
+    /// Milliseconds since 1970.
+    var wall: @Sendable () -> Int64
+    /// Returns after `milliseconds`, or throws when its task is cancelled.
+    var sleep: @Sendable (_ milliseconds: Int64) async throws -> Void
+
+    static let system = DirectProbationClock(
+        now: { Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000) },
+        wall: { Int64(Date().timeIntervalSince1970 * 1000) },
+        sleep: { try await Task.sleep(for: .milliseconds($0)) }
+    )
+}

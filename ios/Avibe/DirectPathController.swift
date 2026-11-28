@@ -657,7 +657,31 @@ final class DirectPathController {
     private var strictFailures: [String: UInt64] = [:]
     private var unlinkedAnswers: [String: UInt64] = [:]
     private var lossWake: Task<Void, Never>?
+    /// The transport reports a usable path, and the probation rule has
+    /// adopted its link: only then do plans, the preference and the status
+    /// speak of a direct path (`transportUsable`, `probation`).
     private var isUsable = false
+    /// The transport's own word: a path to the instance answers.
+    private var transportUsable = false
+    /// Probation before a direct path is adopted
+    /// (docs/plans/remote-direct-probation.md).
+    private var probation: DirectProbationGuard
+    private let probationStore: DirectProbationStoring
+    private let probationClock: DirectProbationClock
+    /// The link the transport has up, as the rule numbers it, and whose it
+    /// is. A link begins at a `usable` report while none is up, goes on
+    /// through a `verifying`, and ends at a loss, the background, or the end
+    /// of the selection.
+    private var probationLink: (number: Int, key: String, host: String)?
+    private var probationLinks = 0
+    /// The wait of a link that is not adopted yet, and the probe it is
+    /// asked once a minute meanwhile.
+    /// What the store holds, so that it is written only when it changes.
+    private var storedProbation: [String: DirectProbationRecord] = [:]
+    private var probationWake: Task<Void, Never>?
+    private var probationProbe: Task<Void, Never>?
+    /// How often a waiting link is asked whether it still answers.
+    static let probationProbeMs: Int64 = 60_000
     /// The kind of path the usable transport's connection runs on, as last
     /// reported; nil when none is usable or the transport cannot tell.
     private var currentPath: DirectPathKind?
@@ -789,10 +813,16 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         pathUse: DirectPathUse = .shared,
+        probationStore: DirectProbationStoring = DirectProbationDefaultsStore(defaults: .standard),
+        probationClock: DirectProbationClock = .system,
         onStatusChanged: @escaping () -> Void,
         onAvailabilityChanged: @escaping () -> Void = {}
     ) {
         self.pathUse = pathUse
+        self.probationStore = probationStore
+        self.probationClock = probationClock
+        self.probation = DirectProbationGuard(stored: probationStore.load())
+        self.storedProbation = probation.stored
         self.websiteDataStore = websiteDataStore
         self.transport = transport
         self.isCurrentRuntime = isCurrentRuntime
@@ -802,6 +832,9 @@ final class DirectPathController {
         self.notificationCenter = notificationCenter
         // The App can be launched into the background.
         self.isInBackground = UIApplication.shared.applicationState == .background
+        if !isInBackground {
+            probation.foreground()
+        }
         self.onStatusChanged = onStatusChanged
         self.onAvailabilityChanged = onAvailabilityChanged
 
@@ -1376,6 +1409,7 @@ final class DirectPathController {
         let host = authority.host
         if enabled {
             guard requestedStrict.insert(host).inserted else { return }
+            choiceDidChangeOnLiveLink(host)
             policyGeneration[host, default: 0] &+= 1
             if needsListener(host), !directAuthorized(for: authority), let port = listenerPort {
                 _ = routeOwner.rewrite(host, store: websiteDataStore.identifier,
@@ -1384,6 +1418,7 @@ final class DirectPathController {
             if !hostsNeedingColdStore.contains(host), directAuthorized(for: authority) { cutover(host) }
         } else {
             guard requestedStrict.remove(host) != nil else { return }
+            choiceDidChangeOnLiveLink(host)
             if let wait = firstRouteWait, DirectAuthority(instanceURL: wait.runtime.instance.url)?.host == host {
                 cancelFirstRouteWait()
             }
@@ -1503,6 +1538,10 @@ final class DirectPathController {
         if let host = target?.authority.host { armed.remove(host) }
         lossWake?.cancel()
         lossWake = nil
+        // The selection ends by a decision of this App's. The background
+        // has ended its link already, as its own.
+        endProbationLink(.choice)
+        transportUsable = false
         isUsable = false
         currentPath = nil
         stickyDropped = false
@@ -1544,28 +1583,22 @@ final class DirectPathController {
                 // A new instance endpoint key or address set.
                 replacedGenerations.insert(accepted)
                 advanceGeneration()
-                closeRelays(.direct, countsAsClosure: true, loss: (.generationReplaced, currentPath, target.authority.host))
+                closeRelays(
+                    .direct, countsAsClosure: true,
+                    loss: (.generationReplaced, currentPath, target.authority.host, .superseded)
+                )
             }
             acceptedGeneration = generation
-            let wasUsable = isUsable
-            isUsable = true
-            lossWake?.cancel()
-            lossWake = nil
-            let host = target.authority.host
-            if requestedStrict.contains(host), !hostsNeedingColdStore.contains(host) {
-                if !armed.contains(host) { cutover(host) }
-                else if !wasUsable { onAvailabilityChanged() }
+            transportUsable = true
+            // A link that is not adopted yet carries nothing and is not
+            // reported: the page goes on by the tunnel and asks nothing.
+            guard linkIsAdopted(for: target) else {
+                isUsable = false
+                currentPath = nil
+                updatePreference()
+                return
             }
-            let previous = currentPath
-            currentPath = transport.pathDiagnostics.current
-            stickyDropped = false
-            let wasDirect = preferred == .direct
-            updatePreference()
-            // The same preference on another kind of path is a change too.
-            if wasDirect, preferred == .direct, previous != currentPath {
-                sequence += 1
-                notify()
-            }
+            adoptedPathIsUsable(for: target)
             return
         case .pathChanged(let kind):
             // The connection moved between the relay and a direct address.
@@ -1585,10 +1618,13 @@ final class DirectPathController {
             // A network callback is not proof of loss: only the preference
             // changes until the transport validates the path again.
             isUsable = false
+            transportUsable = false
             currentPath = nil
             advanceGeneration()
-        case .lost:
+        case .lost(let cause):
             isUsable = false
+            transportUsable = false
+            endProbationLink(cause.linkEnd)
             let pathAtLoss = currentPath
             currentPath = nil
             advanceGeneration()
@@ -1596,7 +1632,10 @@ final class DirectPathController {
             // published in this turn: no status says `direct` for a path
             // that is gone.
             updatePreference()
-            closeRelays(.direct, countsAsClosure: true, loss: (.lost, pathAtLoss, target.authority.host))
+            closeRelays(
+                .direct, countsAsClosure: true,
+                loss: (.lost, pathAtLoss, target.authority.host, DirectPathUse.RetiredRule(cause))
+            )
         case .lostToBackground:
             // The transport heard the background first. It is this App's
             // background: entered here now, as the background observer
@@ -1634,6 +1673,167 @@ final class DirectPathController {
         // hedge again while the transport probes the path.
         dropStickiness()
         transport.pathDidFail(for: tag)
+    }
+
+    // MARK: Probation
+
+    /// A usable path of `target`: the link it belongs to is begun if none is
+    /// up, and asked whether it is adopted. A link the rule makes wait gets
+    /// its timer and its probe here.
+    private func linkIsAdopted(for target: DirectTarget) -> Bool {
+        let host = target.authority.host
+        if probationLink == nil {
+            probationLinks += 1
+            let key = DirectProbationDefaultsStore.entry(accountID: target.runtime.account.id, host: host)
+            let link = (number: probationLinks, key: key, host: host)
+            probationLink = link
+            let waitMs = probation.linkUp(
+                key, link: link.number, now: probationClock.now(), wall: probationClock.wall(),
+                // With the tunnel ruled out by the user there is nothing
+                // to wait on.
+                strict: requestedStrict.contains(host)
+            )
+            if waitMs > 0 {
+                noteProbation(held: true)
+                waitOnProbation(link.number, milliseconds: waitMs)
+            }
+        }
+        guard let link = probationLink else {
+            return false
+        }
+        if !probation.isAdopted(link.key), !isInBackground,
+           probation.adopt(link.key, link: link.number, now: probationClock.now()) {
+            probationWake?.cancel()
+            probationWake = nil
+            probationProbe?.cancel()
+            probationProbe = nil
+            noteProbation(held: false)
+        }
+        storeProbation()
+        return probation.isAdopted(link.key)
+    }
+
+    /// The wait of a link, and one probe a minute while it lasts: the
+    /// instance closes a connection that has had no stream, and keep-alives
+    /// do not show that a path carries anything.
+    private func waitOnProbation(_ number: Int, milliseconds: Int64) {
+        let clock = probationClock
+        probationWake?.cancel()
+        probationWake = Task { [weak self] in
+            do { try await clock.sleep(milliseconds) } catch { return }
+            self?.probationWaitDidEnd(number)
+        }
+        probationProbe?.cancel()
+        probationProbe = Task { [weak self] in
+            while true {
+                do { try await clock.sleep(Self.probationProbeMs) } catch { return }
+                guard let self, self.probationLink?.number == number else { return }
+                if self.transportUsable, !self.isInBackground {
+                    self.transport.probeWaitingPath()
+                }
+            }
+        }
+    }
+
+    /// The wait is over. The link is adopted only if it is still the one,
+    /// the transport still calls its path usable and the App is in the
+    /// foreground; otherwise the next `usable` report asks again.
+    private func probationWaitDidEnd(_ number: Int) {
+        guard let target, probationLink?.number == number, transportUsable, !isInBackground,
+              linkIsAdopted(for: target) else {
+            return
+        }
+        adoptedPathIsUsable(for: target)
+    }
+
+    /// The link's path is usable and adopted: it is published.
+    private func adoptedPathIsUsable(for target: DirectTarget) {
+        let wasUsable = isUsable
+        isUsable = true
+        lossWake?.cancel()
+        lossWake = nil
+        let host = target.authority.host
+        if requestedStrict.contains(host), !hostsNeedingColdStore.contains(host) {
+            if !armed.contains(host) { cutover(host) }
+            else if !wasUsable { onAvailabilityChanged() }
+        }
+        let previous = currentPath
+        currentPath = transport.pathDiagnostics.current
+        stickyDropped = false
+        let wasDirect = preferred == .direct
+        updatePreference()
+        // The same preference on another kind of path is a change too.
+        if wasDirect, preferred == .direct, previous != currentPath {
+            sequence += 1
+            notify()
+        }
+    }
+
+    /// The link ended, and why. Only a loss can raise the level.
+    private func endProbationLink(_ cause: DirectLinkEnd) {
+        probationWake?.cancel()
+        probationWake = nil
+        probationProbe?.cancel()
+        probationProbe = nil
+        guard let link = probationLink else {
+            return
+        }
+        probation.linkDown(
+            link.key, link: link.number, cause: cause, now: probationClock.now(), wall: probationClock.wall()
+        )
+        noteProbation(held: false)
+        probationLink = nil
+        storeProbation()
+    }
+
+    /// The user ruled the tunnel out, or allowed it again, while a link is
+    /// up: the link's turn ends as a choice and it begins another under the
+    /// new choice, with a new number, so a timer of the old turn adopts
+    /// nothing. A link that was waiting is used at once; one that was used
+    /// at once waits the level's time from here.
+    private func choiceDidChangeOnLiveLink(_ host: String) {
+        guard let target, target.authority.host == host, probationLink != nil else {
+            return
+        }
+        endProbationLink(.choice)
+        guard transportUsable else {
+            return
+        }
+        if linkIsAdopted(for: target) {
+            adoptedPathIsUsable(for: target)
+        } else {
+            isUsable = false
+            currentPath = nil
+            updatePreference()
+        }
+    }
+
+    /// The level, for the instance's log: only while it is above 0 or a
+    /// link is being held (`DirectPathUse`, `path_guard`).
+    private func noteProbation(held: Bool) {
+        guard let link = probationLink else {
+            return
+        }
+        let level = probation.levelSeconds(link.key, now: probationClock.now(), wall: probationClock.wall())
+        guard level > 0 || held else {
+            return
+        }
+        let selected = transport.pathDiagnostics.selected
+        pathUse.probation(
+            scope: useScope(link.host),
+            path: DirectPathUse.Path(kind: transport.pathDiagnostics.current, local: selected?.local),
+            levelSeconds: level,
+            rose: probation.rose(link.key),
+            held: held
+        )
+    }
+
+    /// Kept across launches, when it changed.
+    private func storeProbation() {
+        if probation.stored != storedProbation {
+            storedProbation = probation.stored
+            probationStore.save(probation.stored)
+        }
     }
 
     // MARK: Plans
@@ -1979,7 +2179,7 @@ final class DirectPathController {
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
-        loss: (cause: DirectLossRecord.Cause, path: DirectPathKind?, host: String?)? = nil,
+        loss: (cause: DirectLossRecord.Cause, path: DirectPathKind?, host: String?, rule: DirectPathUse.RetiredRule)? = nil,
         then: (@MainActor () -> Void)? = nil
     ) {
         guard let listener else {
@@ -2004,6 +2204,7 @@ final class DirectPathController {
         // A close of direct relays for a path that is gone is recorded, with
         // its cause and the path the relays ran on.
         let cause = loss?.cause
+        let ruleAtClose = loss?.rule
         let pathAtClose = loss?.path
         // Whose connections these are and what their path was called, read
         // now: by the time the listener has closed them, a newer link may
@@ -2021,9 +2222,10 @@ final class DirectPathController {
             let result = await listener.closeRelaysTimed(backend: backend, before: generation)
             await MainActor.run {
                 self?.closeDidIssue()
-                if let cause {
+                if let cause, let ruleAtClose {
                     self?.recordLoss(
-                        result.quietMs, cause: cause, path: pathAtClose, use: useAtClose, accountEpoch: epoch
+                        result.quietMs, cause: cause, rule: ruleAtClose, path: pathAtClose, use: useAtClose,
+                        accountEpoch: epoch
                     )
                 }
                 then?()
@@ -2036,6 +2238,7 @@ final class DirectPathController {
     private func recordLoss(
         _ quietMs: [Int],
         cause: DirectLossRecord.Cause,
+        rule: DirectPathUse.RetiredRule,
         path: DirectPathKind?,
         use: (scope: DirectPathUse.Scope, path: DirectPathUse.Path)?,
         accountEpoch epoch: Int
@@ -2049,12 +2252,6 @@ final class DirectPathController {
             quietMs: Array(quietMs.prefix(DirectLossRecord.quietLimit)),
             path: path
         )
-        let rule: DirectPathUse.RetiredRule
-        switch cause {
-        case .lost: rule = .pathMonitor
-        case .generationReplaced: rule = .superseded
-        case .background: rule = .background
-        }
         if let use {
             pathUse.retired(rule, scope: use.scope, path: use.path)
         }
@@ -2776,6 +2973,10 @@ final class DirectPathController {
         // would no longer be there to count.
         let pathAtBackground = currentPath
         let hostAtBackground = target?.authority.host
+        // The link ends with the background, which is no death of its path,
+        // and nothing counts as one until the return.
+        endProbationLink(.background)
+        probation.background()
         deselect(stoppingTransport: false, keepingDiagnostics: true)
         advanceGeneration()
         // Out of service now, before any close runs, and on purpose: what a
@@ -2806,7 +3007,10 @@ final class DirectPathController {
             completionAwaitingCloses = nil
             rebindDidComplete(kept)
         }
-        closeRelays(.direct, countsAsClosure: true, loss: (.background, pathAtBackground, hostAtBackground)) { [weak self] in
+        closeRelays(
+            .direct, countsAsClosure: true,
+            loss: (.background, pathAtBackground, hostAtBackground, .background)
+        ) { [weak self] in
             // Unless a new selection was made meanwhile: selecting already
             // stops the transport's work for the previous target.
             guard let self, self.target == nil else {
@@ -2823,6 +3027,7 @@ final class DirectPathController {
             return
         }
         isInBackground = false
+        probation.foreground()
         if let wait = firstRouteWait {
             firstRouteWait = FirstRouteWait(runtime: wait.runtime, store: wait.store)
         }
