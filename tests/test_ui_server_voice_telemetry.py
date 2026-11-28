@@ -366,6 +366,11 @@ def test_voice_telemetry_keeps_the_ios_apps_timings_of_a_hold_it_recognised(capl
         "holdTapsC80": 2,
         "holdTapsC100": 3,
         "holdTapsC120": 4,
+        "holdRestarts": 1,
+        "holdCfgFrom": "MicrophoneBuiltIn",
+        "holdCfgFromHz": 48_000,
+        "holdCfgFromCh": 1,
+        "holdCfgTo": "none",
     }
     with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
         response = client.post(
@@ -380,7 +385,7 @@ def test_voice_telemetry_keeps_the_ios_apps_timings_of_a_hold_it_recognised(capl
     assert metric["attempts"] == [attempt]
     for bad in (
         {"hold": "sometimes"}, {"holdLiveMs": -139}, {"holdAdoptMs": "soon"}, {"holdActMs": True},
-        {"holdT": "50"}, {"holdTapsW50": -1},
+        {"holdT": "50"}, {"holdTapsW50": -1}, {"holdCfgTo": "Jabra Evolve"}, {"holdRestarts": "1"},
     ):
         response = client.post(
             "/api/asr/telemetry",

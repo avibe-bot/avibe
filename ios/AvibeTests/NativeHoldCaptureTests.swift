@@ -1067,6 +1067,106 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(timings["taps"] as? String, "75:1 moved=1 open=1 w50=1")
     }
 
+    // 11-28 15:07: a cold hold's engine took 658 ms to start, delivered
+    // zeros, then its configuration changed and the take ended.
+    func testAnEngineWhoseConfigurationChangesStartsAgainWhileAnInputRemains() {
+        let builtIn = NativeHoldInputState(port: "MicrophoneBuiltIn", rate: 48_000, channels: 1)
+        let settled = NativeHoldInputState(port: "MicrophoneBuiltIn", rate: 24_000, channels: 1)
+        let input = FakeRestartableInput(builtIn)
+        let recovery = NativeHoldEngineRecovery(input: builtIn)
+
+        input.state = settled
+        let change = recovery.changed(input)
+        XCTAssertTrue(change.restarted)
+        XCTAssertEqual(input.restarts, 1)
+        XCTAssertEqual(recovery.restarts, 1)
+        XCTAssertEqual(change.text, "MicrophoneBuiltIn:48000/1>MicrophoneBuiltIn:24000/1")
+
+        // The input gone (a headset unplugged with nothing else to record
+        // from): not started again, and the take ends as before.
+        input.state = nil
+        let gone = recovery.changed(input)
+        XCTAssertFalse(gone.restarted)
+        XCTAssertEqual(input.restarts, 1)
+        XCTAssertEqual(gone.text, "MicrophoneBuiltIn:24000/1>none!")
+
+        // One that has no format yet, or will not start, ends it too.
+        input.state = NativeHoldInputState(port: "BluetoothHFP", rate: 0, channels: 0)
+        XCTAssertFalse(recovery.changed(input).restarted)
+        input.state = settled
+        input.failure = NSError(domain: "engine", code: -10_868)
+        XCTAssertFalse(recovery.changed(input).restarted)
+        XCTAssertEqual(input.restarts, 1)
+
+        // An input that keeps changing ends the take after a few restarts.
+        input.failure = nil
+        for _ in 1..<NativeHoldEngineRecovery.maxRestarts {
+            XCTAssertTrue(recovery.changed(input).restarted)
+        }
+        XCTAssertFalse(recovery.changed(input).restarted)
+        XCTAssertEqual(input.restarts, NativeHoldEngineRecovery.maxRestarts)
+    }
+
+    /// A take whose input started again goes on, and its timings name the
+    /// change; one whose input did not ends as before, naming it too.
+    func testAHoldsTakeGoesOnThroughARestartAndItsTimingsNameTheChange() throws {
+        let builtIn = NativeHoldInputState(port: "MicrophoneBuiltIn", rate: 48_000, channels: 1)
+        let settled = NativeHoldInputState(port: "MicrophoneBuiltIn", rate: 24_000, channels: 1)
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        let take = try hold(capture, in: webView)
+        _ = try capture.adopt(take: take, webView: webView).get()
+        audio.onPCM?(Data([1, 0]))
+        audio.onChange?(NativeHoldInputChange(from: builtIn, to: settled, restarted: true))
+        audio.onPCM?(Data([2, 0]))
+        drain()
+        XCTAssertFalse(heard.contains { if case .ended = $0 { true } else { false } }, "\(heard)")
+        capture.stop(take: take)
+        drain()
+        XCTAssertEqual(heard.last, .ended(reason: nil))
+        var timings = try XCTUnwrap(holdEvents.last { $0["phase"] as? String == "timings" }?["timings"] as? [String: Any])
+        XCTAssertEqual(timings["restarts"] as? Int, 1)
+        XCTAssertEqual(timings["cfgFrom"] as? String, "MicrophoneBuiltIn")
+        XCTAssertEqual(timings["cfgFromHz"] as? Int, 48_000)
+        XCTAssertEqual(timings["cfgTo"] as? String, "MicrophoneBuiltIn")
+        XCTAssertEqual(timings["cfgToHz"] as? Int, 24_000)
+        XCTAssertEqual(timings["cfgToCh"] as? Int, 1)
+        XCTAssertTrue(
+            try XCTUnwrap(notes.last).contains(" rs=1 cfg=MicrophoneBuiltIn:48000/1>MicrophoneBuiltIn:24000/1 end=stopped"),
+            notes.last ?? ""
+        )
+
+        // No input left: the input says so, then ends the take.
+        heard = []
+        let next = try hold(capture, in: webView)
+        _ = try capture.adopt(take: next, webView: webView).get()
+        audio.onChange?(NativeHoldInputChange(from: builtIn, to: nil, restarted: false))
+        audio.onEnd?("route")
+        drain()
+        XCTAssertEqual(heard.last, .ended(reason: "route"))
+        timings = try XCTUnwrap(holdEvents.last { $0["phase"] as? String == "timings" }?["timings"] as? [String: Any])
+        XCTAssertNil(timings["restarts"])
+        XCTAssertEqual(timings["cfgFrom"] as? String, "MicrophoneBuiltIn")
+        XCTAssertEqual(timings["cfgTo"] as? String, "none")
+        XCTAssertNil(timings["cfgToHz"])
+        XCTAssertTrue(try XCTUnwrap(notes.last).contains(" cfg=MicrophoneBuiltIn:48000/1>none! end=route"), notes.last ?? "")
+    }
+
+    /// A take the page started keeps the change on the phone's line.
+    func testAPageStartedTakeNotesTheChangeOnThePhone() throws {
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        _ = try capture.start(take: "t1", webView: nil) { _ in }.get()
+        audio.onChange?(NativeHoldInputChange(
+            from: NativeHoldInputState(port: "MicrophoneBuiltIn", rate: 48_000, channels: 1),
+            to: NativeHoldInputState(port: "BluetoothHFP", rate: 16_000, channels: 1),
+            restarted: true
+        ))
+        XCTAssertEqual(notes.last, "hold page cfg=MicrophoneBuiltIn:48000/1>BluetoothHFP:16000/1")
+        capture.stop(take: "t1")
+        drain()
+    }
+
     /// How long the touch took to reach the App is kept with the hold.
     func testAHoldKeepsHowLongItsTouchTookToReachTheApp() throws {
         let audio = FakeAudio()
@@ -2363,6 +2463,7 @@ private final class FakeAudio: NativeHoldCaptureAudio {
     var calls: [String] = []
     var onPCM: (@MainActor (Data) -> Void)?
     var onEnd: (@MainActor (String) -> Void)?
+    var onChange: (@MainActor (NativeHoldInputChange) -> Void)?
     var otherAudioPlaying = false
     var route = "Speaker"
     var routeIsBluetooth = false
@@ -2395,12 +2496,14 @@ private final class FakeAudio: NativeHoldCaptureAudio {
     func begin(
         onPCM: @escaping @MainActor (Data) -> Void,
         onEnd: @escaping @MainActor (String) -> Void,
+        onChange: @escaping @MainActor (NativeHoldInputChange) -> Void,
         completion: @escaping @MainActor (Result<NativeHoldCapture.BeginTimings, NativeHoldCapture.StartError>) -> Void
     ) {
         let armed = calls.last == "arm"
         calls.append("begin")
         self.onPCM = onPCM
         self.onEnd = onEnd
+        self.onChange = onChange
         let failure = beginFailure
         respond {
             if let failure {
@@ -2435,12 +2538,14 @@ private final class FakeAudio: NativeHoldCaptureAudio {
 
     func start(
         onPCM: @escaping @MainActor (Data) -> Void,
-        onEnd: @escaping @MainActor (String) -> Void
+        onEnd: @escaping @MainActor (String) -> Void,
+        onChange: @escaping @MainActor (NativeHoldInputChange) -> Void
     ) throws -> NativeHoldCapture.Timings {
         if let failure { throw failure }
         calls.append("start")
         self.onPCM = onPCM
         self.onEnd = onEnd
+        self.onChange = onChange
         return .init(activateMs: 12, engineMs: 34, categoryMs: 7)
     }
 
@@ -2457,6 +2562,25 @@ private final class FakeAudio: NativeHoldCaptureAudio {
     func stop(stopped: @escaping @MainActor () -> Void) {
         calls.append("stop")
         if holdsStop { stops.append(stopped) } else { stopped() }
+    }
+}
+
+/// An input `NativeHoldEngineRecovery` starts again: what the session says
+/// of it now, and whether its start fails.
+private final class FakeRestartableInput: NativeHoldRestartableInput {
+    var state: NativeHoldInputState?
+    var failure: Error?
+    private(set) var restarts = 0
+
+    init(_ state: NativeHoldInputState?) {
+        self.state = state
+    }
+
+    func current() -> NativeHoldInputState? { state }
+
+    func restart() throws {
+        if let failure { throw failure }
+        restarts += 1
     }
 }
 
