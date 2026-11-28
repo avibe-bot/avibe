@@ -1615,9 +1615,9 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
 
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
-    /// The engine that stopped itself at the bound of an untaken take:
-    /// nothing starts it again, a recovery already queued included.
-    private var stoppedAtTheBound: ObjectIdentifier?
+    /// What starts the present engine again after a change of its
+    /// configuration; stopped with it at the bound of an untaken take.
+    private var recovery: NativeHoldEngineRecovery?
     private var armed: NativeHoldCapture.ArmTimings?
     private let lock = NSLock()
     private var sink: NativeHoldSink?
@@ -1726,6 +1726,7 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         }
         let startMs = SystemNativeHoldCaptureAudio.ms(since: start)
         let recovery = NativeHoldEngineRecovery(input: NativeHoldEngineInput.state(of: engine))
+        self.recovery = recovery
         let restartable = NativeHoldEngineInput(engine: engine) { converter in
             { buffer, _ in
                 guard let data = converter.convert(buffer) else { return }
@@ -1751,7 +1752,7 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
                     // An input already taken down, or stopped at the bound,
                     // ended its take another way.
                     guard let self, self.engine.map(ObjectIdentifier.init) == engineID,
-                          self.stoppedAtTheBound != engineID
+                          !recovery.stopped
                     else { return }
                     let change = recovery.changed(restartable)
                     onChange(change)
@@ -1775,7 +1776,7 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         guard engine === stopping else { return false }
         // Nothing starts it again: a change of its configuration now finds
         // no one listening, and one already queued finds it stopped here.
-        stoppedAtTheBound = ObjectIdentifier(stopping)
+        recovery?.stop()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
         stopping.inputNode.removeTap(onBus: 0)
@@ -1788,6 +1789,8 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     func takeDown(deactivate: Bool, stopped: (() -> Void)? = nil) {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
+        recovery?.stop()
+        recovery = nil
         armed = nil
         if let engine {
             engine.inputNode.removeTap(onBus: 0)

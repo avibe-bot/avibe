@@ -61,16 +61,24 @@ final class NativeHoldEngineRecovery: @unchecked Sendable {
 
     private var last: NativeHoldInputState?
     private(set) var restarts = 0
+    /// The take's input stopped for good (at the bound of a take no page
+    /// took): a change that comes after, or was already on its way, starts
+    /// nothing.
+    private(set) var stopped = false
 
     init(input: NativeHoldInputState?) {
         last = input
+    }
+
+    func stop() {
+        stopped = true
     }
 
     func changed(_ input: NativeHoldRestartableInput) -> NativeHoldInputChange {
         let from = last
         let now = input.current()
         if let now { last = now }
-        guard let now, now.usable, restarts < Self.maxRestarts else {
+        guard !stopped, let now, now.usable, restarts < Self.maxRestarts else {
             return .init(from: from, to: now, restarted: false)
         }
         do {

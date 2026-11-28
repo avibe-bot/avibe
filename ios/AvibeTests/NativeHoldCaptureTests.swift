@@ -1107,6 +1107,19 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(input.restarts, NativeHoldEngineRecovery.maxRestarts)
     }
 
+    /// An input stopped at the bound of a take no page took: a change of its
+    /// configuration already on its way (queued behind the stop) starts
+    /// nothing, the microphone stays off.
+    func testAChangeAfterTheInputStoppedForGoodStartsNothing() {
+        let builtIn = NativeHoldInputState(port: "MicrophoneBuiltIn", rate: 48_000, channels: 1)
+        let input = FakeRestartableInput(builtIn)
+        let recovery = NativeHoldEngineRecovery(input: builtIn)
+        recovery.stop()
+        XCTAssertTrue(recovery.stopped)
+        XCTAssertFalse(recovery.changed(input).restarted)
+        XCTAssertEqual(input.restarts, 0)
+    }
+
     /// A take whose input started again goes on, and its timings name the
     /// change; one whose input did not ends as before, naming it too.
     func testAHoldsTakeGoesOnThroughARestartAndItsTimingsNameTheChange() throws {
