@@ -1947,10 +1947,10 @@
   "mobile": {
     "health": {
       "owner": {
-        "cloud_unavailable": "The instance owner could not be verified with Cloud. Health reads and synchronization are paused; stored data is kept. Check the instance Cloud connection, then run `vibe mobile health status` again.",
-        "cloud_owner_subject_unsupported": "This Cloud response does not include the owner ID required by this health connection. Health reads and synchronization are paused; stored data is kept. Update Avibe Cloud or contact its administrator, then run `vibe mobile health status` again.",
-        "legacy_owner_unproven": "This health connection predates owner IDs, and its device record cannot prove the current owner. Health reads and synchronization are paused; stored data is kept. Contact Avibe support to verify the connection before reconnecting.",
-        "owner_record_missing": "Cloud did not provide a valid owner identity for this health connection. Health reads and synchronization are paused; stored data is kept. Contact Avibe support to repair the instance owner record, then run `vibe mobile health status` again."
+        "cloud_unavailable": "Can't reach Cloud. Health sync is paused and your data is kept. Check the Cloud connection and try again.",
+        "cloud_owner_subject_unsupported": "Avibe Cloud is out of date. Health sync is paused and your data is kept. Update Avibe Cloud and try again.",
+        "legacy_owner_unproven": "This health connection can't confirm its owner. Sync is paused and your data is kept. Disconnect and reconnect Health (this clears old data and restores the last 30 days).",
+        "owner_record_missing": "Cloud is missing this instance's owner. Health sync is paused and your data is kept. Contact Avibe support."
       },
       "requestCreated": "Health data requested on iPhone.",
       "connectTitle": "{name} requests access to your health data",

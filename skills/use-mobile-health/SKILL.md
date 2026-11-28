@@ -25,11 +25,19 @@ vibe mobile health revoke
 ```
 
 `status` can report `read_allowed: false` and `sync_state: unknown` when the
-instance cannot verify its owner. Follow the localized `diagnostic.error` and
+instance cannot verify its owner. Follow the English `diagnostic.error` and
 `diagnostic.details.reason`; this is not evidence that data was deleted or the
 phone denied access. Stored data is preserved while verification is unavailable.
-Do not reconnect an unproven legacy connection automatically. A verified owner
-subject survives email changes; an actual owner transfer revokes the prior sync.
+A verified owner subject survives email changes; an actual owner transfer
+revokes the prior sync.
+
+For `legacy_owner_unproven`, the CLI gives `next_action: "revoke_then_connect"`
+(inside `diagnostic` for status). First ask the user to confirm that recovery
+will delete the instance's retained Health data. Only after they agree, run
+`vibe mobile health revoke`, then `vibe mobile health connect`. The iPhone
+confirmation starts a new connection and backfills the last 30 days that
+HealthKit can still supply. Do not reconnect automatically or substitute
+disconnecting only on iPhone: the instance-side revoke is required.
 
 If reading returns `not_connected`, run `connect`. Its conversation card and
 notification let the user authorize on iPhone. An explicit native confirmation and iOS Health permission request precede synchronization;

@@ -171,6 +171,19 @@ class MobileStore:
                 # Preserve the consent extension introduced before schema v2.
                 if not any(col[1] == "consent_device_id" for col in conn.execute("PRAGMA table_info(requests)")):
                     conn.execute("ALTER TABLE requests ADD COLUMN consent_device_id TEXT")
+                # Private-store schema owns these indexes (not the shared state's Alembic schema).
+                # Null-subject candidates and exact provenance must not scan historical work.
+                for statement in (
+                    "CREATE INDEX IF NOT EXISTS devices_owner_live ON devices(owner_subject,revoked_at)",
+                    "CREATE INDEX IF NOT EXISTS devices_active ON devices(revoked_at,created_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS requests_owner_state ON requests(owner_subject,state)",
+                    "CREATE INDEX IF NOT EXISTS requests_device_owner ON requests(device_id,owner_subject)",
+                    "CREATE INDEX IF NOT EXISTS requests_consent_owner ON requests(consent_device_id,owner_subject)",
+                    "CREATE INDEX IF NOT EXISTS pairings_owner_expiry ON pairings(owner_subject,expires_at)",
+                    "CREATE INDEX IF NOT EXISTS pairings_expiry ON pairings(expires_at)",
+                    "CREATE INDEX IF NOT EXISTS pairings_request_owner ON pairings(request_id,owner_subject)",
+                ):
+                    conn.execute(statement)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -733,32 +746,50 @@ class MobileStore:
                    for table in ("devices", "pairings", "requests"))
 
     @staticmethod
-    def _migrate_owner(conn, identity, proofs):
+    def _migrate_owner(conn, identity, proof_for, now):
         """Only exact registry links can promote legacy provenance to an identity."""
         subject = identity["owner_subject"]
         instance = identity["id"]
-        valid = [p for p in proofs if p["subject"] == subject and p["device_id"]
-                 and p["linked_at"] and not p["cleanup_pending"]]
-        device_proofs = {p["mobile_id"] for p in valid}
-        code_proofs = {p["code_hash"] for p in valid if p["code_hash"]}
+
+        def proven(column, value):
+            proof = proof_for(column, value) if proof_for else None
+            return bool(proof and proof["subject"] == subject and proof["device_id"]
+                        and proof["linked_at"] and not proof["cleanup_pending"])
+
         proven_devices = set()
-        for row in conn.execute("SELECT * FROM devices WHERE owner_subject IS NULL"):
-            if row["instance_id"] == instance and row["id"] in device_proofs:
+        for row in conn.execute("SELECT * FROM devices WHERE owner_subject IS NULL AND revoked_at IS NULL"):
+            if row["instance_id"] == instance and proven("mobile_id", row["id"]):
                 proven_devices.add(row["id"])
-            elif row["revoked_at"] is None:
+            else:
                 raise owner_unavailable("legacy_owner_unproven")
+        candidates = {row["id"]: row for row in conn.execute(
+            "SELECT * FROM requests WHERE owner_subject IS NULL AND state IN ('queued','claimed')")}
+        # A device's related history is promoted once, by indexed exact device keys.
+        # Unrelated terminal history and revoked devices never become recurring work.
+        for device_id in proven_devices:
+            for column in ("device_id", "consent_device_id"):
+                for row in conn.execute(f"SELECT * FROM requests WHERE {column}=? AND owner_subject IS NULL",
+                                        (device_id,)):
+                    candidates[row["id"]] = row
+        live_pairings = conn.execute(
+            "SELECT * FROM pairings WHERE owner_subject IS NULL AND expires_at>?", (now,)).fetchall()
+        for pairing in live_pairings:
+            row = conn.execute("SELECT * FROM requests WHERE id=? AND owner_subject IS NULL",
+                               (pairing["request_id"],)).fetchone()
+            if row:
+                candidates[row["id"]] = row
         proven_requests = set()
-        for row in conn.execute("SELECT * FROM requests WHERE owner_subject IS NULL"):
-            codes = [r[0] for r in conn.execute("SELECT code_hash FROM pairings WHERE request_id=?", (row["id"],))]
+        for row in candidates.values():
             if row["instance_id"] == instance and (
                 row["device_id"] in proven_devices or row["consent_device_id"] in proven_devices
-                or any(code in code_proofs for code in codes)
+                or any(proven("code_hash", code[0]) for code in conn.execute(
+                    "SELECT code_hash FROM pairings WHERE request_id=?", (row["id"],)))
             ):
                 proven_requests.add(row["id"])
             elif row["state"] not in TERMINAL:
                 raise owner_unavailable("legacy_owner_unproven")
-        for row in conn.execute("SELECT * FROM pairings WHERE owner_subject IS NULL"):
-            if row["request_id"] not in proven_requests and row["expires_at"] > _now():
+        for row in live_pairings:
+            if row["request_id"] not in proven_requests:
                 raise owner_unavailable("legacy_owner_unproven")
         conn.executemany("UPDATE devices SET owner_subject=? WHERE id=?", [(subject, key) for key in proven_devices])
         conn.executemany("UPDATE requests SET owner_subject=? WHERE id=?", [(subject, key) for key in proven_requests])
@@ -766,7 +797,7 @@ class MobileStore:
                          [(subject, key, instance) for key in proven_requests])
 
     def retire_other_identities(self, *, instance: str, owner: str, expected_device: str | None,
-                                owner_subject=None, proofs=(), retire=True) -> None:
+                                owner_subject=None, proof_for=None, retire=True) -> None:
         """Migrate before comparing, under registry-before-private-store lock order."""
         now = _now()
         with self.transaction() as conn:
@@ -777,7 +808,7 @@ class MobileStore:
                 raise owner_unavailable("cloud_owner_subject_unsupported")
             self._expire(conn, now)
             if owner_subject is not None:
-                self._migrate_owner(conn, {"id": instance, "owner_subject": owner_subject}, proofs)
+                self._migrate_owner(conn, {"id": instance, "owner_subject": owner_subject}, proof_for, now)
                 other = '(owner_subject IS NOT NULL AND (instance_id != ? OR owner_subject != ?))'
                 args = (instance, owner_subject)
             else:
@@ -788,7 +819,8 @@ class MobileStore:
             devices = conn.execute(f'SELECT id FROM devices WHERE revoked_at IS NULL AND {other}', args).fetchall()
             for row in devices:
                 self._revoke_device(conn, row['id'], now)
-            codes = conn.execute(f'DELETE FROM pairings WHERE {other}', args).rowcount
+            # Expired codes grant no authority and remain ordinary cleanup work.
+            codes = conn.execute(f'DELETE FROM pairings WHERE expires_at>? AND {other}', (now, *args)).rowcount
             requests = conn.execute(f"UPDATE requests SET state='canceled',ended_at=? WHERE state IN ('queued','claimed')"
                                     f' AND {other}', (now, *args)).rowcount
             if not (devices or codes or requests):

@@ -136,6 +136,14 @@ def _request(store, operation, identity, args, *, names=METRICS, caller="local")
             remove_unheld_lock(lock.lock_path)
 
 
+def _owner_diagnostic(error):
+    details = owner_error_details(error, language="en")
+    if (error.code == "instance_eligibility_unavailable"
+            and (error.details or {}).get("reason") == "legacy_owner_unproven"):
+        details["next_action"] = "revoke_then_connect"
+    return details
+
+
 def execute(args) -> dict:
     # A remotely initiated Agent still runs this local binary. All instance
     # Agents may read; caller environment is audit identity, not an allowlist.
@@ -151,7 +159,7 @@ def execute(args) -> dict:
             if error.code != "instance_eligibility_unavailable":
                 raise
             return {"kind": "mobile_health", "read_allowed": False, "sync_state": "unknown",
-                    "diagnostic": owner_error_details(error)}
+                    "diagnostic": _owner_diagnostic(error)}
         return {"kind": "mobile_health", "read_allowed": True, **store.status()}
     store = MobileStore()
     if args.mobile_group == "requests":
@@ -206,7 +214,7 @@ def cmd_mobile(args) -> int:
         payload = {"schema_version": 1, "ok": True, **result}
         code = 0
     except MobileError as error:
-        payload = {"schema_version": 1, "ok": False, "kind": "error", **owner_error_details(error)}
+        payload = {"schema_version": 1, "ok": False, "kind": "error", **_owner_diagnostic(error)}
         if error.details is not None:
             payload["details"] = error.details
         code = 1

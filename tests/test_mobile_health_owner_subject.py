@@ -188,6 +188,10 @@ def test_schema_migration_fences_released_writer_without_deleting_data(store, mo
     store.upload(device_for(store, paired), upload_payload())
     before = counts(store)
     with store.transaction() as conn:
+        indexes = list(conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND sql LIKE '%owner_subject%'"))
+        for row in indexes:
+            conn.execute(f'DROP INDEX "{row[0]}"')
         for table in ('devices', 'requests', 'pairings'):
             conn.execute(f'ALTER TABLE {table} DROP COLUMN owner_subject')
         conn.execute('PRAGMA user_version=1')
@@ -266,8 +270,9 @@ def test_malformed_subject_never_falls_back_to_matching_email(store, mobile_http
 
 
 @pytest.mark.parametrize('language', ['en', 'zh'])
-def test_owner_error_cli_and_http_share_localized_reason(store, mobile_http, capsys, language):
+def test_owner_cli_is_english_while_http_uses_ui_language(store, mobile_http, capsys, language):
     import json
+    from vibe.i18n import t
     from vibe.ui_mobile_routes import mobile_error_response
     _, projection = mobile_http
     config = V2Config.load()
@@ -279,9 +284,14 @@ def test_owner_error_cli_and_http_share_localized_reason(store, mobile_http, cap
     result = json.loads(capsys.readouterr().out)
     assert result['code'] == 'instance_eligibility_unavailable'
     assert result['details']['reason'] == 'owner_record_missing'
-    assert result['error'] != result['code'] and 'vibe mobile health status' in result['error']
+    assert result['error'] == t('mobile.health.owner.owner_record_missing', 'en')
+    assert 'next_action' not in result
     error = MobileError(result['code'], 503, details=result['details'])
-    assert json.loads(mobile_error_response(error).body)['error'] == result['error']
+    assert json.loads(mobile_error_response(error).body)['error'] == t('mobile.health.owner.owner_record_missing', language)
+    status_args = cli.build_parser().parse_args(['mobile', 'health', 'status'])
+    assert cli_mobile.cmd_mobile(status_args) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['diagnostic']['error'] == result['error']
 
 
 @pytest.mark.parametrize('legacy', [False, True])
@@ -521,3 +531,146 @@ def test_unswept_expired_legacy_request_does_not_block_subject_status(store, mob
     result = cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'status']))
     assert result['read_allowed'] and not result['connected']
     assert store.show_request(req['id'])['state'] == 'expired'
+
+
+def test_unproven_legacy_phone_disconnect_is_blocked_but_cli_revoke_recovers(store, mobile_http):
+    from datetime import date, timedelta
+    client, projection = mobile_http
+    paired, _ = pair_device(store)
+    store.upload(device_for(store, paired), upload_payload())
+    projection['access']['owner']['user_id'] = SUBJECT
+    bearer = {'Authorization': 'Bearer ' + paired['credential']}
+    response = client.delete('/api/mobile/device/v1/', headers=bearer)
+    assert response.status_code == 503
+    assert response.get_json()['details']['reason'] == 'legacy_owner_unproven'
+    assert store.active_device() and counts(store)[:2] == (2, 2)
+    with pytest.raises(MobileError) as error:
+        cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'connect', '--no-callback']))
+    assert error.value.details['reason'] == 'legacy_owner_unproven'
+    result = cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'revoke']))
+    assert result['purged']
+    connect = cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'connect', '--no-callback']))
+    identity = mobile_health.current_identity(store)
+    code = store.issue_pairing(connect['request']['id'], identity)
+    response = client.post('/api/mobile/device/v1/pair', json=dict(
+        pairing_code=code['pairing_code'], device_name='Recovered synthetic phone',
+        platform='ios', app_version='1', metrics=['steps']))
+    assert response.status_code == 200
+    bearer = {'Authorization': 'Bearer ' + response.get_json()['credential']}
+    backfill = upload_payload(names=['steps'])
+    start, end = date(2026, 10, 20), date(2026, 11, 18)
+    backfill['window']['from'] = start.isoformat()
+    backfill['items'] = []
+    for offset in range(30):
+        day = (start + timedelta(days=offset)).isoformat()
+        item = upload_payload(names=['steps'], day=day)['items'][0]
+        item['latest_sample_end_at'] = day + 'T07:00:00+08:00'
+        item['closed'] = day != end.isoformat()
+        backfill['items'].append(item)
+    assert client.put('/api/mobile/device/v1/health/days', json=backfill, headers=bearer).status_code == 200
+    status = cli_mobile.execute(cli.build_parser().parse_args(['mobile', 'health', 'status']))
+    assert status['read_allowed'] and status['connected']
+    read = cli_mobile.execute(cli.build_parser().parse_args([
+        'mobile', 'health', 'read', '--metric', 'steps', '--from', start.isoformat(), '--to', end.isoformat()]))
+    items = read['metrics']['steps']['items']
+    assert len(items) == 30 and all(item['availability'] == 'ok' for item in items)
+
+
+@pytest.mark.parametrize('command', ['status', 'read'])
+def test_legacy_owner_cli_has_explicit_recovery_action(store, mobile_http, capsys, command):
+    import json
+    from vibe.i18n import t
+    _, projection = mobile_http
+    pair_device(store)
+    projection['access']['owner']['user_id'] = SUBJECT
+    config = V2Config.load()
+    config.language = 'zh'
+    config.save()
+    args = ['mobile', 'health', command] + (['--metric', 'steps'] if command == 'read' else [])
+    assert cli_mobile.cmd_mobile(cli.build_parser().parse_args(args)) == (1 if command == 'read' else 0)
+    result = json.loads(capsys.readouterr().out)
+    diagnostic = result['diagnostic'] if command == 'status' else result
+    assert diagnostic['next_action'] == 'revoke_then_connect'
+    assert diagnostic['error'] == t('mobile.health.owner.legacy_owner_unproven', 'en')
+
+
+@pytest.mark.parametrize('history', [0, 3000])
+def test_owner_migration_work_is_bounded_by_live_records(store, mobile_http, monkeypatch, history, record_property):
+    """Count SQLite VM work, not machine-dependent timing, while the registry lock is held."""
+    from contextlib import contextmanager
+    from sqlalchemy import event
+    _, projection = mobile_http
+    paired, _ = pair_device(store)
+    link_device(paired['device_id'])
+    projection['access']['owner']['user_id'] = SUBJECT
+    with store.transaction() as conn:
+        # Both unproven legacy history and already-migrated history must be irrelevant.
+        conn.executemany(
+            "INSERT INTO requests(id,operation,instance_id,owner,owner_subject,metrics,state,created_at,"
+            "expires_at,ended_at,caller) VALUES(?,'health.connect',?,?,?,?, 'canceled',?,?,?,'fixture')",
+            [(f'history-{i}', IDENTITY['id'], IDENTITY['owner'], SUBJECT if i % 2 else None,
+              '[]', '2026-11-01', '2026-11-02', '2026-11-02') for i in range(history)])
+        conn.executemany("INSERT INTO pairings(code_hash,request_id,instance_id,owner,expires_at) VALUES(?,?,?,?,?)",
+                         [(f'old-code-{i}', f'history-{i}', IDENTITY['id'], IDENTITY['owner'], '2026-11-02')
+                          for i in range(history)])
+    binding = device_binding(V2Config.load())
+    if history:
+        with get_cached_sqlite_engine().begin() as conn:
+            conn.execute(insert(device_health_links), [
+                dict(mobile_id=f'old-registry-{i}', binding=binding,
+                     subject=SUBJECT, device_id='retired-phone', linked_at='2026-11-01')
+                for i in range(history)])
+    original_transaction = store.transaction
+    vm_steps = [0]
+    statements = []
+    registry_statements = []
+
+    def progress():
+        vm_steps[0] += 100
+        # Stop pathological old code promptly; a per-call budget does not grow with history.
+        return int(vm_steps[0] > 12000)
+
+    @contextmanager
+    def measured():
+        with original_transaction() as conn:
+            conn.set_progress_handler(progress, 100)
+            conn.set_trace_callback(statements.append)
+            try:
+                yield conn
+            finally:
+                conn.set_progress_handler(None, 0)
+                conn.set_trace_callback(None)
+
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if 'device_health_links' in statement and statement.lstrip().upper().startswith('SELECT'):
+            registry_statements.append((statement, parameters))
+
+    monkeypatch.setattr(store, 'transaction', measured)
+    engine = get_cached_sqlite_engine()
+    event.listen(engine, 'before_cursor_execute', capture)
+    try:
+        assert mobile_health.current_identity(store)['owner_subject'] == SUBJECT
+        first_steps = vm_steps[0]
+        with engine.connect() as conn:
+            for sql, parameters in registry_statements:
+                plan = [r[3] for r in conn.exec_driver_sql('EXPLAIN QUERY PLAN ' + sql, parameters)]
+                assert any('SEARCH device_health_links' in detail and 'mobile_id=?' in detail
+                           for detail in plan), plan
+        vm_steps[0] = 0
+        statements.clear()
+        registry_statements.clear()
+        assert mobile_health.current_identity(store)['owner_subject'] == SUBJECT
+        with original_transaction() as conn:
+            plans = [(sql, [r[3] for r in conn.execute('EXPLAIN QUERY PLAN ' + sql)])
+                     for sql in statements if sql.lstrip().upper().startswith(('SELECT', 'UPDATE', 'DELETE'))]
+        if vm_steps[0] >= 2500:
+            pytest.fail(f"{vm_steps[0]} VM steps:\n" + "\n".join(f"{sql}: {plan}" for sql, plan in plans))
+        assert first_steps < 12000
+        assert registry_statements == []  # No migration means no registry history lookup.
+        for sql, plan in plans:
+            assert any('SEARCH' in detail for detail in plan), (sql, plan)
+            assert not any('SCAN ' in detail or 'TEMP B-TREE' in detail for detail in plan), (sql, plan)
+        record_property('migration_vm_steps', first_steps)
+        record_property('steady_vm_steps', vm_steps[0])
+    finally:
+        event.remove(engine, 'before_cursor_execute', capture)

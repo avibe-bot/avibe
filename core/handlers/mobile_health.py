@@ -75,9 +75,12 @@ def current_identity(store: MobileStore, *, retire=True) -> dict:
             ensure_sqlite_state()
             with get_cached_sqlite_engine().begin() as conn:
                 conn.exec_driver_sql("BEGIN IMMEDIATE")
-                proofs = conn.execute(select(device_health_links).where(
-                    device_health_links.c.binding == device_binding(current))).mappings().all()
-                store.retire_other_identities(**kwargs, proofs=proofs)
+                def proof_for(column, value):
+                    # The private transaction asks only for exact live migration candidates.
+                    return conn.execute(select(device_health_links).where(
+                        device_health_links.c.binding == device_binding(current),
+                        device_health_links.c[column] == value)).mappings().first()
+                store.retire_other_identities(**kwargs, proof_for=proof_for)
         else:
             store.retire_other_identities(**kwargs)
     return identity
@@ -91,17 +94,18 @@ def context_is_owner(context, identity):
             bool(context.email and context.email.casefold() == identity["owner"]))
 
 
-def owner_error_details(error):
+def owner_error_details(error, *, language=None):
     """Stable code, localized facts and a cause-specific next action."""
     from config.v2_config import V2Config
     from vibe.i18n import t
     reason = (error.details or {}).get("reason")
     if error.code != "instance_eligibility_unavailable" or not reason:
         return {"code": error.code, "error": error.code}
-    try:
-        language = V2Config.load().language
-    except (OSError, ValueError):
-        language = "en"
+    if language is None:
+        try:
+            language = V2Config.load().language
+        except (OSError, ValueError):
+            language = "en"
     return {"code": error.code, "error": t(f"mobile.health.owner.{reason}", language),
             "details": error.details}
 

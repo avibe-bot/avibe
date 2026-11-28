@@ -1958,6 +1958,7 @@ def test_heart_expansion_migration_preserves_released_rows_and_old_named_writers
     with store.transaction() as conn:
         before = {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
                   for table in ("devices", "health_days", "metric_sync")}
+        conn.execute("DROP INDEX requests_consent_owner")
         conn.execute("ALTER TABLE requests DROP COLUMN consent_device_id")
     upgraded = MobileStore(store.path)
     with upgraded.transaction() as conn:

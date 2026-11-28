@@ -20,14 +20,24 @@ requests inherit that device proof; pending initial requests and pairing codes
 can instead use their exact registry code proof. Matching email is never proof.
 All live records must be proven before any promotion or automatic retirement;
 changes to all three tables share one transaction. Unknown, mismatched or
-unlinked evidence pauses access and retains data. Contact support to verify
-continuity before reconnecting; no automatic data replacement is offered.
+unlinked evidence pauses access and retains data. Recovery requires the user's
+agreement to delete retained data, followed by instance-side revoke and connect;
+no automatic data replacement is offered.
 
 Network I/O holds no local locks. The observed active device, current config
 pairing epoch and device binding are checked after the reply. Lock order is
 config, registry, private store. The existing binding-reset operation explicitly
 revokes private Health state when switching paired installations. Subjects are
 interpreted within that paired issuer/instance boundary.
+
+Migration selects active legacy devices, nonterminal legacy requests and
+unexpired legacy pairing codes through private-schema indexes. Registry proof
+is fetched by exact device or code key while retaining the same lock order;
+there is no binding-wide history read. An active device's related requests and
+pairings are promoted once using indexed provenance keys. Unrelated terminal
+requests and revoked devices remain provenance only. Repeated owner checks do
+not revisit this history. Retirement deletes only still-valid foreign pairing
+codes; expired codes remain ordinary retention-cleanup work.
 
 Once subject-bound, a verified different subject retains the existing automatic
 revocation/purge behavior. A missing subject, cached answer or unavailable Cloud
@@ -64,7 +74,7 @@ unswept legacy request cannot require continuity proof after its lifetime.
 
 Legacy enrollments made without a registry link cannot be promoted automatically,
 including enrollments approved from an unattributed local browser. They remain
-paused and preserved; explicit CLI revoke is still available to discard them.
+paused and preserved until the user agrees to instance-side revoke and connect.
 No production enrollment inventory or backfill is part of this change.
 
 `health status` performs a store-free live-owner preflight. If unavailable it
@@ -78,7 +88,17 @@ an earlier health read. Read, connect, refresh and upload remain fail-closed.
 The stable machine code is `instance_eligibility_unavailable`. Four reason keys
 separate Cloud availability, old Cloud, missing/malformed owner and unproven legacy
 continuity. English/Chinese messages state pause/preserve behavior and a specific
-next action. The CLI and HTTP errors share the same localized message.
+next action. CLI errors and status diagnostics always render the English catalog
+entry, independent of UI language; HTTP errors keep UI localization. CLI
+`legacy_owner_unproven` diagnostics expose `next_action: "revoke_then_connect"`.
+The Skill requires explicit agreement to clear retained data before running
+`vibe mobile health revoke` followed by `vibe mobile health connect`. The new
+connection backfills the last 30 days still available from HealthKit.
+
+Known iOS limitation: its disconnect clears local credentials even when the
+server DELETE fails. Unproven ownership still blocks that DELETE, so iPhone-only
+disconnect does not replace the instance-side recovery. This change does not
+relax device revocation authority or modify iOS cleanup behavior.
 
 ## Validation
 
@@ -98,3 +118,7 @@ version cannot reopen an upgraded store; the matrix does not claim binary rollba
 Existing Health, Devices, permissions and binding-reset suites cover surrounding
 behavior. Initial synthetic tests failed before implementation; targeted failures
 also preceded the ticket, notification, deferred-cleanup and stale-connect fixes.
+The query-cost regression compares 0 and 3,000 historical records, counts SQLite
+VM instructions during the actual owner check, and asserts indexed SEARCH plans
+without history scans or temporary sort trees. It also checks exact registry
+proof lookup and zero registry lookups once migration has completed.
