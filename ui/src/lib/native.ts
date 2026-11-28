@@ -1,3 +1,6 @@
+import { holdPageRequests } from './pageConnections';
+import { notePageHold } from './pageReport';
+
 export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
@@ -997,7 +1000,7 @@ async function readDirectStatus(native: AvibeNative): Promise<NativeDirectStatus
  * its power to make the state `unavailable`. A valid answer from it still
  * counts, like any observation.
  */
-function startBaselineAttempt(native: AvibeNative, tracker: DirectTracker): void {
+function startBaselineAttempt(native: AvibeNative, tracker: DirectTracker): Promise<unknown> {
   tracker.attempt += 1;
   const attempt = tracker.attempt;
   if (tracker.attemptTimer !== null) window.clearTimeout(tracker.attemptTimer);
@@ -1009,7 +1012,8 @@ function startBaselineAttempt(native: AvibeNative, tracker: DirectTracker): void
     notifyDirectState(tracker);
   }, DIRECT_BASELINE_WAIT_MS);
   notifyDirectState(tracker);
-  void readDirectStatus(native).then((status) => {
+  const read = readDirectStatus(native);
+  void read.then((status) => {
     if (status) {
       observeDirectStatus(tracker, status, true);
       return;
@@ -1021,6 +1025,39 @@ function startBaselineAttempt(native: AvibeNative, tracker: DirectTracker): void
     tracker.state = 'unavailable';
     notifyDirectState(tracker);
   });
+  return read;
+}
+
+/** The longest a return holds the page's requests for the shell's answer. */
+const DIRECT_RETURN_HOLD_MS = 1_000;
+
+/**
+ * Holds this document's new requests until `answered` settles, or
+ * DIRECT_RETURN_HOLD_MS at most, and notes how long that was.
+ *
+ * In the background the phone App closes the port its listener serves and
+ * opens it again on the return; the route in WebKit's store still points at
+ * it and allows fail-over. A request sent before the port is open again goes
+ * by a connection of WebKit's own to the public address, and WebKit then
+ * keeps every later request of the page on that connection, where no
+ * hand-over can reach it (measured, docs/plans/remote-direct-ios.md section
+ * 8). The App holds its `direct.status` answer on a return until the port is
+ * open, so that answer is the signal. With no answer in time the requests go
+ * as they always did; none fails for the hold.
+ */
+function holdRequestsForReturn(answered: Promise<unknown>): void {
+  const started = Date.now();
+  const release = holdPageRequests();
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    window.clearTimeout(timer);
+    release();
+    notePageHold(Date.now() - started);
+  };
+  const timer = window.setTimeout(end, DIRECT_RETURN_HOLD_MS);
+  void answered.then(end, end);
 }
 
 function directTrackerFor(native: AvibeNative): DirectTracker {
@@ -1054,21 +1091,32 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
   // missed while the App was suspended (the shell holds the answer until its
   // local proxy is ready again). When `unavailable`, it is a new baseline
   // attempt. While an attempt is pending it adds nothing.
+  // The phone App's listener closes its port in the background; the desktop
+  // app's does not. And only a page whose requests are counted can hold them
+  // (`installPageFetchCounting`, `direct` version 2).
+  const holdsOnReturn = native.platform !== 'desktop' && nativeDirectHandoverAvailable();
   const onReturn = () => {
     if (tracker.readForHidden === tracker.hiddenCount) return;
     tracker.readForHidden = tracker.hiddenCount;
+    let read: Promise<unknown> | null = null;
     if (tracker.state === 'unavailable') {
-      startBaselineAttempt(native, tracker);
+      read = startBaselineAttempt(native, tracker);
     } else if (tracker.state === 'ready') {
-      void readDirectStatus(native).then((status) => {
-        if (status) observeDirectStatus(tracker, status, true);
+      const status = readDirectStatus(native);
+      read = status;
+      void status.then((answer) => {
+        if (answer) observeDirectStatus(tracker, answer, true);
       });
     }
+    if (read && holdsOnReturn) holdRequestsForReturn(read);
   };
-  document.addEventListener('visibilitychange', () => {
+  // On the window, capturing: it runs before every listener on the document,
+  // so the hold is in place before another listener of the same return sends
+  // a request.
+  window.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') onReturn();
     else tracker.hiddenCount += 1;
-  });
+  }, true);
   window.addEventListener('pagehide', () => {
     tracker.hiddenCount += 1;
   });

@@ -11,8 +11,11 @@ import { beginRequestVia, noteRequestVia } from './liveStreamVia';
 let inFlight = 0;
 const sockets = new Set<WebSocket>();
 let installed = false;
-/** While a hand-over closes quiet connections, new requests wait here. */
-let hold: Promise<void> | null = null;
+/**
+ * The holds that are open: while a hand-over closes quiet connections, and
+ * while a return waits for the App's port. New requests wait for all of them.
+ */
+const holds = new Set<Promise<void>>();
 
 /** A body that has not moved for this long no longer keeps the page busy. */
 const BODY_IDLE_RELEASE_MS = 10_000;
@@ -108,9 +111,11 @@ export function installPageFetchCounting(): void {
   const original = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (!sameOrigin(input)) return original(input, init);
-    // Sent only after a hand-over in progress has finished, so it cannot
-    // reuse a connection the hand-over is about to close.
-    while (hold) await hold;
+    // Sent only once no hold is open: after a hand-over in progress has
+    // finished, so it cannot reuse a connection the hand-over is about to
+    // close, and after a return's hold. One that opens meanwhile is waited
+    // for too.
+    while (holds.size > 0) await Promise.all(Array.from(holds));
     const done = beginPageRequest();
     const order = beginRequestVia();
     let response: Response;
@@ -128,17 +133,18 @@ export function installPageFetchCounting(): void {
 
 /**
  * Holds this document's new same-origin requests until the returned function
- * is called. New WebSockets are not held: each opens a connection of its own,
- * which takes the path new connections prefer.
+ * is called. Holds may overlap (a hand-over and a return): requests go only
+ * when every one of them has ended. New WebSockets are not held: each opens
+ * a connection of its own, which takes the path new connections prefer.
  */
 export function holdPageRequests(): () => void {
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
-  hold = held;
+  holds.add(held);
   return () => {
-    if (hold === held) hold = null;
+    holds.delete(held);
     release();
   };
 }

@@ -14,6 +14,10 @@
 // the word changes, and otherwise at most once in PAGE_REPORT_REPEAT_MS.
 // Only a page that can hand over has a word at all (the phone App and the
 // desktop app with `direct` version 2); anywhere else nothing is sent.
+//
+// How long a return held the page's requests (lib/native, the hold on
+// return) rides the same header once, as `<word>;hold=<ms>`, on the first
+// such read after the hold, whether or not the word is due.
 
 /** The page's present reason, in the instance's words. */
 export type PageWhy =
@@ -48,6 +52,9 @@ const PAGE_REPORT_REPEAT_MS = 10_000;
 let read: (() => PageWhy | null) | null = null;
 let sent: PageWhy | null = null;
 let sentAt = -Infinity;
+let hold: number | null = null;
+/** The longest hold the instance takes; a longer one is sent as this. */
+const PAGE_REPORT_HOLD_MAX_MS = 1_000;
 
 /**
  * `reader` gives the page's present reason, or null when it has none to
@@ -60,7 +67,17 @@ export function setPageWhyReader(reader: () => PageWhy | null): () => void {
     read = null;
     sent = null;
     sentAt = -Infinity;
+    hold = null;
   };
+}
+
+/**
+ * A return held this page's requests for `ms`. Said once, with the next
+ * report; of two holds before one, the later.
+ */
+export function notePageHold(ms: number): void {
+  if (!read) return;
+  hold = Math.min(Math.max(Math.round(ms), 0), PAGE_REPORT_HOLD_MAX_MS);
 }
 
 /**
@@ -70,8 +87,10 @@ export function setPageWhyReader(reader: () => PageWhy | null): () => void {
 export function takePageReport(): string | null {
   const word = read ? read() : null;
   if (word === null) return null;
-  if (word === sent && Date.now() - sentAt < PAGE_REPORT_REPEAT_MS) return null;
+  if (hold === null && word === sent && Date.now() - sentAt < PAGE_REPORT_REPEAT_MS) return null;
+  const value = hold === null ? word : `${word};hold=${hold}`;
+  hold = null;
   sent = word;
   sentAt = Date.now();
-  return word;
+  return value;
 }
