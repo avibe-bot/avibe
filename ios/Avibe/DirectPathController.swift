@@ -201,9 +201,13 @@ typealias DirectHandoverProvider = @MainActor (
 
 /// The only writer of `proxyConfigurations`. A store's route lists exact
 /// instance hosts and points at the App's one listener. Its host list only
-/// grows while the store lives: no host is removed and no route is cleared,
-/// because WebKit does not reliably apply a cleared or changed route
-/// (docs/plans/remote-direct-ios.md sections 2 and 5).
+/// grows while the store lives, because WebKit does not reliably apply a
+/// cleared or changed route while a connection of the host lives
+/// (docs/plans/remote-direct-ios.md sections 2 and 5). The one exception is
+/// `remove`: a host the listener could not carry at all, which therefore has
+/// no live connection through it, leaves the route for the rest of the
+/// process (the next connection follows the removal: section 2,
+/// `remove-close`).
 @MainActor
 final class DirectRouteOwner {
     /// The most hosts the process's routes may list together.
@@ -222,6 +226,8 @@ final class DirectRouteOwner {
         let allowsFailover: Bool
     }
     private var hostsByStore: [UUID: [RoutedHost]] = [:]
+    /// The port each store's route was last written with.
+    private var portByStore: [UUID: UInt16] = [:]
     /// Hosts a store loaded without a route and that get none there later:
     /// the listener was failed, closed or never started when they loaded.
     /// (A host that loaded while the first bind was still under way is not
@@ -296,8 +302,29 @@ final class DirectRouteOwner {
         return true
     }
 
+    /// Takes `host` out of `store`'s route and excludes it there for the rest
+    /// of the process: its loads go by WebKit's own path. Only for a host
+    /// that has no live connection through the listener (it carried none).
+    /// `false` when the host was not routed on that store.
+    @discardableResult
+    func remove(_ host: String, store: UUID, dataStore: WKWebsiteDataStore) -> Bool {
+        guard let hosts = hostsByStore[store], hosts.contains(where: { $0.name == host }) else {
+            return false
+        }
+        let remaining = hosts.filter { $0.name != host }
+        if let port = portByStore[store] {
+            write(remaining, store: store, dataStore: dataStore, port: port)
+        } else {
+            hostsByStore[store] = remaining
+            dataStore.proxyConfigurations = []
+        }
+        excluded.insert(StoreHost(store: store, host: host))
+        return true
+    }
+
     private func write(_ hosts: [RoutedHost], store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) {
         hostsByStore[store] = hosts
+        portByStore[store] = port
         dataStore.proxyConfigurations = [false, true].compactMap { allowsFailover in
             let domains = hosts.filter { $0.allowsFailover == allowsFailover }.map(\.name)
             guard !domains.isEmpty else { return nil }
@@ -779,6 +806,77 @@ final class DirectPathController {
     /// `tunnel` meanwhile: nothing of theirs passes through the listener
     /// yet, so a hand-over could move nothing.
     private var awaitingFirstConnect: Set<String> = []
+    /// What the listener did with each routed host's connections on each
+    /// store in this process: how many it carried (on either leg) and how
+    /// many it gave up. A host it gave up on and never carried may be taken
+    /// off the route (`bypassListener`).
+    private struct Carry {
+        var carried = 0
+        var failed = 0
+    }
+    private var carries: [String: Carry] = [:]
+
+    private static func carryKey(_ host: String, _ store: UUID) -> String {
+        store.uuidString + " " + host
+    }
+
+    private func noteCarry(host: String, store: UUID, carried: Bool) {
+        let key = Self.carryKey(host, store)
+        var carry = carries[key] ?? Carry()
+        if carried { carry.carried += 1 } else { carry.failed += 1 }
+        carries[key] = carry
+    }
+
+    /// The listener gave up every connection of `url`'s host on the current
+    /// store, at least one, and carried none: neither leg could reach the
+    /// instance from here (for example a VPN whose addresses the public leg
+    /// refuses, or a network that drops its connections), while WebKit's own
+    /// path may.
+    func listenerCannotCarry(forInstanceURL url: URL) -> Bool {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return false }
+        let store = websiteDataStore.identifier
+        guard routeOwner.routes(host, store: store), let carry = carries[Self.carryKey(host, store)] else {
+            return false
+        }
+        return carry.failed > 0 && carry.carried == 0
+    }
+
+    /// Takes `url`'s host off the current store's route for the rest of the
+    /// process, so its loads go by WebKit's own path, as Safari's do. Only
+    /// for an automatic host (a 「仅直连和中继」 one must go back to
+    /// automatic first) that the listener has carried nothing for: no
+    /// connection of it lives through the listener, so the next one follows
+    /// the removal. The next launch tries the listener again. `false` when
+    /// nothing changed.
+    ///
+    /// `force` (the second 重试 on the failure screen): also when the
+    /// listener carried some of the host's connections earlier. One still
+    /// alive keeps its way through the listener; every new one goes by
+    /// WebKit's own path.
+    @discardableResult
+    func bypassListener(forInstanceURL url: URL, force: Bool = false) -> Bool {
+        guard let host = DirectAuthority(instanceURL: url)?.host, !needsListener(host) else { return false }
+        let store = websiteDataStore.identifier
+        if !force, let carry = carries[Self.carryKey(host, store)], carry.carried > 0 {
+            return false
+        }
+        if lateRoute?.host == host, lateRoute?.store == store {
+            lateRoute = nil
+            lateRouteTask?.cancel()
+            lateRouteTask = nil
+        }
+        guard routeOwner.remove(host, store: store, dataStore: websiteDataStore.dataStore) else {
+            routeOwner.exclude(host, store: store)
+            return false
+        }
+        armed.remove(host)
+        awaitingFirstConnect.remove(host)
+        Self.logger.notice("Direct path: a host the listener could not carry loads by WebKit's own path")
+        sequence += 1
+        notify()
+        onAvailabilityChanged()
+        return true
+    }
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -1762,7 +1860,12 @@ final class DirectPathController {
         // relay or given it up: a race that is fenced and planned again is
         // not a connection. Whichever instance is selected by then, the
         // connection was made, and it is counted for its own host.
-        plan.connectionSettled = { [pathUse] carried in
+        let carryStore = websiteDataStore.identifier
+        plan.connectionSettled = { [weak self, pathUse] carried in
+            let carriedAny = carried != nil
+            Task { @MainActor in
+                self?.noteCarry(host: host, store: carryStore, carried: carriedAny)
+            }
             guard let record = lastRace.last else {
                 return
             }
