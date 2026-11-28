@@ -142,8 +142,9 @@ Fixed directory: `$AVIBE_HOME/hooks/source_filter/` (default `~/.avibe/hooks/sou
     off, except that native declarations are still suppressed.
 - **Each file is optional on its own.** Any subset is valid.
 - **Installed locally by the runtime owner only.**
-  - The settings page never uploads code, edits scripts, or accepts a command.
-  - For each hook it shows: found / not found (as last checked), the full path, and a copy-path control.
+  - The settings page never uploads code, edits scripts inline, or accepts a command.
+  - For each hook it shows found / not found (as last checked) and a clickable filename that opens
+    the existing Editor app (§7). The directory has a copy control.
   - The docs say plainly that a missing file means the hook is skipped.
 
 ## 4. Flow of one logical call
@@ -334,7 +335,12 @@ added, it follows the same rule: one call-level pair of hooks.
   - one row per hook with found / not found and its path;
   - a scope line ("Vibey's web_search and web_fetch only");
   - a docs link.
-  No upload, no editor, no command input.
+  No upload, inline editor, or command input. Every script filename opens that path in the existing
+  Editor app and roots its explorer at the hook directory returned by the API. Existing Editor
+  buffers are retained. Missing scripts remain clickable and show the Editor's file-not-found state;
+  opening a filename never creates, writes, or executes a hook, or changes the experiment switch.
+  File metadata supplies the Editor's initial save-conflict baseline; other metadata failures are
+  shown without launching, and superseded or abandoned clicks cannot open a late window.
 - **Tool card:** when a hook acted, a small marker: rewritten, custom result, replaced output, or blocked by source
   filter. The card shows the final payload.
 - **Public docs page** (experimental): the path, the protocol, the examples below, the scope limits, and the

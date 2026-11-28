@@ -1,6 +1,7 @@
 // Settings › Experimental › Information cocoon (docs/plans/vibey-source-filter-hooks.md). Experimental is a list of
 // experiments; Information cocoon is one row that opens its own page (owner decision 2026-11-27). The page shows the
-// switch, the guide link and, when on, the hook folder and each script's state. The phone's section list with the
+// switch, the guide link and, when on, the hook folder and clickable script names (existing Editor
+// app, rooted at that folder; opening never creates or runs a hook). The phone's section list with the
 // new row is settings/sections/phone. The failure shown is an example.
 import {
   SettingsExperimentalPage,
@@ -78,6 +79,11 @@ const designFrames = frames([
   list('desktop', on, '桌面 · 实验性 · 项目列表（信息茧房已开启）', 760),
   page('desktop', off, '桌面 · 实验性 › 信息茧房 · 关闭（默认）', 760),
   page('desktop', on, '桌面 · 实验性 › 信息茧房 · 打开：已找到、未找到、上次运行失败', 900),
+  {
+    ...page('desktop', on, '桌面 · 信息茧房 · 脚本文件名可打开编辑器', 900),
+    name: 'desktop-script-hover',
+    hover: '[data-hook="after_fetch.py"] button',
+  },
 ]);
 
 export default designFrames;
