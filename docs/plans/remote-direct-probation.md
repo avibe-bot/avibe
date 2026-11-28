@@ -1,6 +1,6 @@
 # Remote direct paths: probation before adoption
 
-Status: **the rule and its shared cases are written; neither shell implements it yet.** The iPhone App and the Desktop core each implement it against `tests/fixtures/direct_probation_cases.json`.
+Status: **the rule and its shared cases are written; the iPhone App implements it** (`ios/Avibe/DirectProbation.swift`, wired in `DirectPathController`; docs/plans/remote-direct-ios.md section 6). The Desktop core implements it in its own change. Each runs `tests/fixtures/direct_probation_cases.json`.
 
 Decided on 2026-11-28 for 3.2.9, after the owner asked that a page never flap between a direct path and the tunnel.
 
