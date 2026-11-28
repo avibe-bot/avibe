@@ -1602,12 +1602,36 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                         user_key=delivery_owner,
                         contexts=contexts,
                     )
+                    # Read the full stored body when a message_id is present so
+                    # mentions near the 240-char cutoff resolve cleanly before
+                    # truncation, without adding private fields to ``payload``.
+                    raw_body: str | None = None
+                    if payload.get("message_id"):
+                        raw_body = conn.execute(
+                            select(messages.c.content_text).where(
+                                messages.c.id == payload.get("message_id")
+                            )
+                        ).scalar_one_or_none()
+                    if not isinstance(raw_body, str) or not raw_body.strip():
+                        raw_body = str(payload.get("body") or "")
+                    from core.mention_resolution import render_plain_mentions_in_conn
+
+                    resolved_body = render_plain_mentions_in_conn(
+                        conn,
+                        raw_body.strip(),
+                        include_bare_sessions=True,
+                        authorization_context=contexts.get(delivery_owner),
+                    ).strip()[:240]
                 if not may_dispatch(engine, subscription):
                     continue
                 try:
                     send_web_push(
                         subscription=subscription,
-                        payload={**payload, "badge_count": badge_count},
+                        payload={
+                            **payload,
+                            "body": resolved_body,
+                            "badge_count": badge_count,
+                        },
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_success(

@@ -1426,7 +1426,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_agent_steer"]
     assert recovered.message.content[-1].text.startswith(
-        "[Harness: agent run run_1 from #sessource01; agent run run_2 from #sessource01]\n"
+        "[Harness: agent run run_1 from #<sessource01>; agent run run_2 from #<sessource01>]\n"
     )
 
 

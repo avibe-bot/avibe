@@ -14406,7 +14406,10 @@ def sessions_activity(session_id: str):
             return jsonify({"error": str(err)}), 404
         if group_id:
             group = agent_activity_service.get_turn_group(
-                conn, session_id=session_id, group_id=group_id
+                conn,
+                session_id=session_id,
+                group_id=group_id,
+                authorization_context=authorization_context,
             )
             if group is None:
                 return jsonify({"error": "activity group not found"}), 404
@@ -16905,6 +16908,10 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS
 
     if event_type in {"message.new", "message.updated"}:
+        from core.mention_resolution import (
+            enrich_message_rows_in_conn,
+            extract_mention_candidates,
+        )
         from storage.message_deliveries import public_message_metadata
 
         try:
@@ -16913,20 +16920,70 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
             return None
         if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), dict):
             return None
-        data = envelope["data"]
-        if "metadata" not in data:
+        data = dict(envelope["data"])
+        changed = False
+        if "metadata" in data:
+            data["metadata"] = public_message_metadata(
+                data.get("metadata"),
+                include_local_error_detail=_has_runtime_management_access(context),
+            )
+            changed = True
+        text = data.get("text")
+        author = str(data.get("author") or "").strip()
+        content = data.get("content") if isinstance(data.get("content"), dict) else None
+        has_refs = bool(content and isinstance(content.get("references"), list) and content["references"])
+        needs_resolve = (
+            author in {"agent", "harness"}
+            and isinstance(text, str)
+            and any(extract_mention_candidates(text, include_bare_sessions=True))
+        ) or has_refs
+        if needs_resolve:
+            try:
+                with _projects_engine().connect() as conn:
+                    enrich_message_rows_in_conn(
+                        conn, [data], authorization_context=context
+                    )
+                changed = True
+            except Exception:
+                logger.debug("workbench event: mention enrichment failed", exc_info=True)
+        if not changed:
             return payload
         return json.dumps(
             {
                 **envelope,
-                "data": {
-                    **data,
-                    "metadata": public_message_metadata(
-                        data.get("metadata"),
-                        include_local_error_detail=_has_runtime_management_access(context),
-                    ),
-                },
+                "data": data,
             },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if event_type == "inbox.session.updated":
+        from core.mention_resolution import (
+            extract_mention_candidates,
+            render_plain_mentions_in_conn,
+        )
+
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return payload
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        preview = data.get("preview_text") if isinstance(data, dict) else None
+        if not isinstance(preview, str) or not any(
+            extract_mention_candidates(preview, include_bare_sessions=True)
+        ):
+            return payload
+        try:
+            with _projects_engine().connect() as conn:
+                rendered = render_plain_mentions_in_conn(
+                    conn, preview, authorization_context=context
+                )
+        except Exception:
+            logger.debug("workbench event: inbox preview mention render failed", exc_info=True)
+            return payload
+        if rendered == preview:
+            return payload
+        return json.dumps(
+            {**envelope, "data": {**data, "preview_text": rendered}},
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -17279,6 +17336,8 @@ def inbox_list():
             scope_ids=accessible_scope_ids,
             hidden_session_ids=hidden_session_ids,
             category=category,
+            authorization_context=getattr(g, "authorization_context", None),
+            resolve_mentions=True,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.

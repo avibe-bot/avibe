@@ -28,6 +28,7 @@ from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
 from core.delivery_target import routed_delivery_context
 from core.citations import CitationBundle, materialize_citations
+from core.mention_resolution import render_im_mentions
 from core import failure_notices
 from core.message_context import TERMINAL_COMMIT_KEY, resolve_turn_sink_key
 from core.message_mirror import (
@@ -2315,6 +2316,28 @@ class ConsolidatedMessageDispatcher:
         )
         return presentation, narration
 
+    async def _resolve_im_mentions(
+        self, context: MessageContext, text: Optional[str]
+    ) -> Optional[str]:
+        """Resolve Session and Bot mentions for outbound IM delivery only.
+
+        Workbench (``avibe``) rows keep their canonical markers so the Web /
+        Desktop / iOS renderer draws clickable chips with live titles.
+        """
+        if not text:
+            return text
+        platform = self._get_platform(context)
+        if platform == "avibe":
+            return text
+        if "#" not in text and "@<bot:" not in text and "@<agent:" not in text:
+            return text
+        return await asyncio.to_thread(
+            render_im_mentions,
+            text,
+            platform=platform,
+            config=getattr(self.controller, "config", None),
+        )
+
     @staticmethod
     def _writes_on_delivery(canonical_type: str, output_semantics: MessageOutput) -> bool:
         """Whether this output's derived writes wait for its delivery evidence.
@@ -3577,9 +3600,10 @@ class ConsolidatedMessageDispatcher:
             # below keeps its tokens so ``persist_agent_message`` can bind the
             # sidecar to the body it finalizes.
             notify_text = materialize_citations(text, citations)
+            im_notify_text = await self._resolve_im_mentions(target_context, notify_text)
             try:
                 message_id = await im_client.send_message(
-                    target_context, notify_text, parse_mode=parse_mode
+                    target_context, im_notify_text, parse_mode=parse_mode
                 )
             except Exception as err:
                 logger.error("Failed to send notify message: %s", err, exc_info=True)
@@ -3659,6 +3683,7 @@ class ConsolidatedMessageDispatcher:
                 # written in once, before any of them can truncate or reflow the
                 # body. ``persist_text`` below still holds its tokens.
                 display_text = materialize_citations(display_text, citations)
+                display_text = await self._resolve_im_mentions(target_context, display_text)
                 delivery_buttons = _written_buttons(
                     enhanced.buttons if enhanced else [], citations
                 )
@@ -4170,6 +4195,7 @@ class ConsolidatedMessageDispatcher:
         # status line or consolidated log - so write the citations into ``text``
         # once here rather than at each of them.
         text = materialize_citations(text, citations)
+        text = await self._resolve_im_mentions(target_context, text)
 
         if decision.im is ImDelivery.NONE:
             if decision.reason == "tools_unsupported":

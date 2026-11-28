@@ -189,6 +189,7 @@ import { readLocalStoreAround, readLocalStoreOlder } from '../../lib/localStore'
 import { useFileViewer } from '../ui/file-viewer-context';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
+import { SessionMentionChip } from '../ui/session-mention-chip';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
 import { VaultProvisionDialogProvider, VaultRequestCard } from '../ui/vault-request-card';
@@ -197,7 +198,7 @@ import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
 import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
-import type { MentionReference } from '../../lib/mentions';
+import { formatMentionsPlainText, type MentionReference } from '../../lib/mentions';
 import { bindCitations, remapCitations } from '../../lib/citations';
 import { QuickReplies } from './QuickReplies';
 import { QueuedAttachmentGroup, QueuedAttachmentSheet } from './QueuedAttachments';
@@ -6777,6 +6778,7 @@ export const MessageRow = memo(function MessageRow({
       // keeps their line breaks exactly as the ordinary user bubble does.
       softBreaks={isUser || isHarness || (row.kind === 'annotation' && row.annotation.direction === 'user')}
       references={(message.content as { references?: MentionReference[] } | null)?.references}
+      agentMentions={agentAuthored || isHarness}
       // Only the agent's own words may render `$<NAME>` as an interactive secret-input card;
       // user/harness/system bubbles with the marker stay plain text (no false "agent asked"
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
@@ -6932,6 +6934,11 @@ export const MessageRow = memo(function MessageRow({
 
   // ----- Harness: avatar+type header, then a narrow chip that expands -----
   if (isHarness) {
+    const sourceBot = message.source_session_id ? botForSession(message.source_session_id) : undefined;
+    const harnessRefs = (message.content as { references?: MentionReference[] } | null)?.references;
+    const collapsedPreview = message.text?.trim()
+      ? formatMentionsPlainText(message.text.trim(), harnessRefs, t('workbench.untitledSession'))
+      : '—';
     return (
       <div data-message-id={message.id} className={rowClass('justify-start')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
@@ -6961,18 +6968,16 @@ export const MessageRow = memo(function MessageRow({
                   <span className="shrink-0 text-[11px] text-muted">{t(vaultStatusKey)}</span>
                 </>
               )}
-              {triggerLink?.kind === 'source' && (
-                // A9a: agent-callback shows the SOURCE session + links to its chat.
+              {triggerLink?.kind === 'source' && message.source_session_id && (
+                // A9a: agent-callback shows the SOURCE session using the shared Session chip
+                // (live current title + one-click link to its chat, never a bare id suffix).
                 <>
                   <span className="shrink-0 text-[11px] text-muted">·</span>
-                  <button
-                    type="button"
-                    onClick={() => navigate(triggerLink.to)}
-                    className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-cyan-ink hover:underline"
-                  >
-                    <span className="min-w-0 truncate">{triggerLink.label}</span>
-                    <ArrowUpRight className="size-3 shrink-0" />
-                  </button>
+                  <SessionMentionChip
+                    sessionId={message.source_session_id}
+                    title={sourceBot ? botDisplayName(sourceBot) : (message.source_session_title ?? null)}
+                    className="min-w-0"
+                  />
                 </>
               )}
             </span>
@@ -6990,7 +6995,7 @@ export const MessageRow = memo(function MessageRow({
             className="h-auto max-w-[min(100%,360px)] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
           >
             <span className="min-w-0 truncate text-[12px] text-muted">
-              {expanded ? t('chat.collapse') : message.text?.trim() || '—'}
+              {expanded ? t('chat.collapse') : collapsedPreview}
             </span>
             <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')} />
           </Button>

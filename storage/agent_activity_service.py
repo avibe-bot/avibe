@@ -322,7 +322,13 @@ def _project_native_traces(
     return result
 
 
-def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
+def _timeline(
+    conn,
+    session_id: str,
+    *,
+    include_text: bool,
+    authorization_context: Any = None,
+) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items, projecting marked canonical
     tool calls and retaining legacy/non-Vibey trace readers."""
@@ -332,6 +338,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         limit=MESSAGE_SCAN_LIMIT,
         tail=True,
         types=_RELEVANT_MESSAGE_TYPES,
+        authorization_context=authorization_context,
     )["messages"]
     events = agent_events_service.list_session_events(
         conn,
@@ -459,6 +466,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 # plain domain link here (see ``core.citations``).
                 "citations": (
                     (msg.get("content") or {}).get("citations") if include_text else None
+                ),
+                "references": (
+                    (msg.get("content") or {}).get("references") if include_text else None
                 ),
                 # The silent marker is a terminal that is INVISIBLE in the transcript,
                 # so a group closing on it must anchor to the (visible) turn trigger
@@ -621,6 +631,11 @@ def _make_group(
                 **(
                     {"citations": item["citations"]}
                     if isinstance(item.get("citations"), list) and item["citations"]
+                    else {}
+                ),
+                **(
+                    {"references": item["references"]}
+                    if isinstance(item.get("references"), list) and item["references"]
                     else {}
                 ),
                 **({"hosted": item["hosted"]} if isinstance(item.get("hosted"), dict) else {}),
@@ -821,11 +836,25 @@ def list_turn_groups(conn, *, session_id: str) -> dict[str, Any]:
     return {"groups": groups}
 
 
-def get_turn_group(conn, *, session_id: str, group_id: str) -> Optional[dict[str, Any]]:
+def get_turn_group(
+    conn,
+    *,
+    session_id: str,
+    group_id: str,
+    authorization_context: Any = None,
+) -> Optional[dict[str, Any]]:
     """One group's full rows (interim assistant text + tool-call text), for the
     lazy expand. ``group_id`` is the group's first-activity-row id (from the
     summary). Returns ``None`` when no group matches."""
-    groups = _build_groups(_timeline(conn, session_id, include_text=True), include_rows=True)
+    groups = _build_groups(
+        _timeline(
+            conn,
+            session_id,
+            include_text=True,
+            authorization_context=authorization_context,
+        ),
+        include_rows=True,
+    )
     for group in groups:
         if group["id"] == group_id:
             return group

@@ -1812,8 +1812,8 @@ async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) ->
 
     first = await manager._steer_input_metadata([deliveries[0]])
     second = await manager._steer_input_metadata([deliveries[1]])
-    assert first.harness_source == "agent run from #source-0"
-    assert second.harness_source == "agent run from #source-1"
+    assert first.harness_source == "agent run from #<source-0>"
+    assert second.harness_source == "agent run from #<source-1>"
     assert prepare.await_count == 2
 
 
