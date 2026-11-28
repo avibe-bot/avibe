@@ -340,6 +340,52 @@ describe('ChatPage transcript hydration', () => {
     }
   });
 
+  it.each([
+    { surface: 'a browser, hidden', direct: false, hidden: true, reads: true },
+    { surface: 'a shell with a direct path, shown', direct: true, hidden: false, reads: true },
+    { surface: 'a shell with a direct path, hidden', direct: true, hidden: true, reads: false },
+  ])('reads the turn state when the stream goes down in $surface: $reads', async ({ direct, hidden, reads }) => {
+    // The phone App closes its port in the background, which ends the stream.
+    // A read sent then leaves by a connection of WebKit's own, and the page
+    // stays on it after the return (docs/plans/remote-direct-ios.md section 8).
+    if (direct) {
+      Object.defineProperty(window, 'avibeNative', {
+        configurable: true,
+        value: {
+          contract: 1,
+          platform: 'ios',
+          shellVersion: '1.0 (1)',
+          capabilities: { direct: 3 },
+          call: vi.fn(() => new Promise(() => {})),
+          on: vi.fn(() => () => undefined),
+        },
+      });
+    }
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    const settle = () => act(async () => {
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(mocks.events).not.toBeNull());
+      await settle();
+      mocks.api.getTurnState.mockClear();
+      if (hidden) Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      act(() => mocks.events?.onConnectionState?.('reconnecting'));
+      await settle();
+      expect(mocks.api.getTurnState).toHaveBeenCalledTimes(reads ? 1 : 0);
+    } finally {
+      Reflect.deleteProperty(window, 'avibeNative');
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
   it('waits for a new count or a read elsewhere before marking a chat read again after the write is refused', async () => {
     // The Inbox clears the count at once and puts it back when the write is
     // refused; the open chat must not read that as a new unread and re-send.
