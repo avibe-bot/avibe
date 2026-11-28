@@ -24,9 +24,14 @@ test.describe('retired Settings links on a phone', () => {
     await page.getByRole('link', { name: 'All settings' }).click();
     await expect(page).toHaveURL(/\/settings$/);
 
-    // Account did not move: it is still part of the Replies page.
+    // Account did not move: it is still part of the Messages page.
     await open(page, '/settings/account');
-    await expect(page).toHaveURL(/\/settings\/replies$/);
+    await expect(page).toHaveURL(/\/settings\/messages$/);
+    await expect(settingsSurface(page)).toHaveCount(0);
+
+    // Replies was renamed to Messages; stale bookmarks redirect to /settings/messages.
+    await open(page, '/settings/replies');
+    await expect(page).toHaveURL(/\/settings\/messages$/);
     await expect(settingsSurface(page)).toHaveCount(0);
 
     expect(denied).toEqual([]);

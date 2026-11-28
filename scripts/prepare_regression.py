@@ -201,7 +201,6 @@ def _build_config_payload() -> dict:
                 "cli_path": CONTAINER_OPENCODE_CLI,
                 "default_agent": _optional("REGRESSION_OPENCODE_AGENT"),
                 "default_reasoning_effort": _optional("REGRESSION_OPENCODE_REASONING_EFFORT"),
-                "error_retry_limit": 1,
                 "default_provider": _optional("REGRESSION_OPENCODE_DEFAULT_PROVIDER") or "openai",
             },
             "claude": {

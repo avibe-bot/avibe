@@ -114,8 +114,8 @@ describe('AppShell route policy', () => {
 
     // Theme controls moved to General; the rest of Appearance did not survive.
     expect(redirects['/settings/appearance']).toBe('/settings/general');
-    // Account remains part of the Replies page, so its alias is unchanged.
-    expect(redirects['/settings/account']).toBe('/settings/replies');
+    // Account remains part of the Messages page, so its alias follows it.
+    expect(redirects['/settings/account']).toBe('/settings/messages');
   });
 
   it('recognizes exact and dynamic routes without reserving their namespaces', () => {

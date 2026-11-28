@@ -7,7 +7,9 @@
 // the whole sidebar, and neither 28 px button has a fill until the pointer is on
 // it (Max, 2026-11-22 12:51, 13:00). The instance's reads from the left: the
 // status dot, 10 px from the button's left, top and bottom edges (13:15), then the
-// name. Each frame is the complete window.
+// name. One click on it opens the Instances page (owner, 2026-11-28; the page:
+// ui/design: desktop/instances/instances-*, current-shared-*): no menu in between,
+// so no chevron either. Each frame is the complete window.
 import type { ReactNode } from 'react';
 import { Route, Routes } from 'react-router-dom';
 
@@ -131,6 +133,11 @@ const shots: { name: string; title: string; render: () => ReactNode; hover?: str
   {
     name: 'desktop-remote', title: '侧边栏底部 · 桌面应用连接另一台电脑（版本号是那个实例的）',
     render: shell(<DesktopAccountRowView {...rowProps(true)} localUpdater={null} />),
+  },
+  {
+    name: 'desktop-remote-hover', title: '侧边栏底部 · 桌面应用连接另一台电脑 · 指针悬停在实例按钮上（点一下直接进「实例」页）',
+    render: shell(<DesktopAccountRowView {...rowProps(true)} localUpdater={null} />),
+    hover: '[data-account-trigger]',
   },
   {
     name: 'desktop-long-name', title: '侧边栏底部 · 桌面应用 · 实例名过长时截断',

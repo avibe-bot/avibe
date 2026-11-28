@@ -463,8 +463,6 @@ reads no live `agents.opencode` field:
 | Read | Disposition |
 | --- | --- |
 | `default_provider` and `default_reasoning_effort` (model resolution in `_run_turn`) | taken from the admission settings |
-| `active_turn_timeout_seconds` and `error_retry_limit` (`run_prompt_poll`) | taken from the admission settings |
-| the same two in `run_restored_poll_loop` | read once when the restore starts; a restored poll has no earlier admission |
 | `request_timeout_seconds` (a generation's HTTP client) | read when the generation starts; always 60 from `to_app_config`, not a user setting |
 | `controller.config.language` | not an `agents.opencode` field |
 | channel and scope overrides | out of scope: a recorded follow-up, as for Codex |

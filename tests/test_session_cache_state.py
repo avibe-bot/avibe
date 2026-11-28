@@ -136,6 +136,26 @@ async def test_historical_fork_never_uses_parent_future_prefix_and_child_restore
     assert (await _restore(backend, "child")).begin(candidate, (), now=170)["expected_read"] == 100
 
 
+async def test_first_compact_receipt_only_audit_preserves_legacy_route_state(backend, monkeypatch):
+    from unittest.mock import AsyncMock
+    from tests.agent_core.agent.test_compaction import Model, make_agent
+
+    candidate, _, old = _record(now=100)
+    await backend.store.append_audit(SESSION, 'attempt', {'version': 1, 'cache_state': [old]})
+    agent = make_agent(Model(), store=backend.store)
+    agent.session_id = SESSION
+    agent._cache_tracker = await _restore(backend)
+    monkeypatch.setattr('storage.session_cache.permits_compact_writes', lambda _: True)
+    receipt = {'body_bytes': 120, 'source_id': None, 'source_kind': 'unknown'}
+    agent._unsettled_wire_facts[1] = {'version': 1, 'successful_wires': [receipt]}
+    await agent._finish(False, AsyncMock(), run_hooks=False)
+    recovered = (await _restore(backend)).begin(candidate, (), now=130)
+    assert (recovered['expected_read'], recovered['idle_s']) == (100, 30)
+    with backend.engine.connect() as conn:
+        counts = conn.execute(text("select json_array_length(content_json, '$.cache.successful_wires') from agent_events where event_type='model_attempt'"))
+        assert sum(n or 0 for n, in counts) == 1
+
+
 async def test_state_reader_merges_legacy_audits_and_ignores_damaged_or_misattributed_state(backend):
     candidate, message, old = _record()
     await backend.store.append_audit(SESSION, "attempt", {"version": 1, "cache": old, "cache_state": [old]})

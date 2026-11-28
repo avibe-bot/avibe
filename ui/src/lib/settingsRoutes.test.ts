@@ -9,6 +9,14 @@ describe('legacy Settings redirects', () => {
       { from, to: '/settings/general' },
     ]);
   });
+  it.each(['/admin/settings/messaging', '/settings/messaging', '/settings/replies'])(
+    'redirects retired bookmark %s to Messages',
+    (from) => {
+      expect(LEGACY_SETTINGS_REDIRECTS.filter((route) => route.from === from)).toEqual([
+        { from, to: '/settings/messages' },
+      ]);
+    },
+  );
   it('translates every retired admin route exactly once', () => {
     const adminRoutes = APPLICATION_ROUTE_PATHS.filter((path) => path.startsWith('/admin'));
     const redirectedAdminRoutes = LEGACY_SETTINGS_REDIRECTS

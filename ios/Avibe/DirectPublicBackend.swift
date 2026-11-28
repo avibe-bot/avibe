@@ -61,6 +61,52 @@ enum DirectPublicAddressPolicy {
         }
     }
 
+    /// 198.18.0.0/15, the benchmarking range fake-IP VPNs answer with,
+    /// native, IPv4-mapped or in the NAT64 well-known prefix.
+    static func isFakeIPAddress(_ address: DirectResolvedAddress) -> Bool {
+        guard let v4 = carriedIPv4(address) else { return false }
+        return v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+    }
+
+    /// Private, loopback, unspecified, link-local, shared (CGNAT), or for
+    /// IPv6 unique-local, link-local, loopback or unspecified.
+    static func isPrivateAddress(_ address: DirectResolvedAddress) -> Bool {
+        if let v4 = carriedIPv4(address) {
+            switch v4[0] {
+            case 0, 10, 127: return true
+            case 100: return (64...127).contains(v4[1])
+            case 169: return v4[1] == 254
+            case 172: return (16...31).contains(v4[1])
+            case 192: return v4[1] == 168
+            default: return false
+            }
+        }
+        let bytes = address.bytes
+        guard bytes.count == 16 else { return false }
+        if bytes[0] & 0xFE == 0xFC { return true }                 // fc00::/7
+        if bytes[0] == 0xFE, bytes[1] & 0xC0 == 0x80 { return true } // fe80::/10
+        return bytes[0..<15].allSatisfy { $0 == 0 } && (bytes[15] == 0 || bytes[15] == 1)
+    }
+
+    /// The IPv4 address `address` is, or carries (IPv4-mapped, or the
+    /// NAT64 well-known prefix).
+    private static func carriedIPv4(_ address: DirectResolvedAddress) -> [UInt8]? {
+        let bytes = address.bytes
+        switch address.family {
+        case .ipv4:
+            return bytes.count == 4 ? bytes : nil
+        case .ipv6:
+            guard bytes.count == 16 else { return nil }
+            let prefix = Array(bytes[0..<12])
+            if prefix == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF]
+                || prefix == [0x00, 0x64, 0xFF, 0x9B, 0, 0, 0, 0, 0, 0, 0, 0]
+            {
+                return Array(bytes[12..<16])
+            }
+            return nil
+        }
+    }
+
     static func allowsIPv4(_ bytes: [UInt8]) -> Bool {
         guard bytes.count == 4 else {
             return false
@@ -132,6 +178,183 @@ enum DirectPublicAddressPolicy {
     }
 }
 
+/// Every resolved address was refused (`DirectPublicAddressPolicy`), and
+/// of what kind they were. Thrown out as `noPublicAddress`.
+struct DirectPublicRefusal: Error {
+    let cause: DirectPublicFaults.Cause
+}
+
+/// Why the listener's public leg failed, counted by cause until an answered
+/// rendezvous request has carried the counts (`public_faults`,
+/// `DirectRendezvous.requestBody`). Fixed words and counts only: no
+/// address, host or time.
+final class DirectPublicFaults: @unchecked Sendable {
+    static let shared = DirectPublicFaults()
+    /// The most rows a request carries (the instance's bound).
+    static let limit = 5
+
+    enum Cause: String, CaseIterable, Sendable {
+        /// Only 198.18.0.0/15: a fake-IP VPN's addresses.
+        case addressBenchmark = "address_benchmark"
+        /// Only private, loopback, link-local, shared (CGNAT) or unique-local.
+        case addressPrivate = "address_private"
+        /// Only documentation, multicast or reserved addresses.
+        case addressOther = "address_other"
+        /// The host did not resolve.
+        case dnsFailed = "dns_failed"
+        case connectTimeout = "connect_timeout"
+        case connectRefused = "connect_refused"
+        case connectOther = "connect_other"
+    }
+
+    struct Row: Equatable, Sendable {
+        let cause: Cause
+        let count: Int
+        /// The cause's running total this row was taken at: answering it
+        /// marks everything up to there carried, however many requests
+        /// carried the same counts.
+        let through: Int
+
+        var json: String {
+            "{\"cause\":\"\(cause.rawValue)\",\"count\":\(count)}"
+        }
+    }
+
+    private let lock = NSLock()
+    /// Every failure counted in this process, by cause, and how many of
+    /// them an answered request has carried. Totals only grow, so two
+    /// requests that carried the same counts mark them once.
+    private var totals: [Cause: Int] = [:]
+    private var carried: [Cause: Int] = [:]
+
+    func record(_ cause: Cause) {
+        lock.withLock {
+            totals[cause] = (totals[cause] ?? 0) &+ 1
+        }
+    }
+
+    /// The counts not yet carried, the largest first, at most `limit` rows.
+    var pending: [Row] {
+        lock.withLock {
+            Cause.allCases
+                .compactMap { cause -> Row? in
+                    let total = totals[cause] ?? 0
+                    let left = total - (carried[cause] ?? 0)
+                    guard left > 0 else { return nil }
+                    return Row(cause: cause, count: min(left, Int(Int32.max)), through: total)
+                }
+                .enumerated()
+                .sorted { $0.element.count != $1.element.count ? $0.element.count > $1.element.count : $0.offset < $1.offset }
+                .prefix(Self.limit)
+                .map(\.element)
+        }
+    }
+
+    /// A request that carried `sent` was answered: those counts are done;
+    /// any counted since stay, and a second answer for the same counts
+    /// changes nothing.
+    func answered(_ sent: [Row]) {
+        lock.withLock {
+            for row in sent {
+                carried[row.cause] = max(carried[row.cause] ?? 0, row.through)
+            }
+        }
+    }
+
+    /// The cause of a failed resolution or dial.
+    static func cause(of error: Error) -> Cause {
+        if let error = error as? DirectPublicError, error == .resolutionFailed {
+            return .dnsFailed
+        }
+        if let error = error as? DirectConnectError, error == .timedOut {
+            return .connectTimeout
+        }
+        if case .posix(let code)? = error as? NWError {
+            switch code {
+            case .ETIMEDOUT:
+                return .connectTimeout
+            case .ECONNREFUSED:
+                return .connectRefused
+            default:
+                return .connectOther
+            }
+        }
+        return .connectOther
+    }
+
+    /// What every one of `addresses` was, when the policy refused them all.
+    static func cause(ofRefused addresses: [DirectResolvedAddress]) -> Cause {
+        if addresses.isEmpty {
+            return .dnsFailed
+        }
+        if addresses.allSatisfy(DirectPublicAddressPolicy.isFakeIPAddress) {
+            return .addressBenchmark
+        }
+        if addresses.contains(where: DirectPublicAddressPolicy.isPrivateAddress) {
+            return .addressPrivate
+        }
+        return .addressOther
+    }
+}
+
+/// How often the App took a host off its route because the listener could
+/// not carry it, by reason, until an answered rendezvous request has carried
+/// the counts (`route_fallbacks`). One count per activation (at most one per
+/// host per process); the loads that follow are not counted.
+final class DirectRouteFallbacks: @unchecked Sendable {
+    static let shared = DirectRouteFallbacks()
+    static let limit = 5
+
+    enum Reason: String, CaseIterable, Sendable {
+        /// The first load failed while the listener carried nothing.
+        case openFailed = "open_failed"
+        /// The same, with the open running out of time.
+        case openTimedOut = "open_timed_out"
+        /// The second 重试 on the failure screen.
+        case retry
+    }
+
+    struct Row: Equatable, Sendable {
+        let reason: Reason
+        let count: Int
+        /// The running total this row was taken at (as `DirectPublicFaults`).
+        let through: Int
+
+        var json: String {
+            "{\"reason\":\"\(reason.rawValue)\",\"count\":\(count)}"
+        }
+    }
+
+    private let lock = NSLock()
+    private var totals: [Reason: Int] = [:]
+    private var carried: [Reason: Int] = [:]
+
+    func record(_ reason: Reason) {
+        lock.withLock {
+            totals[reason] = (totals[reason] ?? 0) &+ 1
+        }
+    }
+
+    var pending: [Row] {
+        lock.withLock {
+            Reason.allCases.compactMap { reason in
+                let total = totals[reason] ?? 0
+                let left = total - (carried[reason] ?? 0)
+                guard left > 0 else { return nil }
+                return Row(reason: reason, count: min(left, Int(Int32.max)), through: total)
+            }
+        }
+    }
+
+    func answered(_ sent: [Row]) {
+        lock.withLock {
+            for row in sent {
+                carried[row.reason] = max(carried[row.reason] ?? 0, row.through)
+            }
+        }
+    }
+}
+
 enum DirectPublicError: Error, Equatable {
     case resolutionFailed
     case noPublicAddress
@@ -162,6 +385,8 @@ struct DirectPublicBackend: Sendable {
     let connectSeconds: TimeInterval
     /// One address's dial, when another address follows it.
     let attemptSeconds: TimeInterval
+    /// Where each failure's cause is counted (`public_faults`).
+    let faults: DirectPublicFaults
 
     static let standardConnectSeconds: TimeInterval = 10
     /// The bound on each address but the last. Proposed, not measured.
@@ -171,12 +396,14 @@ struct DirectPublicBackend: Sendable {
         resolver: any DirectHostResolving = SystemHostResolver(),
         dialer: any DirectPublicDialing = NetworkPublicDialer(),
         connectSeconds: TimeInterval = DirectPublicBackend.standardConnectSeconds,
-        attemptSeconds: TimeInterval = DirectPublicBackend.standardAttemptSeconds
+        attemptSeconds: TimeInterval = DirectPublicBackend.standardAttemptSeconds,
+        faults: DirectPublicFaults = .shared
     ) {
         self.resolver = resolver
         self.dialer = dialer
         self.connectSeconds = connectSeconds
         self.attemptSeconds = attemptSeconds
+        self.faults = faults
     }
 
     /// Resolves `authority`'s host, keeps only addresses the policy allows,
@@ -185,7 +412,24 @@ struct DirectPublicBackend: Sendable {
     /// cancelled or the bound has passed. The resolver's own work may
     /// outlive the bound (a system lookup cannot be cancelled); its late
     /// answer is not used.
+    ///
+    /// A failure that is not a cancellation (a race the other leg won, or a
+    /// CONNECT that ended) is counted by its cause (`DirectPublicFaults`).
     func open(_ authority: DirectAuthority) async throws -> any DirectByteStream {
+        do {
+            return try await openUncounted(authority)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let refused as DirectPublicRefusal {
+            faults.record(refused.cause)
+            throw DirectPublicError.noPublicAddress
+        } catch {
+            faults.record(DirectPublicFaults.cause(of: error))
+            throw error
+        }
+    }
+
+    private func openUncounted(_ authority: DirectAuthority) async throws -> any DirectByteStream {
         let resolver = resolver
         let dialer = dialer
         let attemptSeconds = attemptSeconds
@@ -194,7 +438,7 @@ struct DirectPublicBackend: Sendable {
             try Task.checkCancellation()
             let allowed = addresses.filter(DirectPublicAddressPolicy.allows)
             guard !allowed.isEmpty else {
-                throw DirectPublicError.noPublicAddress
+                throw DirectPublicRefusal(cause: DirectPublicFaults.cause(ofRefused: addresses))
             }
             var lastError: Error = DirectPublicError.noPublicAddress
             for (index, address) in allowed.enumerated() {

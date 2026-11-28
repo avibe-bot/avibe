@@ -269,7 +269,7 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
 
         agent = SimpleNamespace(
             controller=_Controller(),
-            opencode_config=SimpleNamespace(active_turn_timeout_seconds=60),
+            opencode_config=SimpleNamespace(),
             sessions=SimpleNamespace(remove_active_poll=Mock()),
             _user_stopped_sessions={"session-1"},
         )
@@ -376,7 +376,7 @@ def _process_message_agent(server, poll_loop=None):
     )
     agent.config = agent.controller.config
     agent.sessions = sessions
-    agent.opencode_config = SimpleNamespace(error_retry_limit=0)
+    agent.opencode_config = SimpleNamespace()
     agent._session_manager = _StubSessionManager(None, "opencode")
     agent._poll_loop = poll_loop or _BlockingPollLoop()
     agent._steering_states = {}

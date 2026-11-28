@@ -431,6 +431,9 @@ class Agent:
         self._typed_failure: Optional[Exception] = None
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
+        # Only until the normal transcript/audit owner records this attempt. A Stop may close
+        # an unfinished continuation or fork after an earlier physical POST already completed.
+        self._unsettled_wire_facts: dict[int, dict[str, Any]] = {}
         self._refusals = _Refusals()
         # The images the run's committed tool results generated, which its final delivers: a reply even without text
         # (``has_reply``). Read from the committed rows, so a result another writer settled counts as it committed.
@@ -791,6 +794,7 @@ class Agent:
         )
         if attempt is not None:
             attempt.committed = True
+            self._unsettled_wire_facts.pop(id(attempt.cache), None)
         self._rows.append(row)
         return row
 
@@ -937,6 +941,15 @@ class Agent:
         async with self._lock:
             self._open = False
         await self._scope.close()
+        # No new run operation after Stop: the joined cleanup owns any completed POST that
+        # never acquired a transcript row. Never keep the incomplete POST or copy usage here.
+        dangling, self._unsettled_wire_facts = self._unsettled_wire_facts, {}
+        for facts in dangling.values():
+            if facts['successful_wires']:
+                await self._cleanup(lambda facts=facts: self.store.append_audit(
+                    self.session_id, 'attempt', {'version': 1, 'error': None, 'cache': {**facts, 'receipt_only': True},
+                                                 'cache_state': list(self._cache_tracker.latest.values())},
+                ))
         await self._flush_diagnostics(emit)
         try:
             if loaded:
@@ -1089,7 +1102,11 @@ class Agent:
                         self._cache_tracker.begin, request, self._rows, now=self.context.clock(),
                         causes=self.cache_causes, fork=self._cache_fork,
                     ))
-                    cache.update(prompt_pending=self.prompt_pending, prompt_notice=self.prompt_notice)
+                    cache.update(prompt_pending=self.prompt_pending, prompt_notice=self.prompt_notice, successful_wires=[])
+                    request = replace(request, successful_wires=cache['successful_wires'])
+                    self._unsettled_wire_facts[id(cache)] = {
+                        key: cache[key] for key in ('version', 'started_at', 'provider', 'model', 'protocol', 'successful_wires')
+                    }
                 if request.endpoint.protocol == "anthropic":
                     observation = ThreadObservation(
                         self.session_id if purpose == "conversation" else None,
@@ -1112,11 +1129,13 @@ class Agent:
                             if cache is not None:
                                 facts = {k: v for k, v in cache.items() if k not in ("prefix", "thread_attempts")}
                                 facts.update(
+                                    successful_wires=[],
                                     thread_attempts=[wire_attempt],
                                     writes_by_ttl=wire_attempt.get("writes_by_ttl", {}),
                                     cache_write_basis=wire_attempt.get("cache_write_basis", "unknown"),
                                 )
                                 payload["cache"] = facts
+                                payload["cache_state"] = list(self._cache_tracker.latest.values())
                             await self._audit("attempt", payload)
 
                         observation.settle_discard = settle_discard
@@ -1288,6 +1307,7 @@ class Agent:
                 "error": f"{cause.kind}: {cause.message}" if cause is not None else str(error) if error else None,
             }
             await self._audit("attempt", payload)
+            self._unsettled_wire_facts.pop(id(attempt.cache), None)
 
     async def _commit_model_message(
         self,
@@ -2624,6 +2644,8 @@ class Agent:
         finally:
             if not aborted:
                 await self._audit("fork_turn", self._side_record(turn, point, rounds, produced, start, finished))
+                for attempt in self._attempts[start:]:
+                    self._unsettled_wire_facts.pop(id(attempt.cache), None)
 
     def _side_request(
         self,

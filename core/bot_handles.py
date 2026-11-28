@@ -67,9 +67,10 @@ async def propose_handle_with_model(
     if not model:
         return None
     scope = f"vibey:bot-handle:{uuid.uuid4().hex[:12]}"
+    receipts: list[dict[str, Any]] = []
     try:
         return await asyncio.wait_for(
-            _propose(runtime, model, scope, display_name=display_name, role=role), timeout=budget_seconds
+            _propose(runtime, model, scope, display_name=display_name, role=role, receipts=receipts), timeout=budget_seconds
         )
     except asyncio.TimeoutError:
         logger.info("The Bot handle model did not answer within %.0f seconds", budget_seconds)
@@ -84,9 +85,30 @@ async def propose_handle_with_model(
                 retire("vibey", scope)
             except Exception:
                 logger.debug("Could not retire the Bot handle model scope", exc_info=True)
+        if receipts:
+            # No Session owns this POST. Submit only scalars, independently of proposal acceptance or timeout.
+            # A busy store finishes on its worker; never hold the caller waiting for a DB lock.
+            write = asyncio.get_running_loop().run_in_executor(None, _record_uploads, store, receipts)
+            await asyncio.wait({write}, timeout=0.05)
 
 
-async def _propose(runtime: Any, model: str, scope: str, *, display_name: str, role: str) -> Optional[str]:
+def _record_uploads(store: Any, receipts: list[dict[str, Any]]) -> None:
+    from storage import agent_events_service
+
+    try:
+        with store.engine.begin() as conn:
+            agent_events_service.append(
+                conn, scope_id=None, session_id=None, platform="avibe", backend="vibey",
+                event_type="bot_handle_request", visibility="audit",
+                content={"cache": {"version": 1, "successful_wires": receipts}},
+            )
+    except Exception:
+        logger.warning("Could not record Bot handle request measurement")
+
+
+async def _propose(
+    runtime: Any, model: str, scope: str, *, display_name: str, role: str, receipts: list[dict[str, Any]],
+) -> Optional[str]:
     from core.agent_core.ai.provider import ModelRequest, ProviderError, TextDelta
     from core.agent_core.cancel import CancelToken
     from core.agent_core.harness.context import output_tokens
@@ -106,6 +128,7 @@ async def _propose(runtime: Any, model: str, scope: str, *, display_name: str, r
         max_tokens=output_tokens(capabilities, _MAX_OUTPUT_TOKENS),
         reasoning_effort=effort,
         cache="none",
+        successful_wires=receipts,
     )
     adapter = registry_providers(media_loader=None)(selection.endpoint.protocol)
     text: list[str] = []

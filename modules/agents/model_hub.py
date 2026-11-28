@@ -54,6 +54,7 @@ from core.handlers.model_hub.resolver import (
     source_after_cooldown_recovery,
     source_eligible_for_backend,
 )
+from core.handlers.model_hub.source_filter import SourceFilterHooks
 from core.handlers.model_hub.service import (
     PRE_ATTEMPT_SETTLEMENT_GENERATION,
     ModelHubError,
@@ -1251,6 +1252,16 @@ class ModelHubRuntimeRouter:
                 process_scope,
                 terminal_turn_id=terminal_turn_id,
             )
+
+    def local_source_filter_hooks(self, turn_id: Optional[str]) -> SourceFilterHooks | None:
+        """The shared executor only when this Vibey Turn froze the experiment on.
+
+        Pure lookup: detached previews neither activate a gateway nor issue credentials.
+        """
+        if self.turn_gateway is None:
+            return None
+        frozen = self.turn_gateway.correlation.turn_hosted_tools(turn_id)
+        return self.service.source_filter_hooks if frozen is not None and frozen.source_filter else None
 
     def has_proxied_hosted_candidate(self, turn_id: Optional[str], tool: str) -> bool:
         """Whether this Turn froze at least one enabled proxy executor for ``tool``.

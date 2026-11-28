@@ -714,6 +714,36 @@ class _Hanging(httpx.AsyncByteStream):
         await asyncio.Event().wait()
 
 
+async def test_completed_post_survives_task_cancel_during_artifact_cleanup(store, monkeypatch):
+    held = _Held()
+    deleting = threading.Event()
+    sent = []
+    succeed = RequestArtifactStore.succeed
+
+    def gated(self, artifact_id):
+        deleting.set()
+        held.gate.wait(10)
+        return succeed(self, artifact_id)
+
+    monkeypatch.setattr(RequestArtifactStore, 'succeed', gated)
+
+    def answer(wire):
+        sent.append(wire)
+        return httpx.Response(200, text=_response(_text('done'), stop_reason='end_turn', input_tokens=1, output_tokens=1))
+
+    async def stop(reading):
+        reading.cancel()
+
+    request = replace(_direct_request('anthropic'), successful_wires=[])
+    try:
+        events, _ = await _drive_in_run_scope(request, answer, store, cancel=CancelToken(), stop=stop, ready=deleting.is_set)
+    finally:
+        await held.release()
+    assert not any(isinstance(event, Done) for event in events)  # Stop still wins public delivery.
+    assert [r['body_bytes'] for r in request.successful_wires] == [len(sent[0].content)]
+    assert not _kept(store)
+
+
 @pytest.mark.parametrize("stop_kind", ["cancel_token", "task_cancel"])
 @pytest.mark.parametrize("phase", ["pending_write", "streaming", "final_write"])
 async def test_a_stop_ends_at_once_while_the_artifact_worker_is_held(store, monkeypatch, stop_kind, phase):

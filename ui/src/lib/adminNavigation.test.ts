@@ -3,7 +3,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
-  isLocalOnlyMessagingField,
   isOwnerOnlyPath,
   SETTINGS_LANDING_PATH,
 } from './adminNavigation';
@@ -27,7 +26,8 @@ describe('isOwnerOnlyPath', () => {
     expect(ownerOnly.every(isOwnerOnlyPath)).toBe(true);
   });
 
-  it('keeps personal preferences, replies, and access readable', () => {
+  it('keeps personal preferences, messages, and access readable', () => {
+    expect(isOwnerOnlyPath('/settings/messages')).toBe(false);
     expect(isOwnerOnlyPath('/settings/replies')).toBe(false);
     expect(isOwnerOnlyPath('/settings/access')).toBe(false);
     // 「设备」 is every signed-in person's page: a member sees their own devices there.
@@ -45,14 +45,5 @@ describe('settings landing', () => {
   it('opens General, which every role can read', () => {
     expect(SETTINGS_LANDING_PATH).toBe('/settings/general');
     expect(isOwnerOnlyPath(SETTINGS_LANDING_PATH)).toBe(false);
-  });
-
-});
-
-describe('isLocalOnlyMessagingField', () => {
-  it('keeps machine-global controls owner-only without gating Replies', () => {
-    expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
-    expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
-    expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
   });
 });

@@ -1973,7 +1973,7 @@ final class AppModel: ObservableObject {
         }
         if revertTunnelOnlyIfUnreachable(attemptID: attemptID)
             || revertDirectOnlyIfListenerDown(attemptID: attemptID)
-            || fallBackFromListener(attemptID: attemptID)
+            || fallBackFromListener(attemptID: attemptID, reason: .openTimedOut)
         {
             // Opened again, automatic: this attempt is replaced.
             openRuntime(attempt.runtime)
@@ -2158,6 +2158,7 @@ final class AppModel: ObservableObject {
         if presses >= 2,
            directPathController?.bypassListener(forInstanceURL: attempt.runtime.instance.url, force: true) == true
         {
+            DirectRouteFallbacks.shared.record(.retry)
             changed = true
         }
         if changed {
@@ -2543,7 +2544,7 @@ final class AppModel: ObservableObject {
                 )
                 if revertible,
                    revertTunnelOnlyIfUnreachable(attemptID: attemptID)
-                    || fallBackFromListener(attemptID: attemptID)
+                    || fallBackFromListener(attemptID: attemptID, reason: .openFailed)
                 {
                     // Opened again, automatic, once this callback has
                     // returned; the failed attempt waits for nothing else.
@@ -2717,7 +2718,9 @@ final class AppModel: ObservableObject {
     ///   WebKit's path for this host from now on.
     /// The caller opens again. Each can happen once per host per launch: a
     /// reverted host is automatic, and a bypassed one has no route.
-    private func fallBackFromListener(attemptID: Int) -> Bool {
+    /// `reason` is what a fallback that takes the host off the route is
+    /// counted as (`route_fallbacks`).
+    private func fallBackFromListener(attemptID: Int, reason: DirectRouteFallbacks.Reason) -> Bool {
         guard
             let directPathController,
             runtimeIdentity == attemptID,
@@ -2738,7 +2741,11 @@ final class AppModel: ObservableObject {
         guard directPathController.listenerCannotCarry(forInstanceURL: runtime.instance.url) else {
             return false
         }
-        return directPathController.bypassListener(forInstanceURL: runtime.instance.url)
+        guard directPathController.bypassListener(forInstanceURL: runtime.instance.url) else {
+            return false
+        }
+        DirectRouteFallbacks.shared.record(reason)
+        return true
     }
 
     /// Whether `runtime`'s document is being loaded: the view's own

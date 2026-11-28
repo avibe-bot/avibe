@@ -56,6 +56,16 @@ backends are installed only after the user requests one.
 - Failed staging directories and unpublished releases are removed. Previously
   published releases and configuration remain unchanged.
 
+**Antigravity exception:** Because Google does not publish `agy` on npm and
+users reported that the official installer works where unauthenticated GitHub
+releases do not, an unpinned desktop Antigravity install tries Google's
+official install script first inside the staging directory with an isolated
+`HOME` (`USERPROFILE`/`LOCALAPPDATA` on Windows) so user profiles are never
+touched, then falls back to GitHub releases if the script fails or its shell
+tools are missing. Both paths share the same timeout budget, native executable
+verification, and atomic publication flow; pinned versions go straight to
+GitHub releases.
+
 ## Runtime Bundle Contract
 
 Runtime manifest schema 2 contains Python, Node.js, npm, and Avibe metadata.

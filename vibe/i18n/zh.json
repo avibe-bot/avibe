@@ -577,7 +577,6 @@
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
     "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
     "opencodeBackendError": "OpenCode 错误：{error}",
-    "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。",
     "opencodePollTransportFailure": "OpenCode 连续 {count} 次轮询失败，运行时不可达；原生 Turn 已中止并记为失败。"
   },
   "success": {
@@ -1183,10 +1182,11 @@
       "upstream_error": "供应商返回错误。"
     },
     "sourceFilter": {
-      "blocked": "已被信源过滤拦截：{reason}",
-      "blockedNoReason": "已被信源过滤拦截。",
-      "failed": "信源过滤脚本 {hook} 运行失败，这次调用已拦下：{reason}。",
-      "refused": "信源过滤改写后的参数未通过检查（{code}）。"
+      "blocked": "已被信息茧房拦截：{reason}",
+      "blockedNoReason": "已被信息茧房拦截。",
+      "failed": "信息茧房脚本 {hook} 运行失败，这次调用已拦下：{reason}。",
+      "refused": "信息茧房改写后的参数未通过检查（{code}）。",
+      "interrupted": "信息茧房的结果处理被中断，原始输出未放行，命令也没有重新执行。"
     },
     "hostedTools": {
       "noExecutor": {
@@ -1813,8 +1813,8 @@
       "fetch_refused": "网页请求被拒绝",
       "fetch_unavailable": "网页不可用",
       "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了",
-      "source_filter_blocked": "信源过滤拦下了这次调用",
-      "source_filter_failed": "信源过滤脚本运行失败，这次调用已拦下"
+      "source_filter_blocked": "信息茧房拦下了这次调用",
+      "source_filter_failed": "信息茧房脚本运行失败，这次调用已拦下"
     },
     "tool": {
       "web_search": "网页搜索",

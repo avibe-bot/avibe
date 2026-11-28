@@ -2491,7 +2491,7 @@ async def test_opencode_status_reconciliation_failures_are_bounded() -> None:
 
         assert server.list_calls == 3
         assert state.closing is True
-        assert repeated[-1]["info"]["id"] != first_failure_id
+        assert repeated[-1]["info"]["id"] == first_failure_id
         assert repeated[-1]["info"]["error"] == {
             "name": "StatusReconciliationError",
             "data": {"message": "status unavailable"},
@@ -2523,7 +2523,7 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
     )
     agent = _opencode_agent(primary, gate_task, server)
     agent.controller = SimpleNamespace(config=SimpleNamespace(language="zh"))
-    agent.opencode_config = SimpleNamespace(error_retry_limit=1)
+    agent.opencode_config = SimpleNamespace()
     agent.record_model_hub_native_failure = AsyncMock()
     emit_failure = AsyncMock()
     monkeypatch.setattr("modules.agents.opencode.poll_loop.emit_backend_failure", emit_failure)
@@ -2543,7 +2543,6 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
                 primary,
                 poll_server,
                 "opencode-session",
-                agent_to_use="build",
                 model_dict={"providerID": "openai", "modelID": "gpt-5"},
                 reasoning_effort="high",
                 baseline_message_ids=set(),
@@ -2554,7 +2553,9 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
         assert result == (None, False)
         assert server.prompt_calls == []
         emit_failure.assert_awaited_once()
-        assert emit_failure.await_args.kwargs["failure_id"].endswith(":1")
+        assert emit_failure.await_args.kwargs["failure_id"] == (
+            "avibe-status-reconciliation:opencode-session"
+        )
         assert emit_failure.await_args.kwargs["display_text"] == (
             "OpenCode 错误：StatusReconciliationError - status unavailable"
         )

@@ -5,14 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
-from config.v2_config import (
-    DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
-    DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
-)
 from core.backend_failure import emit_backend_failure
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE
 from core.message_context import build_context_session_key
@@ -32,16 +27,12 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 2.0
 _TIMEOUT_ABORT_GRACE_SECONDS = 10.0
-# The optional wall-clock deadline must not be the only bound on a dead runtime:
-# with the cap disabled, a persistent transport outage (daemon down, non-200
-# responses) would otherwise retry forever and leave the accepted turn
-# unsettled with no message able to carry an error. Consecutive failures —
-# never total duration — drive this settlement, so an intermittent blip that
-# recovers between polls resets the count and never trips it.
+# A persistent transport outage (daemon down, non-200 responses) would otherwise
+# retry forever and leave the accepted turn unsettled with no message able to
+# carry an error. Consecutive failures — never total duration — drive this
+# settlement, so an intermittent blip that recovers between polls resets the
+# count and never trips it.
 _POLL_FAILURE_SETTLE_LIMIT = 10
-# OpenCode can report idle after accepting ``continue`` / a steer, before the
-# replacement assistant is visible. Keep that inject pending for this window.
-_POST_INJECT_CONFIRMATION_SECONDS = 5.0
 
 
 def _opencode_error_text(error: object) -> str:
@@ -281,57 +272,12 @@ class OpenCodePollLoop:
         if callable(record_failure):
             await record_failure(context, diagnostic)
 
-    def _active_turn_timeout_seconds(self, settings: Any = None) -> float:
-        """The configured wall-clock bound, or ``0.0`` when it is disabled.
-
-        Non-positive, missing, or non-finite values all read as disabled. The
-        upstream runtime bounds its own retries and surfaces the exhausted
-        error on the message, which the poll loop's error path settles, so the
-        wall-clock cap is an explicit opt-in — an unset or invalid value must
-        not silently re-enable one.
-        """
-
-        raw_timeout = getattr(
-            settings if settings is not None else self._agent.opencode_config,
-            "active_turn_timeout_seconds",
-            DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
-        )
-        try:
-            timeout = float(raw_timeout)
-        except (TypeError, ValueError):
-            return 0.0
-        if not math.isfinite(timeout) or timeout <= 0:
-            return 0.0
-        return timeout
-
-    @staticmethod
-    def _deadline_from_persisted_start(timeout_seconds: float, started_at: object) -> float:
-        if timeout_seconds <= 0:
-            return math.inf
-        try:
-            wall_started_at = float(started_at)
-        except (TypeError, ValueError):
-            wall_started_at = 0.0
-        elapsed = max(0.0, time.time() - wall_started_at) if wall_started_at > 0 else 0.0
-        return time.monotonic() + max(0.0, timeout_seconds - elapsed)
-
-    @staticmethod
-    def _wait_timeout(remaining: float) -> Union[float, None]:
-        """Map an infinite remaining budget to ``wait_for``'s no-timeout form."""
-
-        return None if math.isinf(remaining) else remaining
-
     async def _native_session_is_live(
         self,
         server: OpenCodeGeneration,
         session_id: str,
         directory: str,
-        *,
-        remaining: float,
-        pending_inject_until: float = 0.0,
     ) -> bool:
-        if pending_inject_until and time.monotonic() < pending_inject_until:
-            return True
         snapshot_live = getattr(server, "last_list_native_live", None)
         if isinstance(snapshot_live, bool):
             return snapshot_live
@@ -339,10 +285,7 @@ class OpenCodePollLoop:
         if not callable(reader):
             return True
         try:
-            status = await asyncio.wait_for(
-                reader(session_id, directory),
-                timeout=self._wait_timeout(remaining),
-            )
+            status = await reader(session_id, directory)
         except Exception as err:
             logger.debug(
                 "OpenCode session status unavailable for %s: %s",
@@ -351,56 +294,6 @@ class OpenCodePollLoop:
             )
             return True
         return _native_session_is_live(status)
-
-    @staticmethod
-    async def _sleep_with_deadline(deadline: float) -> None:
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
-            await asyncio.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
-
-    async def _settle_active_turn_timeout(
-        self,
-        *,
-        request: AgentRequest,
-        server: OpenCodeGeneration,
-        session_id: str,
-        working_path: str,
-        timeout_seconds: float,
-    ) -> None:
-        seconds = f"{timeout_seconds:g}"
-        diagnostic = (
-            "OpenCode active turn exceeded the configured "
-            f"{seconds}-second wall-clock limit"
-        )
-        logger.warning(
-            "OpenCode active turn timed out: session=%s limit_seconds=%s; aborting native turn",
-            session_id,
-            seconds,
-        )
-        try:
-            await asyncio.wait_for(
-                server.abort_session(session_id, working_path),
-                timeout=_TIMEOUT_ABORT_GRACE_SECONDS,
-            )
-        except Exception as abort_err:
-            logger.error(
-                "Failed to abort timed-out OpenCode session %s within %.0fs: %s",
-                session_id,
-                _TIMEOUT_ABORT_GRACE_SECONDS,
-                abort_err,
-            )
-        await self._record_model_hub_failure(request.context, diagnostic)
-        await emit_backend_failure(
-            self._agent.controller,
-            request.context,
-            "opencode",
-            diagnostic,
-            display_text=self._t(
-                "error.opencodeActiveTurnTimeout",
-                seconds=seconds,
-            ),
-            request=request,
-        )
 
     async def _settle_poll_transport_failure(
         self,
@@ -597,11 +490,9 @@ class OpenCodePollLoop:
         server: OpenCodeGeneration,
         session_id: str,
         *,
-        agent_to_use: Optional[str],
         model_dict: Optional[Dict[str, str]],
         reasoning_effort: Optional[str],
         baseline_message_ids: set[str],
-        settings: Any = None,
     ) -> tuple[Optional[str], bool]:
         """Poll messages for a prompt.
 
@@ -615,21 +506,7 @@ class OpenCodePollLoop:
         seen_tool_calls: set[str] = set()
         emitted_assistant_messages: set[str] = set()
         final_text: Optional[str] = None
-        # The settings the turn was admitted with, never the live config.
-        timeout_seconds = self._active_turn_timeout_seconds(settings)
-        deadline = (
-            time.monotonic() + timeout_seconds if timeout_seconds > 0 else math.inf
-        )
-
-        error_retry_count = 0
-        error_retry_limit = getattr(
-            settings if settings is not None else self._agent.opencode_config,
-            "error_retry_limit",
-            DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
-        )
-        last_error_message_id: Optional[str] = None
         poll_failures = 0
-        pending_inject_until = 0.0
 
         def _relative_path(path: str) -> str:
             return self._agent._to_relative_path(path, request.working_path)
@@ -637,23 +514,10 @@ class OpenCodePollLoop:
         poll_iter = 0
         while True:
             poll_iter += 1
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                await self._settle_active_turn_timeout(
-                    request=request,
-                    server=server,
-                    session_id=session_id,
-                    working_path=request.working_path,
-                    timeout_seconds=timeout_seconds,
-                )
-                return None, False
             try:
-                messages = await asyncio.wait_for(
-                    server.list_messages(
-                        session_id=session_id,
-                        directory=request.working_path,
-                    ),
-                    timeout=self._wait_timeout(remaining),
+                messages = await server.list_messages(
+                    session_id=session_id,
+                    directory=request.working_path,
                 )
                 poll_failures = 0
                 if poll_iter % 5 == 0:
@@ -669,15 +533,6 @@ class OpenCodePollLoop:
                         bool(last_info.get("error")),
                     )
             except asyncio.TimeoutError:
-                if time.monotonic() >= deadline:
-                    await self._settle_active_turn_timeout(
-                        request=request,
-                        server=server,
-                        session_id=session_id,
-                        working_path=request.working_path,
-                        timeout_seconds=timeout_seconds,
-                    )
-                    return None, False
                 poll_failures += 1
                 if poll_failures >= _POLL_FAILURE_SETTLE_LIMIT:
                     await self._settle_poll_transport_failure(
@@ -688,8 +543,8 @@ class OpenCodePollLoop:
                         failures=poll_failures,
                     )
                     return None, False
-                logger.warning("Timed out polling OpenCode messages before the active-turn deadline")
-                await self._sleep_with_deadline(deadline)
+                logger.warning("Timed out polling OpenCode messages")
+                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                 continue
             except Exception as poll_err:
                 poll_failures += 1
@@ -703,7 +558,7 @@ class OpenCodePollLoop:
                     )
                     return None, False
                 logger.warning(f"Failed to poll OpenCode messages: {poll_err}")
-                await self._sleep_with_deadline(deadline)
+                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                 continue
 
             for message in messages:
@@ -762,7 +617,6 @@ class OpenCodePollLoop:
                     )
 
             if messages:
-                remaining = deadline - time.monotonic()
                 awaiting_after_ids = getattr(
                     getattr(server, "_state", None),
                     "awaiting_after_message_ids",
@@ -776,8 +630,6 @@ class OpenCodePollLoop:
                         server,
                         session_id,
                         request.working_path,
-                        remaining=remaining,
-                        pending_inject_until=pending_inject_until,
                     )
                 last_message = _settlement_assistant_message(
                     messages,
@@ -794,57 +646,15 @@ class OpenCodePollLoop:
                     and last_info.get("time", {}).get("completed")
                 ):
                     msg_error = last_info.get("error")
-                    if msg_error and last_id != last_error_message_id:
-                        last_error_message_id = last_id
+                    if msg_error:
                         diagnostic = _opencode_error_text(msg_error)
                         hub_recovery_ended = _is_model_hub_recovery_exhausted(request.context, msg_error)
 
                         logger.warning(
-                            "OpenCode message error detected for %s: %s (retry %d/%d)",
+                            "OpenCode message error detected for %s: %s",
                             session_id,
                             diagnostic[:200],
-                            error_retry_count,
-                            error_retry_limit,
                         )
-
-                        if (
-                            error_retry_count < error_retry_limit
-                            and not hub_recovery_ended
-                        ):
-                            error_retry_count += 1
-                            logger.info(
-                                "Auto-retrying OpenCode session %s with 'continue' (attempt %d/%d)",
-                                session_id,
-                                error_retry_count,
-                                error_retry_limit,
-                            )
-
-                            try:
-                                await server.prompt_async(
-                                    session_id=session_id,
-                                    directory=request.working_path,
-                                    text="continue",
-                                    agent=agent_to_use,
-                                    model=model_dict,
-                                    reasoning_effort=reasoning_effort,
-                                    tools={"question": False, "skill": False},
-                                    awaiting_after_ids={
-                                        str(_message_info(item).get("id"))
-                                        for item in messages
-                                        if _message_info(item).get("id")
-                                    },
-                                )
-                                pending_inject_until = (
-                                    time.monotonic() + _POST_INJECT_CONFIRMATION_SECONDS
-                                )
-                                await self._sleep_with_deadline(deadline)
-                                continue
-                            except Exception as retry_err:
-                                logger.error(
-                                    "Failed to send retry 'continue' for %s: %s",
-                                    session_id,
-                                    retry_err,
-                                )
 
                         await self._record_model_hub_failure(request.context, diagnostic)
                         message = (
@@ -870,8 +680,6 @@ class OpenCodePollLoop:
                         return None, False
 
                     if last_info.get("finish") != "tool-calls":
-                        if not msg_error:
-                            error_retry_count = 0
                         final_text = await self._settle_final_text(
                             request.context,
                             session_id,
@@ -904,7 +712,7 @@ class OpenCodePollLoop:
                             break
                         break
 
-            await self._sleep_with_deadline(deadline)
+            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
         return final_text, True
 
@@ -927,21 +735,6 @@ class OpenCodePollLoop:
         seen_tool_calls = set(poll_info.seen_tool_calls)
         emitted_assistant_messages = set(poll_info.emitted_assistant_messages)
         final_text: Optional[str] = None
-        timeout_seconds = self._active_turn_timeout_seconds()
-        persisted_started_at = poll_info.prompt_started_at or poll_info.started_at
-        deadline = self._deadline_from_persisted_start(
-            timeout_seconds,
-            persisted_started_at,
-        )
-
-        error_retry_count = 0
-        error_retry_limit = getattr(
-            self._agent.opencode_config,
-            "error_retry_limit",
-            DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
-        )
-        last_error_message_id: Optional[str] = None
-        pending_inject_until = 0.0
 
         started_at = time.monotonic()
 
@@ -953,24 +746,10 @@ class OpenCodePollLoop:
             poll_failures = 0
             while True:
                 poll_iter += 1
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    await self._settle_active_turn_timeout(
-                        request=restored_request,
-                        server=server,
-                        session_id=session_id,
-                        working_path=poll_info.working_path,
-                        timeout_seconds=timeout_seconds,
-                    )
-                    await self.remove_restored_ack(poll_info)
-                    return True
                 try:
-                    messages = await asyncio.wait_for(
-                        server.list_messages(
-                            session_id=session_id,
-                            directory=poll_info.working_path,
-                        ),
-                        timeout=self._wait_timeout(remaining),
+                    messages = await server.list_messages(
+                        session_id=session_id,
+                        directory=poll_info.working_path,
                     )
                     poll_failures = 0
                     if poll_iter % 5 == 0:
@@ -986,16 +765,6 @@ class OpenCodePollLoop:
                             bool(last_info.get("error")),
                         )
                 except asyncio.TimeoutError:
-                    if time.monotonic() >= deadline:
-                        await self._settle_active_turn_timeout(
-                            request=restored_request,
-                            server=server,
-                            session_id=session_id,
-                            working_path=poll_info.working_path,
-                            timeout_seconds=timeout_seconds,
-                        )
-                        await self.remove_restored_ack(poll_info)
-                        return True
                     poll_failures += 1
                     if poll_failures >= _POLL_FAILURE_SETTLE_LIMIT:
                         await self._settle_poll_transport_failure(
@@ -1007,10 +776,8 @@ class OpenCodePollLoop:
                         )
                         await self.remove_restored_ack(poll_info)
                         return True
-                    logger.warning(
-                        "Timed out polling restored OpenCode messages before the active-turn deadline"
-                    )
-                    await self._sleep_with_deadline(deadline)
+                    logger.warning("Timed out polling restored OpenCode messages")
+                    await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                     continue
                 except Exception as poll_err:
                     poll_failures += 1
@@ -1025,7 +792,7 @@ class OpenCodePollLoop:
                         await self.remove_restored_ack(poll_info)
                         return True
                     logger.warning(f"Failed to poll OpenCode messages (restored): {poll_err}")
-                    await self._sleep_with_deadline(deadline)
+                    await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                     continue
 
                 for message in messages:
@@ -1108,7 +875,6 @@ class OpenCodePollLoop:
                         )
 
                 if messages:
-                    remaining = deadline - time.monotonic()
                     awaiting_after_ids = getattr(
                         getattr(server, "_state", None),
                         "awaiting_after_message_ids",
@@ -1122,8 +888,6 @@ class OpenCodePollLoop:
                             server,
                             session_id,
                             poll_info.working_path,
-                            remaining=remaining,
-                            pending_inject_until=pending_inject_until,
                         )
                     last_message = _settlement_assistant_message(
                         messages,
@@ -1138,30 +902,26 @@ class OpenCodePollLoop:
                             msg_error = last_info.get("error")
                             if msg_error:
                                 error_text = _opencode_error_text(msg_error)
-                                if last_info.get("id") != last_error_message_id:
-                                    error_retry_count = 0
-                                    last_error_message_id = last_info.get("id")
-                                error_retry_count += 1
-                                if error_retry_count > error_retry_limit:
-                                    await self._record_model_hub_failure(context, error_text)
-                                    message = self._t("error.opencodeBackendError", error=error_text)
-                                    await emit_backend_failure(
-                                        self._agent.controller,
-                                        context,
-                                        "opencode",
-                                        error_text,
-                                        display_text=message,
-                                        request=restored_request,
-                                        failure_id=str(last_info.get("id") or ""),
-                                    )
-                                    await self.remove_restored_ack(poll_info)
-                                    return True
-                                await self._sleep_with_deadline(deadline)
-                                continue
+                                hub_recovery_ended = _is_model_hub_recovery_exhausted(context, msg_error)
+                                await self._record_model_hub_failure(context, error_text)
+                                message = (
+                                    self._t("modelHub.recovery.ended")
+                                    if hub_recovery_ended
+                                    else self._t("error.opencodeBackendError", error=error_text)
+                                )
+                                await emit_backend_failure(
+                                    self._agent.controller,
+                                    context,
+                                    "opencode",
+                                    error_text,
+                                    display_text=message,
+                                    request=restored_request,
+                                    failure_id=str(last_info.get("id") or ""),
+                                )
+                                await self.remove_restored_ack(poll_info)
+                                return True
 
                             if last_info.get("finish") != "tool-calls":
-                                if not msg_error:
-                                    error_retry_count = 0
                                 final_text = await self._settle_final_text(
                                     context,
                                     session_id,
@@ -1191,7 +951,7 @@ class OpenCodePollLoop:
                                     break
                                 break
 
-                await self._sleep_with_deadline(deadline)
+                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
             if final_text:
                 await self._agent.emit_result_message(

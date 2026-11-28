@@ -10,6 +10,7 @@ import math
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -73,6 +74,9 @@ MAX_EXTRACTED_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 256 * 1024
 NPM_REGISTRY = "https://registry.npmjs.org/"
 GITHUB_API_RELEASES_BASE = "https://api.github.com/repos"
+CURL_INSTALL_RETRY_FLAGS = "--retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120"
+_ANTIGRAVITY_INSTALL_SH_URL = "https://antigravity.google/cli/install.sh"
+_ANTIGRAVITY_INSTALL_PS1_URL = "https://antigravity.google/cli/install.ps1"
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _REQUESTED_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar.xz", ".zip")
@@ -123,10 +127,18 @@ class DesktopBackendInstallResult:
 
 
 class DesktopBackendError(RuntimeError):
-    def __init__(self, message: str, *, code: str, output: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        output: str | None = None,
+        exit_code: int | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.output = output
+        self.exit_code = exit_code
 
 
 BACKEND_SPECS: dict[str, DesktopBackendSpec] = {
@@ -351,15 +363,25 @@ def install_desktop_backend(
     try:
         staging.mkdir(mode=0o700)
         if spec.install_kind == "release_archive":
-            installed_version, executable, output = _stage_release_archive_backend(
-                backend,
-                spec,
-                staging=staging,
-                toolchain=toolchain,
-                base_env=base_env,
-                timeout_seconds=timeout_seconds,
-                version=requested_version,
-            )
+            if backend == "antigravity" and requested_version is None:
+                installed_version, executable, output = _stage_antigravity_backend(
+                    backend,
+                    spec,
+                    staging=staging,
+                    toolchain=toolchain,
+                    base_env=base_env,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                installed_version, executable, output = _stage_release_archive_backend(
+                    backend,
+                    spec,
+                    staging=staging,
+                    toolchain=toolchain,
+                    base_env=base_env,
+                    timeout_seconds=timeout_seconds,
+                    version=requested_version,
+                )
         else:
             assert toolchain.node is not None and toolchain.npm_cli is not None
             user_config = staging / "npm-user.conf"
@@ -395,6 +417,7 @@ def install_desktop_backend(
                     f"Desktop backend install failed (exit code {completed.returncode})",
                     code="npm_install_failed",
                     output=output,
+                    exit_code=completed.returncode,
                 )
             _remove_internal_directory(staging / ".npm-cache", staging)
             user_config.unlink(missing_ok=True)
@@ -990,6 +1013,160 @@ def _stage_release_archive_backend(
     else:
         resolved_version = raw_tag if raw_tag and len(raw_tag) <= 128 else probed_version
     return resolved_version, executable, f"Installed {asset_name} ({resolved_version})"
+
+
+def _antigravity_official_script_command(
+    staging: Path,
+    *,
+    os_name: str,
+    which: Callable[[str], str | None],
+) -> list[str] | None:
+    if os_name == "win32":
+        powershell = which("powershell")
+        if not powershell:
+            return None
+        escaped_dir = str(staging).replace("'", "''")
+        return [
+            powershell,
+            "-NoProfile",
+            "-Command",
+            f"& ([scriptblock]::Create((irm {_ANTIGRAVITY_INSTALL_PS1_URL} -ErrorAction Stop))) "
+            f"--dir '{escaped_dir}' --skip-path --skip-aliases",
+        ]
+    bash, curl = which("bash"), which("curl")
+    if not bash or not curl:
+        return None
+    return [
+        bash,
+        "--noprofile",
+        "--norc",
+        "-c",
+        "set -euo pipefail; "
+        + shlex.join([curl, "-fsSL", *shlex.split(CURL_INSTALL_RETRY_FLAGS), _ANTIGRAVITY_INSTALL_SH_URL])
+        + " | "
+        + shlex.join([bash, "--noprofile", "--norc", "-s", "--", "--dir", str(staging)]),
+    ]
+
+
+def _stage_antigravity_official_script(
+    backend: str,
+    *,
+    staging: Path,
+    command: list[str],
+    script_env: dict[str, str],
+    os_name: str,
+    toolchain: DesktopBackendToolchain,
+    base_env: Mapping[str, str] | None,
+    timeout_seconds: float,
+) -> tuple[str, Path, str | None]:
+    isolated_home = staging / ".installer-home"
+    isolated_home.mkdir(mode=0o700, exist_ok=True)
+    script_env["HOME"] = str(isolated_home)
+    if os_name == "win32":
+        local_appdata = isolated_home / "AppData" / "Local"
+        appdata = isolated_home / "AppData" / "Roaming"
+        local_appdata.mkdir(parents=True, exist_ok=True)
+        appdata.mkdir(parents=True, exist_ok=True)
+        script_env["USERPROFILE"] = str(isolated_home)
+        script_env["LOCALAPPDATA"] = str(local_appdata)
+        script_env["APPDATA"] = str(appdata)
+    completed = _run_command(
+        command,
+        cwd=staging,
+        env=script_env,
+        timeout_seconds=timeout_seconds,
+    )
+    output = _bounded_output(completed.stdout, completed.stderr)
+    if completed.returncode != 0:
+        raise DesktopBackendError(
+            f"Official Antigravity install script failed (exit code {completed.returncode})",
+            code="desktop_install_failed",
+            output=output,
+            exit_code=completed.returncode,
+        )
+    _remove_internal_directory(isolated_home, staging)
+    executable = _find_extracted_archive_executable(backend, staging, staging)
+    probed_version = _verify_backend_executable(
+        backend,
+        executable,
+        root=staging,
+        env=_backend_command_environment(toolchain, base_env, backend=backend),
+    )
+    return probed_version, executable, output
+
+
+def _stage_antigravity_backend(
+    backend: str,
+    spec: DesktopBackendSpec,
+    *,
+    staging: Path,
+    toolchain: DesktopBackendToolchain,
+    base_env: Mapping[str, str] | None,
+    timeout_seconds: float,
+) -> tuple[str, Path, str | None]:
+    script_env = _backend_command_environment(toolchain, base_env, backend=backend)
+    os_name, _arch = _native_target()
+    search_path = script_env.get("PATH")
+    command = _antigravity_official_script_command(
+        staging,
+        os_name=os_name,
+        which=lambda tool: shutil.which(tool, path=search_path),
+    )
+    if command is None:
+        return _stage_release_archive_backend(
+            backend,
+            spec,
+            staging=staging,
+            toolchain=toolchain,
+            base_env=base_env,
+            timeout_seconds=timeout_seconds,
+        )
+
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        installed_version, executable, output = _stage_antigravity_official_script(
+            backend,
+            staging=staging,
+            command=command,
+            script_env=script_env,
+            os_name=os_name,
+            toolchain=toolchain,
+            base_env=base_env,
+            timeout_seconds=timeout_seconds,
+        )
+    except DesktopBackendError as script_exc:
+        remaining = deadline - time.monotonic()
+        if script_exc.code in {"install_drain_failed", "install_shutting_down"} or remaining <= 0:
+            raise
+        for entry in list(staging.iterdir()):
+            _remove_path(entry)
+        try:
+            installed_version, executable, output = _stage_release_archive_backend(
+                backend,
+                spec,
+                staging=staging,
+                toolchain=toolchain,
+                base_env=base_env,
+                timeout_seconds=remaining,
+            )
+        except DesktopBackendError as gh_exc:
+            script_detail = script_exc.output or str(script_exc)
+            gh_detail = gh_exc.output or str(gh_exc)
+            combined = _bounded_output(
+                f"[official script]\n{script_detail}\n\n[GitHub release]\n{gh_detail}",
+                None,
+            )
+            raise DesktopBackendError(
+                f"Official script failed ({script_exc}); GitHub release fallback failed ({gh_exc})",
+                code=gh_exc.code,
+                output=combined,
+                exit_code=gh_exc.exit_code if gh_exc.exit_code is not None else script_exc.exit_code,
+            ) from gh_exc
+        logger.info("Installed desktop backend %s via GitHub release (%s)", backend, installed_version)
+        return installed_version, executable, output
+
+    logger.info("Installed desktop backend %s via official script (%s)", backend, installed_version)
+    return installed_version, executable, output
 
 
 def _prepend_path_entries(environment: dict[str, str], paths: tuple[Path, ...]) -> None:

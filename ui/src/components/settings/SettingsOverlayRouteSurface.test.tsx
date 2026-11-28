@@ -76,7 +76,7 @@ const RetainedModalEditor = () => {
           <button
             type="button"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => navigate('/settings/replies')}
+            onClick={() => navigate('/settings/messages')}
           >
             open-settings-from-editor
           </button>
@@ -114,7 +114,7 @@ const RetainedFocusOwner = ({ kind }: { kind: RetainedFocusOwnerKind }) => {
           <button
             type="button"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => navigate('/settings/replies')}
+            onClick={() => navigate('/settings/messages')}
           >
             open-settings-from-{kind}
           </button>
@@ -174,10 +174,10 @@ const ChatProbe = () => {
       <RetainedFocusOwner kind="explicit-modal" />
       <RetainedFocusOwner kind="app-window" />
       <RetainedFocusOwner kind="popover" />
-      <button type="button" onClick={() => navigate('/settings/replies')} onMouseDown={(event) => event.preventDefault()}>
+      <button type="button" onClick={() => navigate('/settings/messages')} onMouseDown={(event) => event.preventDefault()}>
         open-settings-preserving-focus
       </button>
-      <Link to="/settings/replies">open-settings</Link>
+      <Link to="/settings/messages">open-settings</Link>
       <Link to="/settings/diagnostics">open-diagnostics</Link>
       <Link to="/doctor">open-legacy-settings</Link>
     </main>
@@ -299,7 +299,7 @@ const SettingsFrame = () => {
 
 const settingsRoute = () => (
   <Route path="/settings" element={<SettingsFrame />}>
-    <Route path="replies" element={<div>replies-settings</div>} />
+    <Route path="messages" element={<div>messages-settings</div>} />
     <Route path="models" element={<div>models-settings</div>} />
     <Route path="advanced" element={<div>advanced-settings</div>} />
     <Route path="diagnostics" element={<div>diagnostics-settings</div>} />
@@ -319,7 +319,7 @@ const SettingsToggle = () => {
       shell-settings
     </button>
   ) : (
-    <Link to="/settings/replies" data-settings-toggle="true">shell-settings</Link>
+    <Link to="/settings/messages" data-settings-toggle="true">shell-settings</Link>
   );
 };
 
@@ -464,7 +464,7 @@ describe('SettingsOverlayRouteSurface', () => {
     render(<RouterProvider router={router} />);
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     await waitFor(() => expect(screen.getByTestId('chat-maintenance').textContent).toBe('done'));
-    expect(router.state.location.pathname).toBe('/settings/replies');
+    expect(router.state.location.pathname).toBe('/settings/messages');
     expect(screen.queryByText('escaped-route')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'close-settings' }));
     expect(router.state.location.pathname).toBe('/chat/ses_1');
@@ -672,7 +672,7 @@ describe('SettingsOverlayRouteSurface', () => {
 
     const settingsIngress = screen.getByRole('link', { name: 'shell-settings' });
     await user.click(settingsIngress);
-    expect(screen.getByText('replies-settings')).toBeTruthy();
+    expect(screen.getByText('messages-settings')).toBeTruthy();
     const dialog = screen.getByRole('dialog', { name: 'nav.settings' });
     expect(dialog).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(
@@ -996,12 +996,12 @@ describe('SettingsOverlayRouteSurface', () => {
 
   it('renders a direct Settings URL as the primary route', () => {
     render(
-      <MemoryRouter initialEntries={['/settings/replies']}>
+      <MemoryRouter initialEntries={['/settings/messages']}>
         <RoutedHarness />
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('replies-settings')).toBeTruthy();
+    expect(screen.getByText('messages-settings')).toBeTruthy();
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull();
     expect(screen.queryByTestId('chat-count')).toBeNull();
   });

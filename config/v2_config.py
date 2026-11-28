@@ -170,19 +170,6 @@ DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 # Claude uses the same ownership-first policy for its receiver's active flag.
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
-DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
-# OpenCode >= 1.18.x bounds its own provider retries (RETRY_MAX_RETRIES = 5) and
-# writes the exhausted error onto the assistant message, which the poll loop's
-# error-driven settlement already turns into a failed terminal result. The
-# historical wall-clock cap from #1197 therefore default-offs here: a positive
-# value is an explicit opt-in for operators who still want a hard bound.
-DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 0
-# The shipped default before the opt-in change. A settings save materializes the
-# whole ``agents.opencode`` section, so a persisted value equal to this constant
-# is the old default's echo rather than an operator's choice; load-time
-# migration neutralizes exactly that value. Any other value is an explicit
-# choice and survives the migration.
-LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
@@ -809,50 +796,11 @@ def _migrate_legacy_opencode_catalog(payload: dict) -> tuple[dict, bool, tuple[s
     return migrated, True, ()
 
 
-def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
-    """Neutralize the legacy wall-clock default echo on reload, once.
-
-    Configs saved while the cap shipped carry
-    ``agents.opencode.active_turn_timeout_seconds: 5400`` because a settings
-    save materializes the whole section. That value names the old default, not
-    an operator's choice, so exactly that value rewrites to the disabled
-    default. ``legacy_turn_timeout_neutralized`` is the provenance marker: a
-    config written under the opt-in semantics carries it, so a deliberate
-    5400-second choice saved afterwards survives every later load. Idempotent:
-    once rewritten (or never eligible) the pattern never matches again.
-    """
-
-    agents = payload.get("agents")
-    if not isinstance(agents, dict):
-        return payload
-    opencode = agents.get("opencode")
-    if not isinstance(opencode, dict):
-        return payload
-    if "legacy_turn_timeout_neutralized" in opencode:
-        return payload
-    if (
-        opencode.get("active_turn_timeout_seconds")
-        != LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
-    ):
-        return payload
-    migrated = dict(payload)
-    migrated_agents = dict(agents)
-    migrated_opencode = dict(opencode)
-    migrated_opencode["active_turn_timeout_seconds"] = (
-        DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
-    )
-    migrated_opencode["legacy_turn_timeout_neutralized"] = True
-    migrated_agents["opencode"] = migrated_opencode
-    migrated["agents"] = migrated_agents
-    return migrated
-
-
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated, catalog_changed, catalog_warnings = _migrate_legacy_opencode_catalog(migrated)
     migrated = _migrate_gemini_native_sources(migrated)
     model_hub_changed = changed or catalog_changed or migrated.get("model_hub") != payload.get("model_hub")
-    migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
     return migrated, model_hub_changed, (*warnings, *catalog_warnings)
 
 
@@ -2065,13 +2013,6 @@ class OpenCodeConfig:
     auto_update: bool = True
     default_agent: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
-    error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
-    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
-    # Provenance for the legacy-default neutralization: once this config has
-    # been written (or migrated) under the opt-in semantics the key is present,
-    # and a deliberate ``active_turn_timeout_seconds == 5400`` saved afterwards
-    # is an explicit operator choice the load migration must preserve.
-    legacy_turn_timeout_neutralized: bool = True
     # Provider the user picked in Settings → Backends → OpenCode. The provider
     # catalog itself lives in ~/.config/opencode/opencode.json (OpenCode's own
     # state file). Stays ``None`` until the user explicitly chooses so legacy

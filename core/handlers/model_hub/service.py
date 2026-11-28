@@ -7706,6 +7706,11 @@ class ModelHubService:
 
         return await filtered_call(self._source_filter_hooks, tool, dict(call.arguments), run, say)
 
+    @property
+    def source_filter_hooks(self) -> SourceFilterHooks:
+        """One hook runner/status owner for hosted calls and Vibey's local tool results."""
+        return self._source_filter_hooks
+
     def source_filter_status(self) -> dict:
         """Settings › Experimental › Source filter: the switch, the hook folder and each script's state."""
 
@@ -12035,7 +12040,10 @@ class ModelHubService:
             verification_pending = source.verification_pending
             identity = identity_digest(source)
             origin = (
-                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
+                HopOrigin(
+                    source.vendor, source.protocol, target_model, source.id, identity,
+                    await asyncio.to_thread(HopOrigin.classify_source, source.kind, source.vendor, source.base_url),
+                )
                 if backend == "vibey" else None
             )
             if source.supply_channel == "native_cli":

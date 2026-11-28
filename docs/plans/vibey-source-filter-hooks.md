@@ -1,4 +1,4 @@
-# Vibey source filter hooks
+# Vibey information cocoon hooks
 
 Status: **implemented** (phase 1 in #4351, phase 2: gateway access for hooks, §5.5). Where the design notes below
 and the implementation differ, the "Implementation" sections win.
@@ -13,11 +13,12 @@ and the implementation differ, the "Implementation" sections win.
 - **Freeze.** `freeze_turn_tools` records `TurnHostedTools.source_filter` and forces `prefer_native = False`, so the
   main model never searches natively; `web_fetch` is function-only already. A change applies from the next turn.
 - **Hooks.** `core/handlers/model_hub/source_filter.py` wraps `ModelHubService.run_hosted_tool` for `web_search` and
-  `web_fetch` only. The model's own arguments take the usual `parse_call` check first; arguments a before hook writes
+  `web_fetch`. The local tool adapter uses the same executor for after-only `read` and command hooks (below).
+  The model's own arguments take the usual `parse_call` check first; arguments a before hook writes
   are checked again when they are sent, and a refusal becomes the failed output the after hook sees.
 - **Process.** `[python, script]` with no shell, cwd = the hook folder, `.venv/bin/python` (`.venv\Scripts\python.exe`
   on Windows) when the folder has one, else Avibe's Python. A minimal inherited environment plus `AVIBE_HOME`; no
-  provider keys. 60 s per run, 4 MB of stdout, killed on timeout or when the turn stops the call.
+  provider keys. 600 s per run, 4 MB of stdout, killed on timeout or when the turn stops the call.
 - **Outputs.** A hook's `result` is mapped onto the canonical record: search `results[]` → `sources` (`url`, `title`,
   `snippet`, `page_age`; at most 50, bounded like the search mapping); fetch `url` / `final_url` / `title` /
   `content` → the `WebFetchRecord`, content cut to its budget. Other fields are not passed on. A failed search output also carries the sources the search kept
@@ -28,23 +29,54 @@ and the implementation differ, the "Implementation" sections win.
 - **Facts.** Blocks are `source_filter_blocked`, hook failures `source_filter_failed` (`HOSTED_ERROR_CODES`). Each
   action is logged; each hook's last failure is kept in memory for Settings until the script next runs cleanly.
 
+## Implementation: local after hooks
+
+The same Turn-frozen switch now also wraps Vibey's `read` and command tool (`bash`, `powershell` on Windows) with
+`after_read.py` and `after_bash.py`. No local before hooks exist; arguments, cwd, environment and actual tool side
+effects are untouched. `modules/agents/vibey/source_filter.py` wraps the tools before skill-load marking, so only
+skills actually returned to the model are marked. This does not enable agent-core user hooks with ContextConfig.
+
+- Request: `{v: 1, hook, tool, args, origin: "tool", output: {content: [...], is_error: bool}}`. `content` uses
+  the canonical text/image block wire format. Local replacements require both fields; blocks are validated by
+  the canonical message decoder. A valid replacement can add/remove/rewrite blocks or change error presentation.
+- The shared `SourceFilterHooks` executor supplies script lookup, the 600-second budget, per-run gateway
+  credentials and failure status. Missing scripts skip; pass/replace/block work on successes and errors.
+  `respond` is not an after action. No new key custody, gateway route or model configuration is introduced.
+- Local command progress is suppressed while the switch is on: only the processed final result reaches the
+  transcript/card. `details`, job/Watch IDs, exit codes and termination behavior remain execution facts, never
+  script output. The tool is executed once, including when its after hook fails. An after hook cannot undo it.
+- A background handover is one local result and passes the hook once. The subsequent Watch message is a separate
+  input outside this hook's scope. Other tools/backends and hook-owned network calls remain outside the feature.
+- Responses made with local filtering enabled durably carry `source_filter_local: true` before their calls run.
+  T2 recovery reads that original response, not today's switch: it withholds uncommitted raw local output, keeps
+  job facts and reports interruption. It never reruns a command, hook or model. Committed results replay as stored;
+  legacy responses without the marker keep their previous recovery behavior. No schema migration is needed.
+- Detached request preview is inert: no Turn lookup, hook execution, gateway activation or credential issuance.
+  The UI lists six optional scripts, retaining the existing keys, directory, route and guide URL.
+
+Acceptance invariants: real read leaves file/parameters unchanged; real command runs once; error, text and image
+results are covered; missing/pass/replace/block/invalid/crash/timeout/cancel paths fail as specified; normal
+adapter transcript and the next model request contain only processed results; restart and repeated recovery never
+release a marked call's raw output; disabled and unrelated tools remain unchanged; EN/ZH script status and docs agree.
+Tests: `tests/test_vibey_source_filter.py`, shared runner/gateway tests, settings tests and design typecheck.
+
 ## 中文摘要
 
-- 设置 → 实验性 是一个可扩展的项目列表，信源过滤是其中可点击的一行；点进去才看到它的全部开关和详细配置，并可返回列表。信源过滤默认关。打开后，Vibey 的 `web_search` 和 `web_fetch` 全部走 Avibe 的工具执行路径，主模型不再收到这两个工具的原生声明。工具总开关、代搜和读链服务、回退顺序、计费都照旧。开关在下一轮生效。关闭后恢复原配置，因为开关只是一层覆盖，不改写已有设置。
+- 设置 → 实验性 是一个可扩展的项目列表，信息茧房是其中可点击的一行；点进去才看到它的全部开关和详细配置，并可返回列表。信息茧房默认关。打开后，Vibey 的 `web_search` 和 `web_fetch` 全部走 Avibe 的工具执行路径，主模型不再收到这两个工具的原生声明。工具总开关、代搜和读链服务、回退顺序、计费都照旧。开关在下一轮生效。关闭后恢复原配置，因为开关只是一层覆盖，不改写已有设置。
 - 钩子对工具的输入和输出有完整的拦截和改写能力，没有字段或来源白名单：
   - before 可以改参数、直接返回自定义结果（不发上游）、阻断；
   - after 可以替换整份输出，无论成功还是失败。after_search 可以新增任意来源或替换全部结果；after_fetch 可以改来源 URL、最终 URL 和整份结果；
   - before 返回的自定义结果也会经过 after。
-- 目录 `$AVIBE_HOME/hooks/source_filter/`，四个脚本各自可选：`before_search.py`、`after_search.py`、`before_fetch.py`、`after_fetch.py`。
+- 目录 `$AVIBE_HOME/hooks/source_filter/`，六个脚本各自可选：`before_search.py`、`after_search.py`、`before_fetch.py`、`after_fetch.py`、`after_read.py`、`after_bash.py`。
   - 每次走到对应钩子时当场查找，不存在就跳过，本轮中途删掉的也一样跳过；
-  - 四个都没有，工具照常走网关；
+  - 六个都没有，工具照常走网关；
   - 只有实验开关按轮冻结，脚本列表不冻结。
 - 文件不存在是跳过；文件存在且已经运行，但脚本本身失败（退出码非零、超时、输出不合协议），就阻断这次调用：不放行原始输出，也不重试。
 - 真实执行的事实（尝试、用量、费用、错误归属）由 Avibe 独立记录，不限制钩子交给模型的内容。只有真正发往网络的参数，才走工具现有的校验和安全闸。
-- 只管这两个工具，不声称约束 bash、MCP、浏览器或其他工具的联网。
+- 搜索、网页读取、文件读取及命令结果在范围内；不约束命令的联网、副作用、后续 Watch 消息、MCP、浏览器或其他工具。
 - 模型代搜（已决定）：保留网关的"模型代搜"候选，前后都过滤。搜索服务、模型代搜，以及它们之间的回退，共用同一对调用级钩子：before 在第一个候选之前跑一次，after 在最终输出上跑一次，不为每个候选重复执行。代搜模型在网关内部仍使用自身的原生搜索，所以本功能保证的是"模型看到的每份输出都经过了钩子"，而不是"没有任何供应商内置搜索被执行"（§8）。
-- 脚本环境：Python 优先。纯标准库的脚本无需安装。有依赖时，四个脚本共用该目录下的一套 `pyproject.toml` + `uv.lock`，由作者或机主显式运行 `uv sync --locked` 生成 `.venv`。热路径直接启动 `.venv/bin/python`，搜索时从不临时装包。JS 等其他语言以后按需支持，沿用同一 JSON 协议，现在不做。
-- 已决定（未实现）：信源过滤打开时，钩子进程总会多出 `AVIBE_GATEWAY_URL` 和 `AVIBE_GATEWAY_KEY` 两个变量，用于调用本机网关的 chat/completions。模型 ID 由脚本在请求里自己指定，没有默认模型选择；`AVIBE_GATEWAY_MODEL` 只是曾讨论过的未来可选项，不属于本草案的契约。
+- 脚本环境：Python 优先。纯标准库的脚本无需安装。有依赖时，六个脚本共用该目录下的一套 `pyproject.toml` + `uv.lock`，由作者或机主显式运行 `uv sync --locked` 生成 `.venv`。热路径直接启动 `.venv/bin/python`，搜索时从不临时装包。JS 等其他语言以后按需支持，沿用同一 JSON 协议，现在不做。
+- 已决定（未实现）：信息茧房打开时，钩子进程总会多出 `AVIBE_GATEWAY_URL` 和 `AVIBE_GATEWAY_KEY` 两个变量，用于调用本机网关的 chat/completions。模型 ID 由脚本在请求里自己指定，没有默认模型选择；`AVIBE_GATEWAY_MODEL` 只是曾讨论过的未来可选项，不属于本草案的契约。
   - 以下是实现建议和验收目标，尚未验证，界面也不作承诺：钥匙只在本次钩子运行内有效、只能用于推理，不能用托管工具（所以不会递归触发钩子）；
   - 计费单独记录；
   - 不注入上游钥匙，也不注入主会话 token。
@@ -55,11 +87,12 @@ and the implementation differ, the "Implementation" sections win.
 The runtime owner can put their own code at the two ends of Vibey's two web tools. The hooks can see, change,
 replace, or refuse the tool's input and output, with full control, before anything reaches the model.
 
-**In scope:** Vibey's canonical `web_search` and `web_fetch` tools.
+**In scope:** Vibey's canonical `web_search` / `web_fetch` before and after hooks, and `read` / `bash` after hooks
+(the command is named `powershell` on Windows). The local extension above supersedes the original web-only design below.
 
 **Out of scope.** The UI and the docs say this plainly:
 
-- other network paths: `bash`, MCP servers, browser automation, `x_search`, `image_generate`, the Claude Code /
+- other tools and input paths: MCP servers, browser automation, later Watch messages, `x_search`, `image_generate`, the Claude Code /
   Codex / OpenCode backends, and any network use by the hook scripts themselves;
 - the vendor's built-in search that runs inside a gateway model executor. Its query and output are hooked, but the
   search itself is not (§8).
@@ -69,9 +102,9 @@ privileges.
 
 ## 2. The setting
 
-- **Location:** Settings → Experimental is an extensible list of items (owner decision). Source filter is one
+- **Location:** Settings → Experimental is an extensible list of items (owner decision). Information cocoon is one
   clickable row in that list. Opening it shows all of its switches and detailed configuration, with a way back
-  to the list. The source filter switch is off by default.
+  to the list. The information cocoon switch is off by default.
   - Proposed storage: an optional V2 key such as `vibey.experimental.source_filter.enabled: bool` (the name is
     open).
   - A missing or malformed value reads as off and logs a warning. Startup never fails because of it.
@@ -98,12 +131,14 @@ Fixed directory: `$AVIBE_HOME/hooks/source_filter/` (default `~/.avibe/hooks/sou
 | `after_search.py` | after the call's final output (success or error), before model, history and card | pass, replace the whole output, block |
 | `before_fetch.py` | same as `before_search.py`, for fetch | same as `before_search.py` |
 | `after_fetch.py` | same as `after_search.py`, for fetch | same as `after_search.py` |
+| `after_read.py` | after a local file read returns | pass, replace content/error presentation, block |
+| `after_bash.py` | after a command tool returns (`powershell` on Windows too) | same as `after_read.py` |
 
 - **Lookup happens at the hook point.** Each time a call reaches a hook point, Avibe checks for that one file
   there and then.
   - No file means the hook is skipped, even if the file existed earlier in the same turn.
   - A file added in the middle of a turn runs from the next hook point that reaches it.
-  - With none of the four files present, the tool runs through the gateway exactly as it would with the switch
+  - With none of the six files present, the tool runs through the gateway exactly as it would with the switch
     off, except that native declarations are still suppressed.
 - **Each file is optional on its own.** Any subset is valid.
 - **Installed locally by the runtime owner only.**
@@ -188,14 +223,14 @@ The run facts (attempts, usage, cost) are not part of the request (§6).
   are the canonical argument check (for example an empty query) and, for fetch, the full safety gate
   (`web-fetch.md` §3.1). A check that fails becomes the gateway's ordinary error output, which then reaches
   `after_*`.
-- **What the model sees on `block`:** a tool error "blocked by source filter", with the hook's `reason` (truncated)
+- **What the model sees on `block`:** a tool error "blocked by information cocoon", with the hook's `reason` (truncated)
   if it gave one.
 
 ### 5.4 Python environment
 
-- **Python, with dependencies managed by uv (owner decision, 2026-11-27).** The four hooks are Python scripts.
+- **Python, with dependencies managed by uv (owner decision, 2026-11-27).** The six hooks are Python scripts.
 - **Standard library only:** nothing to install. Avibe runs the script with its runtime Python.
-- **With dependencies:** the hook directory holds one `pyproject.toml` and `uv.lock`, shared by the four scripts in
+- **With dependencies:** the hook directory holds one `pyproject.toml` and `uv.lock`, shared by the six scripts in
   that directory and nothing else.
   - The hook author or the machine owner runs `uv sync --locked` in that directory, which creates `.venv`.
   - On the hot path Avibe starts `.venv/bin/python` directly (`.venv\Scripts\python.exe` on native Windows).
@@ -219,7 +254,7 @@ Vibey request on the gateway; there is no per-call hook attribution on the tool 
 This lets a hook ask a model for a judgement, for example "is this source trustworthy", through the local Model
 Hub gateway, without holding any provider key.
 
-- **No separate switch (owner decision).** While the source filter is on, every hook run gets both variables
+- **No separate switch (owner decision).** While the information cocoon is on, every hook run gets both variables
   below. Settings has no extra grant control and no default-model picker.
 - **Variables injected into the hook process:**
   - `AVIBE_GATEWAY_URL`: the local gateway's OpenAI-compatible base URL. The script calls
@@ -238,7 +273,7 @@ Hub gateway, without holding any provider key.
     any other Session.
 - **Separate billing.** Each inference call is recorded and billed as hook inference on the tool call's record,
   apart from the tool's own upstream cost.
-- **Time.** The hook time limit allows for a model call (proposed 60 s, still inside the tool deadline).
+- **Time.** The hook time limit is 600 s per run, separate from the upstream tool's deadline.
   The script gives its HTTP call a shorter timeout so that it can still answer before the limit.
 - **Script hygiene.** stdout carries only the protocol JSON. Scripts must not print the environment or the key,
   even to stderr, since stderr reaches the runtime log.
@@ -262,7 +297,7 @@ Hub gateway, without holding any provider key.
 | Case | Outcome |
 | --- | --- |
 | File not found at the hook point | skipped; the record says `skipped: not_found` |
-| All four files missing | normal gateway behavior |
+| All six files missing | normal gateway behavior |
 | File found, then fails to start, exits non-zero, times out, or writes oversized / non-JSON / off-protocol stdout | the call is blocked with `filter_error` |
 | `block` from a hook | the call is blocked with the hook's reason |
 
@@ -293,7 +328,7 @@ added, it follows the same rule: one call-level pair of hooks.
 
 ## 9. UI and docs brief (for Product to finalize)
 
-- **Settings → Experimental:** a list where Source filter is one clickable row. Its detail page holds everything
+- **Settings → Experimental:** a list where Information cocoon is one clickable row. Its detail page holds everything
   below and links back to the list:
   - the switch;
   - one row per hook with found / not found and its path;
@@ -468,7 +503,7 @@ else:
 
 §5.5 (adopted):
 
-16. While the source filter is on, every hook run gets only `AVIBE_GATEWAY_URL` and
+16. While the information cocoon is on, every hook run gets only `AVIBE_GATEWAY_URL` and
     `AVIBE_GATEWAY_KEY`; the model comes from the script's request. Target, to be verified by the
     implementation: the key works only for `chat/completions`
     during that hook run, refuses hosted tools, and stops working after the run.
@@ -491,7 +526,7 @@ else:
 | Item | State |
 | --- | --- |
 | Proxy `web_search` / `web_fetch`, services, executors, fallback, billing | shipped |
-| Source filter switch, hook directory, protocol, actions, UI, docs | draft (this file) |
+| Information cocoon switch, hook directory, protocol, actions, UI, docs | draft (this file) |
 | `.venv` / `uv.lock` hook environment | draft |
 | Gateway access for hooks (`AVIBE_GATEWAY_*`) | adopted, not implemented |
 | Hooks in other languages (JS) | possible later; not designed |

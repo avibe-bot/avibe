@@ -113,7 +113,7 @@ const renderLayout = (
         <Route path="backends/claude" element={<div>claude-body</div>} />
         <Route path="models" element={modelHubRoute(gateModelHub)} />
         <Route path="memory" element={<div>memory-body</div>} />
-        <Route path="replies" element={<div>replies-body</div>} />
+        <Route path="messages" element={<div>messages-body</div>} />
         <Route path="shortcuts" element={<div>shortcuts-body</div>} />
         <Route path="service" element={<div>service-body</div>} />
         <Route path="platforms" element={<div>platforms-body</div>} />
@@ -179,7 +179,7 @@ describe('SettingsLayout', () => {
     };
 
     renderLayout({
-      pathname: '/settings/replies',
+      pathname: '/settings/messages',
       state: settingsOverlayOpenState(origin),
     });
 
@@ -242,9 +242,9 @@ describe('SettingsLayout', () => {
   });
 
   it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
-    const routePane = screen.getByText('replies-body').closest('section');
+    const routePane = screen.getByText('messages-body').closest('section');
     const shell = routePane?.parentElement?.parentElement;
     const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
 
@@ -325,18 +325,18 @@ describe('SettingsLayout', () => {
   );
 
   it('keeps standard settings pages constrained', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
-    const standardFrame = screen.getByText('replies-body').parentElement;
+    const standardFrame = screen.getByText('messages-body').parentElement;
     expect(standardFrame?.className).toContain('mx-auto');
     expect(standardFrame?.className).toContain('max-w-[944px]');
     expect(standardFrame?.className).not.toContain('min-h-full');
   });
 
   it('renders the three-group rail and feature-gated owner sections', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
-    expect(screen.getByText('replies-body')).toBeTruthy();
+    expect(screen.getByText('messages-body')).toBeTruthy();
     expect(screen.getByText('settings.groups.agents')).toBeTruthy();
     expect(screen.getByText('settings.groups.connections')).toBeTruthy();
     expect(screen.getByText('settings.groups.system')).toBeTruthy();
@@ -350,7 +350,7 @@ describe('SettingsLayout', () => {
         resolveConfig = resolve;
       }),
     );
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     expect(resolveConfig).toBeTypeOf('function');
@@ -375,7 +375,7 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
     expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
-    expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'settings.sections.messages' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
   });
 
@@ -394,7 +394,7 @@ describe('SettingsLayout', () => {
     expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
-    expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'settings.sections.messages' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
   });
 
@@ -433,7 +433,7 @@ describe('SettingsLayout', () => {
       capabilities: { model_hub: { enabled: true } },
       platforms: { enabled: ['wechat'] },
     });
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
@@ -445,7 +445,7 @@ describe('SettingsLayout', () => {
       capabilities: { model_hub: { enabled: true } },
       platforms: { enabled: ['wechat'] },
     });
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
@@ -471,7 +471,7 @@ describe('SettingsLayout', () => {
 
   it('restores the default expanded disclosure after navigation', async () => {
     const user = userEvent.setup();
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
     await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
@@ -490,7 +490,7 @@ describe('SettingsLayout', () => {
   });
 
   it('moves language and appearance into General and keeps the account menu in the rail', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     // Language and appearance are a Settings SECTION now, reachable and
     // linkable like every other one — not two icons wedged into the rail
@@ -518,7 +518,7 @@ describe('SettingsLayout', () => {
     view.rerender(surface());
     expect(screen.queryByRole('link', { name: 'settings.sections.backends' })).toBeNull();
     expect(screen.getByText('general-body')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.messages' })).toBeTruthy();
     authorization.capabilities.can_manage_instance = true;
     view.rerender(surface());
     expect(await screen.findByRole('link', { name: 'settings.sections.backends' })).toBeTruthy();
@@ -526,10 +526,10 @@ describe('SettingsLayout', () => {
 
   it('keeps member preferences, Replies, and Access while preserving the phase-2 permission gate', () => {
     authorization.capabilities.can_manage_instance = false;
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
-    expect(screen.getByText('replies-body')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
+    expect(screen.getByText('messages-body')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.messages' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.shortcuts' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
@@ -654,7 +654,7 @@ describe('SettingsLayout', () => {
 
 
   it('keeps the mobile header below the safe-area inset', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     expect(screen.getByRole('banner').className).toContain('pt-[env(safe-area-inset-top)]');
   });
@@ -662,7 +662,7 @@ describe('SettingsLayout', () => {
   it('keeps mobile navigation and the Back action touch-sized', () => {
     renderLayout('/settings');
 
-    expect(screen.getByRole('link', { name: 'settings.sections.replies' }).className).toContain('min-h-11');
+    expect(screen.getByRole('link', { name: 'settings.sections.messages' }).className).toContain('min-h-11');
     const back = screen.getByRole('link', { name: 'settings.backToWorkbench' });
     expect(back.getAttribute('href')).toBe('/');
     expect(back.className).toContain('size-11');
@@ -695,7 +695,7 @@ describe('SettingsLayout', () => {
     // Only the root action leaves; a section's back still steps one level up the
     // rail, and does it as a link so the origin rides along with the push.
     renderLayout({
-      pathname: '/settings/replies',
+      pathname: '/settings/messages',
       state: settingsOverlayOpenState({
         pathname: '/chat/ses_7',
         search: '',
@@ -724,18 +724,18 @@ describe('SettingsLayout', () => {
   });
 
   it('keeps mobile navigation and detail controls above the bottom safe-area inset', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
     expect(screen.getByRole('navigation', { name: 'settings.navigationLabel' }).className).toContain(
       'env(safe-area-inset-bottom)',
     );
-    expect(screen.getByText('replies-body').closest('section')?.firstElementChild?.className).toContain(
+    expect(screen.getByText('messages-body').closest('section')?.firstElementChild?.className).toContain(
       'env(safe-area-inset-bottom)',
     );
   });
 
   it.each([
-    ['/settings/replies', '/settings', 'settings.backToSections'],
+    ['/settings/messages', '/settings', 'settings.backToSections'],
     ['/settings/platforms/groups', '/settings', 'settings.backToSections'],
     ['/settings/backends/claude', '/settings/backends', 'settings.backToSection'],
   ])('returns one mobile level from %s', (path, target, label) => {
@@ -747,9 +747,9 @@ describe('SettingsLayout', () => {
   });
 
   it('animates a mobile detail screen without carrying that motion onto desktop', () => {
-    renderLayout('/settings/replies');
+    renderLayout('/settings/messages');
 
-    const frame = screen.getByText('replies-body').parentElement;
+    const frame = screen.getByText('messages-body').parentElement;
     expect(frame?.className).toContain('slide-in-from-right-4');
     expect(frame?.className).toContain('md:animate-none');
   });

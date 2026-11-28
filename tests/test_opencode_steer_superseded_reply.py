@@ -62,7 +62,7 @@ def _agent(results, persisted=None):
 
     return SimpleNamespace(
         controller=controller,
-        opencode_config=SimpleNamespace(error_retry_limit=1, active_turn_timeout_seconds=0),
+        opencode_config=SimpleNamespace(),
         sessions=SimpleNamespace(
             update_active_poll_state=lambda _session_id, **state: (
                 persisted.update(state) if persisted is not None else None
@@ -98,7 +98,6 @@ async def _live_poll(messages, agent):
             request,
             _server(messages),
             "native-session",
-            agent_to_use=None,
             model_dict=None,
             reasoning_effort=None,
             baseline_message_ids=set(),

@@ -204,7 +204,20 @@ export type VoiceCaptureAttempt = {
   holdTapsC80?: number;
   holdTapsC100?: number;
   holdTapsC120?: number;
+  /** The App's engine had its configuration changed under the take (a headset came or went, or
+   *  the hardware's format settled): how often it started again, and the last change's input
+   *  port, rate and channels before and after (`none`: no input). */
+  holdRestarts?: number;
+  holdCfgFrom?: VoiceInputPort;
+  holdCfgFromHz?: number;
+  holdCfgFromCh?: number;
+  holdCfgTo?: VoiceInputPort;
+  holdCfgToHz?: number;
+  holdCfgToCh?: number;
 };
+
+export type VoiceInputPort =
+  'MicrophoneBuiltIn' | 'MicrophoneWired' | 'BluetoothHFP' | 'USBAudio' | 'CarAudio' | 'LineIn' | 'none' | 'other';
 
 export type VoiceNativeEnd = 'interrupted' | 'route' | 'background' | 'gone' | 'replaced' | 'action_button' | 'other';
 

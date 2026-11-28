@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from config import paths
-from storage.cache_metrics import CACHE_VIEWS, cache_observation
+from storage.cache_metrics import CACHE_VIEWS, cache_observation, upload_receipts
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import MESSAGE_TURN_ID_SQL
 from storage.skill_catalogs import SKILL_EVENTS_VIEW, events_view, hydrate_content
@@ -230,6 +230,7 @@ def run_read_only_query(
         conn.create_function("excerpt", -1, reporting("excerpt", _excerpt), deterministic=True)
         conn.create_function("regexp", 2, reporting("regexp", _regexp), deterministic=True)
         conn.create_function("cache_observation", 8, reporting("cache_observation", cache_observation), deterministic=True)
+        conn.create_function("upload_receipts", 1, reporting("upload_receipts", upload_receipts), deterministic=True)
         price_table = None
 
         def cache_valuation(model, usage, writes, write_basis):

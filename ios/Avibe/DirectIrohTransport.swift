@@ -1632,6 +1632,10 @@ final class DirectRendezvousWebViewSource {
             let handovers = DirectPathUse.shared.pendingHandovers(for: scope)
             // And this App's measured cold starts, the same way.
             let starts = ColdStartTimings.shared.pending
+            // And why the public leg failed, and how often the App went
+            // around its listener, by cause.
+            let publicFaults = DirectPublicFaults.shared.pending
+            let fallbacks = DirectRouteFallbacks.shared.pending
             let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,
@@ -1640,11 +1644,15 @@ final class DirectRendezvousWebViewSource {
                 slowStoreRemovalsMs: removals.map(\.milliseconds),
                 pathUse: use,
                 startup: starts.map(\.json),
-                handovers: handovers.json
+                handovers: handovers.json,
+                publicFaults: publicFaults.map(\.json),
+                routeFallbacks: fallbacks.map(\.json)
             )
             self?.faultReport.answered(faults)
             SlowStoreRemovals.shared.answered(removals)
             ColdStartTimings.shared.answered(starts)
+            DirectPublicFaults.shared.answered(publicFaults)
+            DirectRouteFallbacks.shared.answered(fallbacks)
             DirectPathUse.shared.answered(use)
             DirectPathUse.shared.answered(handovers)
             return answer

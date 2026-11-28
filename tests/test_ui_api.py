@@ -2114,6 +2114,8 @@ def test_desktop_backend_install_localizes_structured_failure(monkeypatch):
         "ok": False,
         "code": "npm_install_failed",
         "message": "无法安装 Claude Code。",
+        "hint": None,
+        "hint_params": {},
         "output": "npm failed",
     }
 

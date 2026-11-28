@@ -69,6 +69,7 @@ export const APPLICATION_ROUTE_PATHS = [
   ...AGENT_BACKENDS.map((backend) => backend.settingsRoute),
   '/settings/models',
   '/settings/dependencies',
+  '/settings/messages',
   '/settings/replies',
   '/settings/messaging',
   '/settings/diagnostics',

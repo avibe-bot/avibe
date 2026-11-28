@@ -15470,6 +15470,16 @@ _VOICE_MIC_RESULTS = {
 _VOICE_CONTEXT_STATES = {"running", "suspended", "interrupted", "closed", "other"}
 _VOICE_TRACK_STATES = {"none", "ended", "live", "live_muted", "live_disabled", "live_muted_disabled"}
 _VOICE_AUDIO_SESSION_STATES = {"active", "interrupted", "inactive"}
+_VOICE_INPUT_PORTS = {
+    "MicrophoneBuiltIn",
+    "MicrophoneWired",
+    "BluetoothHFP",
+    "USBAudio",
+    "CarAudio",
+    "LineIn",
+    "none",
+    "other",
+}
 _VOICE_CAPTURE_ATTEMPT_ENUMS = {
     # "microphone": a fresh microphone, which earlier releases tried; "native": the iOS App
     # recorded the take itself (ui/src/lib/nativeVoiceCapture.ts).
@@ -15487,6 +15497,9 @@ _VOICE_CAPTURE_ATTEMPT_ENUMS = {
     # A hold the iOS App recognised itself: whether its microphone opened at touch-down
     # ("early"), was only prepared then ("quiet"), or opened at recognition ("late").
     "hold": {"early", "quiet", "late"},
+    # The App's input before and after its engine's configuration changed under the take.
+    "holdCfgFrom": _VOICE_INPUT_PORTS,
+    "holdCfgTo": _VOICE_INPUT_PORTS,
 }
 _VOICE_CAPTURE_ATTEMPT_INTS = {
     "atMs",
@@ -15538,6 +15551,13 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     "holdTapsC80",
     "holdTapsC100",
     "holdTapsC120",
+    # How often the App's engine started again after its configuration changed under the take,
+    # and the last change's input rate and channels before and after.
+    "holdRestarts",
+    "holdCfgFromHz",
+    "holdCfgFromCh",
+    "holdCfgToHz",
+    "holdCfgToCh",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8

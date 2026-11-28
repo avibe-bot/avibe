@@ -2235,8 +2235,8 @@ def test_runtime_gen_026_service_shutdown_stops_its_own_recorded_server_after_a_
 def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     """An ``agents.opencode`` save lands after a turn's admission snapshot and
     before the turn resolves its model. The turn runs on the generation its
-    snapshot names, so it also takes its default provider, reasoning effort,
-    and poll settings from that snapshot; the next turn moves to the new ones."""
+    snapshot names, so it takes its default provider and reasoning effort from
+    that snapshot; the next turn moves to the new ones."""
 
     from modules.agents.base import AgentRequest
     from modules.im import MessageContext
@@ -2245,17 +2245,12 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     admitted = SimpleNamespace(
         default_provider="openai",
         default_reasoning_effort="high",
-        error_retry_limit=0,
-        active_turn_timeout_seconds=0,
     )
     saved = SimpleNamespace(
         default_provider="anthropic",
         default_reasoning_effort="low",
-        error_retry_limit=5,
-        active_turn_timeout_seconds=600,
     )
     prompts: list[dict] = []
-    polled: list[object] = []
     bootstrapping, proceed = asyncio.Event(), asyncio.Event()
     agent = object.__new__(OpenCodeAgent)
 
@@ -2315,8 +2310,7 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
             return None
 
     class _PollLoop:
-        async def run_prompt_poll(self, *args, settings=None, **kwargs):
-            polled.append(settings)
+        async def run_prompt_poll(self, *args, **kwargs):
             return "done", False
 
     async def _async_noop(*_args, **_kwargs):
@@ -2375,5 +2369,4 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
 
     assert prompts and prompts[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert prompts[0]["reasoning_effort"] == "high"
-    assert polled == [admitted]
     assert "include_computer_use" not in prompt_options

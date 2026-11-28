@@ -9054,7 +9054,8 @@ def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
     plans = []
 
     def explain(_conn, cursor, statement, parameters, *_):
-        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+        if "sqlite_schema" not in statement:  # the FIFO index check is not a probe
+            plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
 
     with engine.connect() as conn:
         event.listen(conn, "before_cursor_execute", explain)
@@ -9071,6 +9072,101 @@ def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
     for details, index in zip(plans, ["ix_message_deliveries_session_order"] * 4 + ["uq_session_turns_live_session"]):
         assert any("SEARCH" in d and f"{index} (session_id=?)" in d for d in details), details
         assert not any("TEMP B-TREE" in d for d in details), details
+
+
+@pytest.mark.parametrize(
+    "released_ddl",
+    [
+        None,  # the model's spelling, from create_all
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries (session_id, submitted_at, id) "
+        "WHERE state in ('reserved','queued','claimed','pending_steer','steering','reconciling_steer')",
+    ],
+    ids=["model_ddl", "migration_0044_ddl"],
+)
+def test_fifo_probes_keep_the_ordered_index_when_statistics_favor_session_state(managers, released_ddl):
+    """Planner statistics must not turn a FIFO head probe into a sort of every live row."""
+    from sqlalchemy import event
+
+    _, _, engine, *_ = managers
+    with engine.begin() as conn:
+        if released_ddl:
+            conn.exec_driver_sql("DROP INDEX ix_message_deliveries_session_order")
+            conn.exec_driver_sql(released_ddl)
+        conn.exec_driver_sql("ANALYZE")
+        conn.exec_driver_sql("DELETE FROM sqlite_stat1 WHERE tbl = 'message_deliveries'")
+        conn.exec_driver_sql(
+            "INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES "
+            "('message_deliveries', 'ix_message_deliveries_session_state', '1000000 100000 2 1 1'), "
+            "('message_deliveries', 'ix_message_deliveries_session_order', '1000000 100000 1 1')"
+        )
+    engine.dispose()  # reconnect so the planner loads the statistics
+    plans = []
+
+    def explain(_conn, cursor, statement, parameters, *_):
+        if "sqlite_schema" not in statement:  # the FIFO index check is not a probe
+            plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+
+    with engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", explain)
+        for probe in (
+            delivery_store.ordering_head,
+            lambda c, s: delivery_store.ordering_head(c, s, include_claimable=False),
+            delivery_store.claimable_fifo_prefix,
+        ):
+            assert not probe(conn, "ses_fsm")
+
+    assert len(plans) == 3
+    for details in plans:
+        assert any("ix_message_deliveries_session_order (session_id=?)" in d for d in details), details
+        assert not any("TEMP B-TREE" in d for d in details), details
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        None,
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries "
+        "(session_id, submitted_at, id) WHERE state = 'reserved'",
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries (session_id, submitted_at, id) "
+        "WHERE state in ('reserved', 'Queued', 'claimed', 'pending_steer', 'steering', 'reconciling_steer')",
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries (submitted_at, id)",
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries (session_id, submitted_at, id)",
+    ],
+    ids=["dropped", "same_name_other_predicate", "same_name_other_literal", "same_name_other_keys", "same_name_full"],
+)
+def test_fifo_probes_read_an_admitted_layout_without_the_released_fifo_index(managers, replacement):
+    """A newer schema may drop or redefine the optional index; the probe must still answer."""
+    _, _, engine, *_ = managers
+    first, second = delivery_store.new_delivery_id(), delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(engine, delivery_id=first, text="one", now="2026-11-28T00:00:00+00:00")
+    _insert_queued_delivery_with_run(engine, delivery_id=second, text="two", now="2026-11-28T00:00:01+00:00")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP INDEX ix_message_deliveries_session_order")
+        if replacement:
+            conn.exec_driver_sql(replacement)
+    from sqlalchemy import event
+
+    plans = []
+
+    def explain(_conn, cursor, statement, parameters, *_):
+        if "FROM message_deliveries" in statement:
+            plans.append((" ".join(r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)), statement))
+
+    with engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", explain)
+        assert delivery_store.ordering_head(conn, "ses_fsm")["id"] == first
+        assert delivery_store.claimable_fifo_head(conn, "ses_fsm")["id"] == first
+        assert [row["id"] for row in delivery_store.claimable_fifo_prefix(conn, "ses_fsm")] == [first, second]
+    # Unpinned on every layout: a session seek, never a scan.
+    assert plans and all("(session_id=?" in plan and "INDEXED BY" not in statement for plan, statement in plans), plans
+    # The refused pinned statement leaves an open write transaction usable.
+    with engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE message_deliveries SET dispatch_text = 'edited' WHERE id = ?", (second,))
+        assert delivery_store.ordering_head(conn, "ses_fsm")["id"] == first
+        conn.exec_driver_sql("UPDATE message_deliveries SET dispatch_text = 'after' WHERE id = ?", (first,))
+    with engine.connect() as conn:
+        texts = dict(conn.exec_driver_sql("SELECT id, dispatch_text FROM message_deliveries").all())
+    assert (texts[first], texts[second]) == ("after", "edited")
 
 
 def test_control_predecessor_lookup_seeks_both_link_ids(managers):

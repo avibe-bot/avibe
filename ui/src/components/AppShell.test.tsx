@@ -1160,15 +1160,15 @@ describe('AppShell persistent Workbench chrome', () => {
     // one as a storage event. Without a subscriber the link keeps offering the
     // section the rail has left, for as long as nothing else rerenders here.
     act(() => {
-      window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/replies');
+      window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/messages');
       window.dispatchEvent(new StorageEvent('storage', {
         key: SETTINGS_LAST_SECTION_STORAGE_KEY,
-        newValue: '/settings/replies',
+        newValue: '/settings/messages',
       }));
     });
 
     expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href'))
-      .toBe('/settings/replies');
+      .toBe('/settings/messages');
   });
 
   it('uses the Settings button to return to the route that opened Settings', async () => {

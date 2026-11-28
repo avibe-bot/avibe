@@ -77,7 +77,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     items: [
       { path: '/settings/backends', labelKey: 'settings.sections.backends', icon: Server, ownerOnly: true },
       { path: '/settings/models', labelKey: 'settings.sections.models', icon: Cpu, ownerOnly: true },
-      { path: '/settings/replies', labelKey: 'settings.sections.replies', icon: MessageSquare },
+      { path: '/settings/messages', labelKey: 'settings.sections.messages', icon: MessageSquare },
     ],
   },
   {

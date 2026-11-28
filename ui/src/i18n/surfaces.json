@@ -341,6 +341,7 @@
     "agentDetection.cliPath",
     "agentDetection.cliPathPlaceholder",
     "agentDetection.installHint",
+    "agentDetection.antigravityCliNote",
     "agentDetection.installAgent",
     "channelList",
     "logs",

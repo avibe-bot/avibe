@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from config.v2_sessions import ActivePollInfo
+from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch, bind_launch
 from modules.agents.opencode.poll_loop import (
@@ -102,7 +104,7 @@ async def _poll(monkeypatch, *, channel="hub", error=None, baseline=False, busy=
     )
     agent = SimpleNamespace(
         controller=controller,
-        opencode_config=SimpleNamespace(error_retry_limit=2, active_turn_timeout_seconds=0),
+        opencode_config=SimpleNamespace(),
         record_model_hub_native_failure=AsyncMock(),
         _extract_response_text=lambda message: message["parts"][0]["text"] if message["parts"] else "",
     )
@@ -144,7 +146,6 @@ async def _poll(monkeypatch, *, channel="hub", error=None, baseline=False, busy=
             request,
             server,
             "native-session",
-            agent_to_use=None,
             model_dict={"providerID": "provider", "modelID": "model"},
             reasoning_effort=None,
             baseline_message_ids={"failed"} if baseline else set(),
@@ -173,22 +174,28 @@ async def test_hub_terminal_skips_automatic_continue_and_emits_one_failure(monke
 
 
 @pytest.mark.parametrize("channel", [None, "direct", "native_cli"])
-async def test_ordinary_native_failure_still_uses_existing_continue(monkeypatch, channel):
+async def test_ordinary_native_failure_fails_immediately_without_continue(monkeypatch, channel):
     result, server, agent, controller = await _poll(monkeypatch, channel=channel)
-    assert result == ("later legitimate output", True)
-    server.prompt_async.assert_awaited_once()
-    assert server.prompt_async.await_args.kwargs["text"] == "continue"
-    agent.record_model_hub_native_failure.assert_not_awaited()
-    controller.emit_agent_message.assert_not_awaited()
+    assert result == (None, False)
+    server.prompt_async.assert_not_awaited()
+    agent.record_model_hub_native_failure.assert_awaited_once()
+    calls = controller.emit_agent_message.await_args_list
+    assert [call.args[1] for call in calls] == ["notify", "result"]
+    assert "APIError" in calls[0].args[2]
+    assert calls[0].args[2] != t("modelHub.recovery.ended", "en")
 
 
-async def test_unrelated_hub_error_keeps_existing_retry(monkeypatch):
+async def test_unrelated_hub_error_fails_immediately_with_backend_error(monkeypatch):
     error = _error()
     error["data"]["statusCode"] = 503
-    result, server, agent, _controller = await _poll(monkeypatch, error=error)
-    assert result == ("later legitimate output", True)
-    server.prompt_async.assert_awaited_once()
-    agent.record_model_hub_native_failure.assert_not_awaited()
+    result, server, agent, controller = await _poll(monkeypatch, error=error)
+    assert result == (None, False)
+    server.prompt_async.assert_not_awaited()
+    agent.record_model_hub_native_failure.assert_awaited_once()
+    calls = controller.emit_agent_message.await_args_list
+    assert [call.args[1] for call in calls] == ["notify", "result"]
+    assert "APIError" in calls[0].args[2]
+    assert calls[0].args[2] != t("modelHub.recovery.ended", "en")
 
 
 @pytest.mark.parametrize("guard", ["baseline", "busy"])
@@ -197,3 +204,77 @@ async def test_old_or_still_live_assistant_is_not_terminalized(monkeypatch, guar
     assert result == ("later legitimate output", True)
     server.prompt_async.assert_not_awaited()
     agent.record_model_hub_native_failure.assert_not_awaited()
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+async def test_restored_poll_hub_terminal_emits_recovery_ended(monkeypatch, language):
+    """A restored OpenCode poll uses the Hub-exhausted copy when Hub recovery ended."""
+    monkeypatch.setattr("modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0)
+    controller = SimpleNamespace(
+        config=SimpleNamespace(platform="slack", ack_mode="reaction", language=language),
+        agent_auth_service=SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False)),
+        emit_agent_message=AsyncMock(),
+    )
+    controller.processing_indicator = ProcessingIndicatorService(controller)
+    agent = SimpleNamespace(
+        controller=controller,
+        opencode_config=SimpleNamespace(),
+        sessions=SimpleNamespace(remove_active_poll=lambda _sid: None),
+        record_model_hub_native_failure=AsyncMock(),
+        _remove_ack_reaction=AsyncMock(),
+        _extract_response_text=lambda _message: "",
+    )
+    server = SimpleNamespace(
+        list_messages=AsyncMock(
+            return_value=[
+                {
+                    "info": {
+                        "id": "failed",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": copy.deepcopy(_error()),
+                    },
+                    "parts": [],
+                }
+            ]
+        ),
+        get_session_status=AsyncMock(return_value=None),
+    )
+    poll = ActivePollInfo(
+        opencode_session_id="native-session",
+        base_session_id="base",
+        channel_id="channel",
+        thread_id="thread",
+        settings_key="channel",
+        working_path="/tmp/model-hub-fixture",
+        baseline_message_ids=[],
+        platform="slack",
+        processing_indicator={
+            "platform": "slack",
+            "user_id": "user",
+            "channel_id": "channel",
+            "thread_id": "thread",
+            "model_hub_launch": {
+                "backend": "opencode",
+                "channel": "hub",
+                "requested_model": "model",
+                "target_model": "model",
+                "runtime_model": "model",
+                "source_id": "source",
+            },
+        },
+    )
+
+    terminal = await asyncio.wait_for(
+        OpenCodePollLoop(agent).run_restored_poll_loop(poll, server),
+        timeout=2,
+    )
+
+    assert terminal is True
+    server.list_messages.assert_awaited_once()
+    agent.record_model_hub_native_failure.assert_awaited_once()
+    calls = controller.emit_agent_message.await_args_list
+    assert [call.args[1] for call in calls] == ["notify", "notify", "result"]
+    assert calls[1].args[2] == t("modelHub.recovery.ended", language)
+    assert "APIError" not in calls[1].args[2]
+    assert "APIError" in calls[-1].kwargs["terminal_error"]

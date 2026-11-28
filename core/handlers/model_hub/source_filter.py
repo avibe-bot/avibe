@@ -42,9 +42,10 @@ HOOKS: Final[Mapping[str, tuple[str, str]]] = {
     "web_search": ("before_search", "after_search"),
     "web_fetch": ("before_fetch", "after_fetch"),
 }
-HOOK_NAMES: Final = ("before_search", "after_search", "before_fetch", "after_fetch")
+LOCAL_HOOK_NAMES: Final = ("after_read", "after_bash")
+HOOK_NAMES: Final = ("before_search", "after_search", "before_fetch", "after_fetch", *LOCAL_HOOK_NAMES)
 # One hook run, inside the call. A hook may call a model, so it is not a few seconds.
-HOOK_TIMEOUT_SECONDS: Final = 60.0
+HOOK_TIMEOUT_SECONDS: Final = 600.0
 STDOUT_MAX_BYTES: Final = 4 * 1024 * 1024
 _STDERR_KEPT_BYTES: Final = 4 * 1024
 _READ_CHUNK: Final = 64 * 1024
@@ -133,7 +134,13 @@ def _validate(name: str, response: object) -> dict[str, Any]:
     if action == "replace" and before and not isinstance(response.get("args"), dict):
         raise HookFailed("replace needs an args object")
     if action == "respond" or (action == "replace" and not before):
-        _validate_output(response.get("output"))
+        if name in LOCAL_HOOK_NAMES:
+            output = response.get("output")
+            if (not isinstance(output, dict) or set(output) != {"content", "is_error"}
+                    or not isinstance(output.get("content"), list) or not isinstance(output.get("is_error"), bool)):
+                raise HookFailed("local output needs content blocks and a boolean is_error")
+        else:
+            _validate_output(response.get("output"))
     if action == "block" and response.get("reason") is not None and not isinstance(response.get("reason"), str):
         raise HookFailed("reason must be a string")
     return response

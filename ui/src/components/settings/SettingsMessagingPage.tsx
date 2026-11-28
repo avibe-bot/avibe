@@ -8,7 +8,6 @@ import clsx from 'clsx';
 import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { SettingsPageShell } from './SettingsPageShell';
-import { isLocalOnlyMessagingField } from '@/lib/adminNavigation';
 import {
   platformHasCapability,
   getEnabledPlatforms,
@@ -109,8 +108,6 @@ export const SettingsMessagingPage: React.FC = () => {
     { value: 'concise', label: t('dashboard.agentProgressStyleConcise') },
     { value: 'verbose', label: t('dashboard.agentProgressStyleVerbose') },
   ];
-  const canShowProtectedMessagingControl = (field: string) =>
-    canUseSystem || !isLocalOnlyMessagingField(field);
   const includeTimeInfoEnabled = config.include_time_info !== false;
   const audioAsr = config.audio_asr || {};
   const audioEchoEnabled = audioAsr.echo_transcript !== false;
@@ -366,83 +363,6 @@ export const SettingsMessagingPage: React.FC = () => {
             </CompactSelect>
           }
         />
-
-        {canShowProtectedMessagingControl('agents.opencode.error_retry_limit') && (
-          <>
-            <SettingsRow
-              title={t('dashboard.errorRetryLimit')}
-              description={t('dashboard.errorRetryLimitHint')}
-              control={
-                <CompactField
-                  type="number"
-                  min={0}
-                  max={10}
-                  value={config.agents?.opencode?.error_retry_limit ?? 1}
-                  onChange={(event) => {
-                    const limit = Math.max(0, Math.min(10, Number(event.target.value) || 0));
-                    void persist(
-                      {
-                        ...config,
-                        agents: {
-                          ...(config.agents || {}),
-                          opencode: {
-                            ...(config.agents?.opencode || {}),
-                            error_retry_limit: limit,
-                          },
-                        },
-                      },
-                      {
-                        agents: {
-                          opencode: { error_retry_limit: limit },
-                        },
-                      },
-                    );
-                  }}
-                  className="w-24 text-center font-mono"
-                />
-              }
-            />
-
-            <SettingsRow
-              title={t('dashboard.opencodeActiveTurnTimeout')}
-              description={t('dashboard.opencodeActiveTurnTimeoutHint')}
-              control={
-                <CompactField
-                  type="number"
-                  min={0}
-                  max={1440}
-                  value={Math.round(
-                    (config.agents?.opencode?.active_turn_timeout_seconds ?? 0) / 60
-                  )}
-                  onChange={(event) => {
-                    const minutes = Math.max(
-                      0,
-                      Math.min(1440, Number(event.target.value) || 0)
-                    );
-                    void persist(
-                      {
-                        ...config,
-                        agents: {
-                          ...(config.agents || {}),
-                          opencode: {
-                            ...(config.agents?.opencode || {}),
-                            active_turn_timeout_seconds: Math.round(minutes * 60),
-                          },
-                        },
-                      },
-                      {
-                        agents: {
-                          opencode: { active_turn_timeout_seconds: Math.round(minutes * 60) },
-                        },
-                      },
-                    );
-                  }}
-                  className="w-24 text-center font-mono"
-                />
-              }
-            />
-          </>
-        )}
 
         <SettingsRow
           title={t('dashboard.showDuration')}
