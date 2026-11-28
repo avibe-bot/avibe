@@ -175,8 +175,21 @@ async def test_chat_google_text_finish_reason_and_usage(
         assert body["generationConfig"]["maxOutputTokens"] == 128
         assert frames[-1]["usage"] == CHAT_USAGE
         choice = frames[-1]["choices"][0]
-        message = choice["delta" if stream else "message"]
-        assert message["content"] == ("Fixture answer: 上海" if finish != "SAFETY" else None)
+        if stream:
+            # Text can arrive before the finish/usage chunk, whose delta may be empty.
+            parts = []
+            for frame in frames:
+                if not frame["choices"]:  # Usage-only chunks have no choice.
+                    continue
+                (chunk,) = frame["choices"]
+                assert chunk["index"] == 0, frame
+                content = chunk["delta"].get("content")
+                if content is not None:
+                    assert isinstance(content, str), frame
+                    parts.append(content)
+            assert "".join(parts) == ("Fixture answer: 上海" if finish != "SAFETY" else ""), frames
+        else:
+            assert choice["message"]["content"] == ("Fixture answer: 上海" if finish != "SAFETY" else None)
         assert choice["native_finish_reason"] == finish.lower()
         assert choice["finish_reason"] == (stream_reason if stream else buffered_reason), frames
 
