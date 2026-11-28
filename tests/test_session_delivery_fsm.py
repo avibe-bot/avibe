@@ -9054,7 +9054,8 @@ def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
     plans = []
 
     def explain(_conn, cursor, statement, parameters, *_):
-        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+        if "sqlite_schema" not in statement:  # the FIFO index check is not a probe
+            plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
 
     with engine.connect() as conn:
         event.listen(conn, "before_cursor_execute", explain)
@@ -9090,7 +9091,8 @@ def test_fifo_probes_keep_the_ordered_index_when_statistics_favor_session_state(
     plans = []
 
     def explain(_conn, cursor, statement, parameters, *_):
-        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+        if "sqlite_schema" not in statement:
+            plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
 
     with engine.connect() as conn:
         event.listen(conn, "before_cursor_execute", explain)
@@ -9105,6 +9107,31 @@ def test_fifo_probes_keep_the_ordered_index_when_statistics_favor_session_state(
     for details in plans:
         assert any("ix_message_deliveries_session_order (session_id=?)" in d for d in details), details
         assert not any("TEMP B-TREE" in d for d in details), details
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        None,
+        "CREATE INDEX ix_message_deliveries_session_order ON message_deliveries "
+        "(session_id, submitted_at, id) WHERE state = 'reserved'",
+    ],
+    ids=["dropped", "same_name_other_predicate"],
+)
+def test_fifo_probes_read_an_admitted_layout_without_the_released_fifo_index(managers, replacement):
+    """A newer schema may drop or redefine the optional index; the probe must still answer."""
+    _, _, engine, *_ = managers
+    first, second = delivery_store.new_delivery_id(), delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(engine, delivery_id=first, text="one", now="2026-11-28T00:00:00+00:00")
+    _insert_queued_delivery_with_run(engine, delivery_id=second, text="two", now="2026-11-28T00:00:01+00:00")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP INDEX ix_message_deliveries_session_order")
+        if replacement:
+            conn.exec_driver_sql(replacement)
+    with engine.connect() as conn:
+        assert delivery_store.ordering_head(conn, "ses_fsm")["id"] == first
+        assert delivery_store.claimable_fifo_head(conn, "ses_fsm")["id"] == first
+        assert [row["id"] for row in delivery_store.claimable_fifo_prefix(conn, "ses_fsm")] == [first, second]
 
 
 def test_control_predecessor_lookup_seeks_both_link_ids(managers):
