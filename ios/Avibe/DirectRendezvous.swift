@@ -409,13 +409,22 @@ enum DirectRendezvous {
     /// `closed`, `kept` and `path`; one the instance does not accept makes
     /// it ignore the list (and only the list). An instance that does not
     /// know the field ignores it.
+    ///
+    /// `public_faults`, when there are any: why the listener's public leg
+    /// failed, by cause (`DirectPublicFaults`), at most five rows of exactly
+    /// `cause` and `count`. `route_fallbacks`, when there are any: how often
+    /// the App took a host it could not carry off its route, by reason
+    /// (`DirectRouteFallbacks`), at most five rows of exactly `reason` and
+    /// `count`. Either list the instance does not accept is ignored alone.
     static func requestBody(
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
         slowStoreRemovalsMs: [Int] = [],
         pathUse: [DirectPathUse.Report] = [],
         startup: [String] = [],
-        handovers: [String] = []
+        handovers: [String] = [],
+        publicFaults: [String] = [],
+        routeFallbacks: [String] = []
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
@@ -444,6 +453,14 @@ enum DirectRendezvous {
         let asked = handovers.suffix(DirectPathUse.handoverLimit)
         if !asked.isEmpty {
             body += ",\"handovers\":[" + asked.joined(separator: ",") + "]"
+        }
+        let refused = publicFaults.prefix(DirectPublicFaults.limit)
+        if !refused.isEmpty {
+            body += ",\"public_faults\":[" + refused.joined(separator: ",") + "]"
+        }
+        let bypassed = routeFallbacks.prefix(DirectRouteFallbacks.limit)
+        if !bypassed.isEmpty {
+            body += ",\"route_fallbacks\":[" + bypassed.joined(separator: ",") + "]"
         }
         return body + "}"
     }

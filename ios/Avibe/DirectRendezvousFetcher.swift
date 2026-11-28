@@ -58,6 +58,8 @@ enum DirectRendezvousFetcher {
         pathUse: [DirectPathUse.Report] = [],
         startup: [String] = [],
         handovers: [String] = [],
+        publicFaults: [String] = [],
+        routeFallbacks: [String] = [],
         deadlineMilliseconds: Int = defaultDeadlineMilliseconds
     ) async throws -> Data {
         guard isShowing(origin, in: webView) else {
@@ -78,7 +80,9 @@ enum DirectRendezvousFetcher {
                         slowStoreRemovalsMs: slowStoreRemovalsMs,
                         pathUse: pathUse,
                         startup: startup,
-                        handovers: handovers
+                        handovers: handovers,
+                        publicFaults: publicFaults,
+                        routeFallbacks: routeFallbacks
                     ),
                     "deadlineMilliseconds": deadlineMilliseconds,
                     "maxBytes": DirectRendezvous.maxAnswerBytes,

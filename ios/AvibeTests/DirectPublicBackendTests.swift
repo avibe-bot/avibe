@@ -125,6 +125,60 @@ final class DirectPublicBackendTests: XCTestCase {
         XCTAssertEqual(dialer.dials, [])
     }
 
+    /// Each failure of the public leg is counted by its cause, for the
+    /// rendezvous request's `public_faults`: what the refused addresses
+    /// were, a failed resolution, a dial that timed out or failed. A
+    /// success, or a cancellation, counts nothing.
+    func testEveryPublicFailureIsCountedByItsCause() async throws {
+        let faults = DirectPublicFaults()
+        func open(_ resolver: StandInResolver, _ dialer: DialSpy = DialSpy(), attempt: TimeInterval = 3) async {
+            let backend = DirectPublicBackend(
+                resolver: resolver, dialer: dialer, connectSeconds: 1, attemptSeconds: attempt, faults: faults
+            )
+            _ = try? await backend.open(authority)
+        }
+        let fake = DirectResolvedAddress(ipv4: [198, 18, 0, 7])!
+        let mappedFake = DirectResolvedAddress(ipv6: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 198, 19, 1, 2])!
+        let lan = DirectResolvedAddress(ipv4: [192, 168, 1, 20])!
+        let documentation = DirectResolvedAddress(ipv4: [203, 0, 113, 9])!
+        let edge = DirectResolvedAddress(ipv4: [104, 16, 132, 229])!
+
+        await open(StandInResolver(.answer([fake, mappedFake])))
+        await open(StandInResolver(.answer([fake, lan])))
+        await open(StandInResolver(.answer([documentation])))
+        await open(StandInResolver(.answer([])))
+        await open(StandInResolver(.answer([edge])), DialSpy(failing: [edge]))
+        await open(StandInResolver(.answer([edge])), DialSpy(hanging: [edge]))
+        await open(StandInResolver(.answer([edge])))
+        // Six causes once each: the five first in the instance's order.
+        let rows = faults.pending
+        XCTAssertEqual(rows.map(\.cause), [.addressBenchmark, .addressPrivate, .addressOther, .dnsFailed, .connectTimeout])
+        XCTAssertEqual(rows.map(\.count), [1, 1, 1, 1, 1])
+        XCTAssertEqual(rows.first?.json, #"{"cause":"address_benchmark","count":1}"#)
+        // Carried: those are done; the one left out comes next.
+        faults.answered(rows)
+        XCTAssertEqual(faults.pending, [DirectPublicFaults.Row(cause: .connectOther, count: 1)])
+        // A failure counted meanwhile stays after its row is answered.
+        let sent = faults.pending
+        await open(StandInResolver(.answer([edge])), DialSpy(failing: [edge]))
+        faults.answered(sent)
+        XCTAssertEqual(faults.pending, [DirectPublicFaults.Row(cause: .connectOther, count: 1)])
+    }
+
+    /// The App's going around its listener is counted by reason, once per
+    /// activation, until a request carried it.
+    func testRouteFallbacksAreCountedByReason() {
+        let fallbacks = DirectRouteFallbacks()
+        XCTAssertEqual(fallbacks.pending, [])
+        fallbacks.record(.retry)
+        fallbacks.record(.openFailed)
+        fallbacks.record(.openFailed)
+        let rows = fallbacks.pending
+        XCTAssertEqual(rows.map(\.json), [#"{"reason":"open_failed","count":2}"#, #"{"reason":"retry","count":1}"#])
+        fallbacks.answered(rows)
+        XCTAssertEqual(fallbacks.pending, [])
+    }
+
     func testAFailedDialMovesOnToTheNextAllowedAddress() async throws {
         let first = DirectResolvedAddress(ipv4: [104, 16, 132, 229])!
         let second = DirectResolvedAddress(ipv4: [104, 16, 133, 229])!

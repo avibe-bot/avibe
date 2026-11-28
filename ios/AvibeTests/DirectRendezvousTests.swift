@@ -805,6 +805,26 @@ final class ColdStartTimingsTests: XCTestCase {
         XCTAssertTrue(unlaunched.pending.isEmpty)
     }
 
+    /// `public_faults` and `route_fallbacks`: rows of exactly the two keys
+    /// the instance accepts, at most five each, and no field when empty.
+    func testTheRequestCarriesPublicFaultsAndRouteFallbacks() throws {
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        let faults = (0..<7).map { #"{"cause":"connect_other","count":\#($0 + 1)}"# }
+        let body = DirectRendezvous.requestBody(
+            clientEndpointID: client, listenerFaults: [],
+            publicFaults: faults,
+            routeFallbacks: [#"{"reason":"open_failed","count":1}"#]
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        let rows = try XCTUnwrap(object["public_faults"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 5)
+        XCTAssertEqual(Set(rows[0].keys), ["cause", "count"])
+        let fallbacks = try XCTUnwrap(object["route_fallbacks"] as? [[String: Any]])
+        XCTAssertEqual(fallbacks.first?["reason"] as? String, "open_failed")
+        XCTAssertEqual(fallbacks.first?["count"] as? Int, 1)
+        XCTAssertEqual(DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: []), head + "}")
+    }
+
     func testTheRequestCarriesTheEntriesUntilAnswered() throws {
         let timings = ColdStartTimings()
         timings.launched()
