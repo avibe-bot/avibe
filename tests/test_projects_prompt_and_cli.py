@@ -167,7 +167,7 @@ def test_projects_prompt_is_its_own_paragraph_with_a_table_or_a_none_line(projec
     text = build_system_prompt_injection(context=_context(), bot=bot, enabled_agents=roster, projects=projects)
     before, intro, after = text.partition(_INTRO)
     block, _, _ = after.partition("\n## Project Context and History")
-    assert intro and before.endswith("A bare id tells them nothing.\n\n")
+    assert intro and before.endswith("Bare `@` or `#` text is not a mention.\n\n")
     assert "`vibe project create` starts one.\n\n" + catalog_start in block
     assert block.endswith(catalog_end + "\n")
     assert ("| Project |" in block) == bool(projects)

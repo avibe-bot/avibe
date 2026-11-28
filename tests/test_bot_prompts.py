@@ -53,8 +53,8 @@ def test_the_roster_lists_each_bot_once_as_a_bot():
     assert bots.index("| main |") < bots.index("| cso | 首席安全官 | Reviews security risks. |")
     assert "| reviewer | codex |" in agents and "| vibey | vibey |" in agents
     assert "| main |" not in agents and "| cso |" not in agents
-    assert "`@<bot:name>` points at a Bot" in roster
-    assert "`@<name>` without a type, found in older messages, points at an Agent." in roster
+    assert "`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session" in roster
+    assert "an untyped `@<name>` in older messages is an Agent." in roster
 
 
 @pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])

@@ -34,12 +34,4 @@ Agent rules:
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 
 ### Mentions
-The Web composer inserts typed references into the message text:
-- `@<bot:name>` points at a Bot. Message it with `vibe agent run --bot <name> ...`.
-- `@<agent:name>` points at an Agent. Run it with `vibe agent run --agent <name> ...`.
-- `#<session-id>` points at a Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read it with `vibe data query`.
-- `@<name>` without a type, found in older messages, points at an Agent.
-
-A mention says whom the user pointed at, not what to do; decide the action from the message. A mention of yourself needs no command. Only these bracketed forms are references; a bare `@` or `#` in prose is ordinary text.
-
-Write them the same way when you name a Bot, an Agent or a Session to the user, as in `#<sesabc1234567>` or `@<bot:main>`: the interface shows the name or the Session's title, linked. A bare id tells them nothing.
+`@<bot:main>`, `@<agent:vibey>` and `#<sesabc1234567>` name a Bot, an Agent and a Session; an untyped `@<name>` in older messages is an Agent. The interface shows them as names and titles, linked, so write them this way when you name one to the user; a bare id tells them nothing. In a user's message a mention says whom they pointed at, not what to do, and one of yourself needs no command. Bare `@` or `#` text is not a mention.
