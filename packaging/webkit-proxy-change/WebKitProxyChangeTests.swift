@@ -700,6 +700,22 @@ final class WebKitProxyChangeTests: XCTestCase {
             let reopened = try await control("/proxy-listener?state=open&host=\(fixture.host)")
             if failure != nil { await browser.record("listener-open", reopened) }
             if let failure { throw failure }
+        case "strictUnlisted":
+            // 「仅直连和中继」 writes a route with no fail-over that lists
+            // only the instance's host. Does WebKit also send that route a
+            // host it does not list: a sibling, or the parent domain (as
+            // avibe.bot is to alex-app.avibe.bot)? The fixture's listener
+            // refuses an unlisted host with 403, as the App's does.
+            await browser.route("direct", allowFailover: fixture.allowFailover ?? false)
+            try await browser.load("\(fixture.id)-minimal")
+            for (label, host) in [("sibling", "unlisted.webkit-proxy.test"), ("parent", "webkit-proxy.test")] {
+                let fetching = "(async()=>{const t=performance.now();try{const r=await fetch('https://\(host)/fetch?id=\(fixture.id)-\(label)',{mode:'no-cors',cache:'no-store'});return {ok:true,answered:true,type:r.type,ms:Math.round(performance.now()-t)}}catch(e){return {ok:true,answered:false,error:String(e),ms:Math.round(performance.now()-t)}}})()"
+                _ = try? await browser.observe("fetch-\(label)", expression: fetching)
+                let socket = "(new Promise(done=>{const t=performance.now();const end=opened=>done({ok:true,opened,ms:Math.round(performance.now()-t)});try{const w=new WebSocket('wss://\(host)/socket?id=\(fixture.id)-\(label)');w.onopen=()=>{w.close();end(true)};w.onerror=()=>end(false);setTimeout(()=>end(null),6000)}catch(e){done({ok:true,opened:false,error:String(e),ms:0})}}))"
+                _ = try? await browser.observe("socket-\(label)", expression: socket)
+            }
+            // The listed host still goes through the port.
+            _ = try? await browser.fetch("listed-after")
         case "gateMissing":
             // No session from the first read on.
             let gate6 = try await control("/gate-session?host=\(fixture.host)&state=missing")

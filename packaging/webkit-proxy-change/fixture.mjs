@@ -266,7 +266,7 @@ function makeProxy() {
   const target = req.url;
   const host = target.endsWith(':443') ? target.slice(0,-4) : '';
   const c = byHost.get(host);
-  if (!c) { client.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
+  if (!c) { log('proxy_refused', {host, target}); client.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
   const connection = `connect-${++connectionID}`;
   const mode = proxyModes.get(host) ?? 'transport';
   const upstreamHost = mode === 'origin' && c.origin === 'h2' ? '127.0.0.2' : '127.0.0.1';
