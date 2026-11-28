@@ -15,6 +15,8 @@ private struct ProbeCase: Decodable {
     let allowFailover: Bool?
     /// The page's route a gate cell opens; the root when absent.
     let path: String?
+    /// The route also excludes these domains (`excludedDomains`).
+    let excluded: [String]?
     var host: String { "\(id).webkit-proxy.test" }
 }
 
@@ -187,13 +189,15 @@ private final class Browser: NSObject, WKNavigationDelegate {
         catch { emit(["case":fixture.id, "step":"record_failed", "error":String(describing:error)]) }
     }
 
-    private static func proxy(for host: String, mode: String, allowFailover: Bool = false) -> ProxyConfiguration {
+    private static func proxy(for host: String, mode: String, allowFailover: Bool = false,
+                              excluded: [String] = []) -> ProxyConfiguration {
         let port = mode == "absent" ? 18081 : mode == "refuse" ? 18082 : mode == "stall" ? 18083 : 18080
         var proxy = ProxyConfiguration(httpCONNECTProxy: .hostPort(
             host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!
         ))
         proxy.matchDomains = [mode == "placeholder" ? "never-\(UUID().uuidString.lowercased()).invalid" : host]
         proxy.allowFailover = allowFailover
+        if !excluded.isEmpty { proxy.excludedDomains = excluded }
         return proxy
     }
 
@@ -201,9 +205,10 @@ private final class Browser: NSObject, WKNavigationDelegate {
         if mode == "empty" {
             store.proxyConfigurations = []
         } else {
-            store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: mode, allowFailover: allowFailover)]
+            store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: mode, allowFailover: allowFailover,
+                                                    excluded: fixture.excluded ?? [])]
         }
-        await record("setter", ["mode":mode, "allowFailover":allowFailover,
+        await record("setter", ["mode":mode, "allowFailover":allowFailover, "excluded":fixture.excluded ?? [],
               "count":store.proxyConfigurations.count, "networkPID":networkPID(),
               "uptime":ProcessInfo.processInfo.systemUptime])
     }

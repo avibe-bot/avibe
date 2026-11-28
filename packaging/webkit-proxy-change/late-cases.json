@@ -1,4 +1,5 @@
 [
-  {"id":"strict-unlisted-h2","origin":"h2","proxy":"h2","action":"strictUnlisted","allowFailover":false},
-  {"id":"auto-unlisted-h2","origin":"h2","proxy":"h2","action":"strictUnlisted","allowFailover":true}
+  {"id":"strict-excluded-h2","origin":"h2","proxy":"h2","action":"strictUnlisted","allowFailover":false,"excluded":["webkit-proxy.test"]},
+  {"id":"auto-excluded-h2","origin":"h2","proxy":"h2","action":"strictUnlisted","allowFailover":true,"excluded":["webkit-proxy.test"]},
+  {"id":"strict-unlisted-h2","origin":"h2","proxy":"h2","action":"strictUnlisted","allowFailover":false}
 ]
