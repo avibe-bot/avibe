@@ -215,7 +215,7 @@ final class DirectIrohInteropTests: XCTestCase {
                 do {
                     let connection = try await budget.run { try await endpoint.connect(to: offer.endpoint, addresses: offer.addresses, relayURL: nil, alpn: Data("avibe-direct/1".utf8)) }
                     try interopRequire(connection.remoteEndpointID == offer.endpoint, "case identity mismatch")
-                    connectionWatch = Task { await connection.closed() }
+                    connectionWatch = Task { _ = await connection.closed() }
                     // Wrong identity must never establish. Admission is checked
                     // remotely after TLS, so not_admitted may establish and then
                     // close. Observe a native peer reason without sending bytes.
@@ -291,7 +291,7 @@ final class DirectIrohInteropTests: XCTestCase {
                     return result
                 }
                 defer { read.cancel() }
-                try interopRequire(!terminal.finished && engine.snapshot.connectionsClosed == 0 && !reports.contains(.lost), "stream already closed before armed")
+                try interopRequire(!terminal.finished && engine.snapshot.connectionsClosed == 0 && !reports.contains(where: interopIsLoss), "stream already closed before armed")
                 try await control.send(InteropWire.message("armed", name: offer.name), budget: budget)
                 let triggered = try await control.receive(budget: budget)
                 try InteropWire.expect(triggered, type: "triggered", name: offer.name)
@@ -302,7 +302,7 @@ final class DirectIrohInteropTests: XCTestCase {
                 switch result {
                 case .success(let bytes): try interopRequire(bytes == nil, "closure delivered extra payload")
                 case .failure(let error):
-                    let lostByTransport = tier == "transport" && reports.contains(.lost) && error as? DirectIrohError == .cancelled
+                    let lostByTransport = tier == "transport" && reports.contains(where: interopIsLoss) && error as? DirectIrohError == .cancelled
                     try interopRequire(lostByTransport || InteropEngine.rejection(error) != nil,
                                        "closure was a local failure, not peer/transport loss")
                 }
@@ -358,4 +358,12 @@ private extension Result where Failure == Error {
         do { self = .success(try await operation()) }
         catch { self = .failure(error) }
     }
+}
+
+/// Whether the transport reported its path lost, whatever the cause.
+private func interopIsLoss(_ report: DirectIrohReport) -> Bool {
+    if case .lost = report {
+        return true
+    }
+    return false
 }

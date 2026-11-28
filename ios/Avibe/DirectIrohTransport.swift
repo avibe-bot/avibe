@@ -44,7 +44,7 @@ enum DirectIrohReport: Equatable, Sendable {
     /// The network changed and the path is being probed again.
     case verifying
     /// The path is gone, or its probe failed.
-    case lost
+    case lost(DirectLossCause)
     /// The App went to the background: everything stopped, and the path is
     /// gone.
     case lostToBackground
@@ -225,6 +225,9 @@ final class DirectIrohTransport {
         case candidateFailure
         /// An answer that had run out was renewed.
         case renewal
+        /// The path is waiting on probation and carries nothing: it is
+        /// asked once a minute whether it still answers.
+        case probation
     }
 
     /// Which path a connection was last found to have selected, and how
@@ -502,6 +505,22 @@ final class DirectIrohTransport {
         startProbe(.candidateFailure)
     }
 
+    /// The usable path is waiting on probation and carries nothing: one
+    /// probe, the same single stream and CONNECT as any other, bounded by
+    /// `probeSeconds` and closed at once. It keeps the instance from closing
+    /// a connection that has had no stream, and shows the path still
+    /// carries something, which keep-alives do not. Never two at a time. A
+    /// pass reports nothing; a failure is a loss, with the connection's own
+    /// close reason if it has one. The lease is neither read as renewed nor
+    /// extended by it.
+    func probeWaitingPath() {
+        reconcileLease()
+        guard let session, session.isUsable, probeStamp == nil else {
+            return
+        }
+        startProbe(.probation)
+    }
+
     /// Opens one stream over the path reported usable for `tag`. Throws
     /// when that path is gone or the tag is stale, and at once when the
     /// caller's task is cancelled. A stream that opens after either is
@@ -690,7 +709,7 @@ final class DirectIrohTransport {
             // The newest accepted answer speaks for the instance: whatever
             // an earlier one started, a dial under way included, ends.
             cancelDial()
-            guard endSessionReportingLoss() else {
+            guard endSessionReportingLoss(.lost(.notReady)) else {
                 return
             }
             scheduleFetch(after: TimeInterval(retryAfterSeconds))
@@ -749,7 +768,7 @@ final class DirectIrohTransport {
             // A new endpoint key, address set or relay. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
-            guard endSessionReportingLoss() else {
+            guard endSessionReportingLoss(.lost(.superseded)) else {
                 return
             }
             startDial(under: accepted, key: key, host: selection.host)
@@ -1110,23 +1129,27 @@ final class DirectIrohTransport {
         let connection = session.link.connection
         let id = session.id
         Task { @MainActor [weak self] in
-            await connection.closed()
-            self?.connectionDidClose(id)
+            let text = await connection.closed()
+            self?.connectionDidClose(id, text)
         }
     }
 
-    private func connectionDidClose(_ id: Int) {
+    private func connectionDidClose(_ id: Int, _ text: String) {
         guard let session, session.id == id else {
             return
         }
-        sessionDidEnd(retryNow: false)
+        // Our own lease comes first: a connection this App had no more
+        // right to use did not die of its path, however it ended. The
+        // deadline is read here too, in case its timer has not run yet.
+        let expired = session.isExpired || (lease.map { uptime() >= $0.deadline } ?? false)
+        sessionDidEnd(retryNow: false, cause: expired ? .leaseExpired : DirectLossCause(closeText: text))
     }
 
-    /// The path is gone: it is reported, closed, and the next attempt is
-    /// arranged.
-    private func sessionDidEnd(retryNow: Bool) {
-        Self.logger.info("Direct transport: lost")
-        guard endSessionReportingLoss() else {
+    /// The path is gone: it is reported with its cause, closed, and the
+    /// next attempt is arranged.
+    private func sessionDidEnd(retryNow: Bool, cause: DirectLossCause) {
+        Self.logger.info("Direct transport: lost (\(cause.rawValue, privacy: .public))")
+        guard endSessionReportingLoss(.lost(cause)) else {
             return
         }
         cancelFetch()
@@ -1168,6 +1191,9 @@ final class DirectIrohTransport {
             counts.probesAfterCandidateFailure += 1
         case .renewal:
             counts.probesAfterRenewal += 1
+        case .probation:
+            // Not a check of a path in use: it is in no count.
+            break
         }
         probeTask = Task { @MainActor [weak self] in
             let verdict: ProbeVerdict
@@ -1204,7 +1230,23 @@ final class DirectIrohTransport {
         case .passed:
             break
         case .failed:
-            sessionDidEnd(retryNow: reason == .networkChange)
+            // A probe also fails on a connection that has just closed. A
+            // close the instance sent (or this App's own), read now, says
+            // more than the probe's failure and comes first: it is not a
+            // dead path. After that, a
+            // loss the network change's own probe found is the network
+            // change's, whatever the connection says of itself; any other
+            // probe's failure is the connection's own end if it has one.
+            let closed = session.link.connection.closeReason.map(DirectLossCause.init(closeText:))
+            let cause: DirectLossCause
+            if let closed, closed.linkEnd == .instanceEnded {
+                cause = closed
+            } else if reason == .networkChange {
+                cause = .networkChange
+            } else {
+                cause = closed ?? .probeTimeout
+            }
+            sessionDidEnd(retryNow: reason == .networkChange, cause: cause)
             return
         case .refused:
             // The probe was not allowed to finish, and the lease in force
@@ -1231,6 +1273,9 @@ final class DirectIrohTransport {
         case .renewal:
             session.isUsable = true
             emit(.usable(generation: session.offer.generation))
+        case .probation:
+            // It answers: nothing changes, and nothing is reported.
+            break
         }
     }
 
@@ -1287,7 +1332,7 @@ final class DirectIrohTransport {
     /// report led to. `false` when the report led to new work here (another
     /// selection, a return to the foreground, a new attempt): that work is
     /// its owner's, and the caller does nothing more.
-    private func endSessionReportingLoss(_ report: DirectIrohReport = .lost) -> Bool {
+    private func endSessionReportingLoss(_ report: DirectIrohReport) -> Bool {
         guard let ending = detachSession() else {
             return true
         }
@@ -1473,8 +1518,8 @@ extension DirectPathReport {
             self = .usable(generation: generation)
         case .verifying:
             self = .verifying
-        case .lost:
-            self = .lost
+        case .lost(let cause):
+            self = .lost(cause)
         case .lostToBackground:
             self = .lostToBackground
         case .pathChanged(let kind):
@@ -1598,6 +1643,8 @@ final class DirectRendezvousWebViewSource {
             let use = DirectPathUse.shared.pending(for: scope)
             // And the hand-overs its page asked for, one record each.
             let handovers = DirectPathUse.shared.pendingHandovers(for: scope)
+            // And the probation level of its link, minute by minute.
+            let pathGuard = DirectPathUse.shared.pendingGuard(for: scope)
             // And this App's measured cold starts, the same way.
             let starts = ColdStartTimings.shared.pending
             // And why the public leg failed, and how often the App went
@@ -1614,7 +1661,8 @@ final class DirectRendezvousWebViewSource {
                 startup: starts.map(\.json),
                 handovers: handovers.json,
                 publicFaults: publicFaults.map(\.json),
-                routeFallbacks: fallbacks.map(\.json)
+                routeFallbacks: fallbacks.map(\.json),
+                pathGuard: pathGuard.json
             )
             self?.faultReport.answered(faults)
             SlowStoreRemovals.shared.answered(removals)
@@ -1623,6 +1671,7 @@ final class DirectRendezvousWebViewSource {
             DirectRouteFallbacks.shared.answered(fallbacks)
             DirectPathUse.shared.answered(use)
             DirectPathUse.shared.answered(handovers)
+            DirectPathUse.shared.answered(pathGuard)
             return answer
         }
     }

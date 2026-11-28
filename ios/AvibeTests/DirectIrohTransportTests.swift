@@ -284,7 +284,7 @@ final class DirectIrohTransportTests: XCTestCase {
         // The instance's idle timeout, or the sidecar ending the admission.
         connection.drop()
         try await eventually("the loss is reported") {
-            harness.reports == [.usable(generation: "boot:1"), .lost]
+            harness.reports == [.usable(generation: "boot:1"), .lost(.idle)]
         }
         let outcome = await directIrohOutcome(of: reading)
         XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .cancelled)
@@ -380,7 +380,7 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.network.change()
         XCTAssertTrue(harness.scheduler.fire(0.5))
         try await eventually("the loss is reported and the rendezvous asked at once") {
-            harness.reports.last == .lost && harness.rendezvous.requests.count == asked + 2
+            harness.reports.last == .lost(.networkChange) && harness.rendezvous.requests.count == asked + 2
         }
         XCTAssertEqual(harness.reports.count, 5)
         XCTAssertEqual(harness.reports[3], .verifying)
@@ -629,11 +629,101 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertTrue(harness.scheduler.fire(1))
         harness.transport.pathDidFail(for: harness.tag("boot:1"))
         try await eventually("the loss is reported") {
-            harness.reports == [.usable(generation: "boot:1"), .lost]
+            harness.reports == [.usable(generation: "boot:1"), .lost(.probeTimeout)]
         }
         XCTAssertEqual(connection.streams.count, 3)
         XCTAssertEqual(harness.log.count(of: "connection.close"), 1)
         XCTAssertEqual(harness.scheduler.pending, [0.25])
+    }
+
+    /// A path waiting on probation is asked whether it still answers: never
+    /// two probes at a time, a pass reports nothing and is in no count, and
+    /// a probe that fails is a loss.
+    func testAWaitingPathIsProbedOneAtATimeAndOnlyAFailedProbeIsALoss() async throws {
+        let harness = Harness()
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.refused,
+            ]
+        )
+        let counts = harness.transport.pathCounts
+
+        harness.transport.probeWaitingPath()
+        harness.transport.probeWaitingPath()
+        try await eventually("the path is probed once") { connection.streams.count == 2 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(connection.streams.count, 2)
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        XCTAssertEqual(harness.transport.pathCounts, counts)
+
+        // Asked again once the first has ended: this time nothing answers.
+        try await eventually("the loss is reported") {
+            harness.transport.probeWaitingPath()
+            return harness.reports == [.usable(generation: "boot:1"), .lost(.probeTimeout)]
+        }
+        XCTAssertEqual(connection.streams.count, 3)
+    }
+
+    /// A failed probe names its cause in the contract's order: a close the
+    /// instance sent first; then the network change whose probe it was,
+    /// whatever the connection says of its own end; otherwise that end, or
+    /// that nothing answered.
+    func testAFailedProbeNamesItsCauseInTheContractsOrder() async throws {
+        let afterANetworkChange: [(String, DirectLossCause)] = [
+            ("timed out", .networkChange),
+            ("closed by peer: admission ended (code 1)", .revocation),
+        ]
+        for (text, expected) in afterANetworkChange {
+            let harness = Harness()
+            let connection = try await harness.bringUp(
+                generation: "boot:1",
+                answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.refused]
+            )
+            connection.endUnannounced(text)
+            harness.network.change()
+            XCTAssertTrue(harness.scheduler.fire(0.5), text)
+            try await eventually("the loss is reported: \(text)") {
+                harness.reports.last == .lost(expected)
+            }
+        }
+
+        // A probe of a waiting path, on a connection that has timed out.
+        let harness = Harness()
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.refused]
+        )
+        connection.endUnannounced("timed out")
+        harness.transport.probeWaitingPath()
+        try await eventually("the loss is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .lost(.idle)]
+        }
+    }
+
+    /// The cause of a loss is the connection's own: a close the instance
+    /// sent is told apart from a path that went quiet, also while a probe
+    /// of it is under way, and is reported once.
+    func testAConnectionTheInstanceClosedIsLostWithItsOwnCause() async throws {
+        let revoked = Harness()
+        let first = try await revoked.bringUp(generation: "boot:1")
+        first.drop("closed by peer: admission ended (code 1)")
+        try await eventually("the revocation is reported") {
+            revoked.reports == [.usable(generation: "boot:1"), .lost(.revocation)]
+        }
+
+        let harness = Harness()
+        let connection = try await harness.bringUp(generation: "boot:1")
+        harness.transport.probeWaitingPath()
+        try await eventually("the probe is under way") { connection.streams.count == 2 }
+        connection.drop("closed by peer: idle (code 2)")
+        try await eventually("the close is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .lost(.closedByPeer)]
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(harness.reports.count, 2)
     }
 
     func testARefreshKeepsTheSameGenerationAndRetiresAReplacedOne() async throws {
@@ -671,7 +761,7 @@ final class DirectIrohTransportTests: XCTestCase {
         try await eventually("the new generation is reported") {
             harness.reports == [
                 .usable(generation: "boot:1"),
-                .lost,
+                .lost(.superseded),
                 .usable(generation: "boot:2"),
             ]
         }
@@ -685,7 +775,7 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("the withdrawal is reported") {
-            harness.reports == [.usable(generation: "boot:1"), .lost, .usable(generation: "boot:2"), .lost, .answeredWithoutLink]
+            harness.reports == [.usable(generation: "boot:1"), .lost(.superseded), .usable(generation: "boot:2"), .lost(.notReady), .answeredWithoutLink]
         }
         XCTAssertEqual(harness.log.count(of: "connection.close"), 2)
         XCTAssertEqual(harness.scheduler.pending, [60])
@@ -1123,7 +1213,7 @@ final class DirectIrohTransportTests: XCTestCase {
         )
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("relay B is dialled") { second.dials.count == 1 }
-        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .lost])
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .lost(.superseded)])
         XCTAssertEqual(second.dials[0].relayURL, "https://use1-1.relay.n0.iroh.link./")
         await assertCancelled { try await old.write(Data("x".utf8)) }
 
@@ -1136,7 +1226,7 @@ final class DirectIrohTransportTests: XCTestCase {
         )
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("the path without a relay comes up") {
-            harness.reports == [.usable(generation: "boot:1"), .lost, .usable(generation: "boot:3")]
+            harness.reports == [.usable(generation: "boot:1"), .lost(.superseded), .usable(generation: "boot:3")]
         }
         second.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
         try await eventually("B's late connection is closed") {
@@ -1187,7 +1277,7 @@ final class DirectIrohTransportTests: XCTestCase {
         )
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("the path is retired and dialled again") {
-            harness.reports == [.usable(generation: "boot:1"), .lost, .usable(generation: "boot:1")]
+            harness.reports == [.usable(generation: "boot:1"), .lost(.superseded), .usable(generation: "boot:1")]
         }
         XCTAssertEqual(harness.log.count(of: "bind"), 2)
         XCTAssertEqual(harness.log.count(of: "connection.close"), 1)
@@ -1200,7 +1290,7 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("the withdrawal is reported") {
-            harness.reports == [.usable(generation: "boot:1"), .lost, .answeredWithoutLink]
+            harness.reports == [.usable(generation: "boot:1"), .lost(.notReady), .answeredWithoutLink]
         }
         XCTAssertEqual(harness.scheduler.pending, [60])
         await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 9)) }
@@ -1302,13 +1392,15 @@ final class DirectIrohTransportTests: XCTestCase {
         _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 3))
         try await relay.write(Data("y".utf8))
 
-        // Run out again, and this time the instance ends the connection.
+        // Run out again, and this time the connection ends. Whatever it
+        // says of its end (here an idle time-out), the lease had run out
+        // first: it did not die of its path.
         harness.clock.now += 300
         XCTAssertTrue(harness.scheduler.fire(300))
         XCTAssertEqual(harness.reports.count, 4)
         connection.drop()
         try await eventually("the loss is reported") {
-            harness.reports.count == 5 && harness.reports.last == .lost
+            harness.reports.count == 5 && harness.reports.last == .lost(.leaseExpired)
         }
         await assertCancelled { try await relay.write(Data("z".utf8)) }
     }
@@ -2208,12 +2300,16 @@ final class DirectIrohTransportTests: XCTestCase {
             try await eventually("the loss is reported: \(loss)") {
                 harness.reports.count >= 2
             }
-            // The background says so: the App handles it as its own.
-            XCTAssertEqual(
-                harness.reports[1],
-                loss == .background ? .lostToBackground : .lost,
-                "\(loss)"
-            )
+            // The background says so: the App handles it as its own. Every
+            // other loss carries its own cause.
+            let expected: DirectIrohReport
+            switch loss {
+            case .background: expected = .lostToBackground
+            case .unavailable: expected = .lost(.notReady)
+            case .replacement: expected = .lost(.superseded)
+            case .connectionClosed: expected = .lost(.idle)
+            }
+            XCTAssertEqual(harness.reports[1], expected, "\(loss)")
             // Nothing of the path was closed when the loss was reported.
             XCTAssertEqual(
                 harness.logAtReports[1].filter { $0 == "connection.close" },
@@ -2242,7 +2338,7 @@ final class DirectIrohTransportTests: XCTestCase {
             _ = try await harness.bringUp(generation: "boot:1")
             let asked = harness.rendezvous.requests.count
             harness.onReport = { [unowned harness] report in
-                guard report == .lost || report == .lostToBackground else {
+                guard report == .lost(.notReady) || report == .lostToBackground else {
                     return
                 }
                 harness.onReport = nil

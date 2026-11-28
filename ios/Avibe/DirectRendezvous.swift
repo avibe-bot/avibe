@@ -416,6 +416,14 @@ enum DirectRendezvous {
     /// the App took a host it could not carry off its route, by reason
     /// (`DirectRouteFallbacks`), at most five rows of exactly `reason` and
     /// `count`. Either list the instance does not accept is ignored alone.
+    ///
+    /// `path_guard`, when there are any: the probation level of this
+    /// instance's link in the finished minutes that had one
+    /// (`DirectPathUse.GuardReport`), oldest first, at most ten rows of
+    /// exactly `client`, `age_min`, `path`, `guard_level_s`, `guard_rose`
+    /// and `held`. A sibling of `path_use`, never inside it: an instance
+    /// that does not accept it ignores it alone, and one that does not know
+    /// it still takes `path_use`.
     static func requestBody(
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
@@ -424,7 +432,8 @@ enum DirectRendezvous {
         startup: [String] = [],
         handovers: [String] = [],
         publicFaults: [String] = [],
-        routeFallbacks: [String] = []
+        routeFallbacks: [String] = [],
+        pathGuard: [String] = []
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
@@ -461,6 +470,10 @@ enum DirectRendezvous {
         let bypassed = routeFallbacks.prefix(DirectRouteFallbacks.limit)
         if !bypassed.isEmpty {
             body += ",\"route_fallbacks\":[" + bypassed.joined(separator: ",") + "]"
+        }
+        let guarded = pathGuard.suffix(DirectPathUse.guardLimit)
+        if !guarded.isEmpty {
+            body += ",\"path_guard\":[" + guarded.joined(separator: ",") + "]"
         }
         return body + "}"
     }

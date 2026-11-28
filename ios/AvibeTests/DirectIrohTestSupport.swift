@@ -227,6 +227,7 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
     private let remote: DirectEndpointID?
     private var answers: [Data]
     private var storedStreams: [DirectIrohFakeStream] = []
+    private var storedCloseText: String?
     private var storedGate: DirectIrohPending<Void>?
     private var storedPath: DirectPathKind?
 
@@ -358,17 +359,44 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         return stream.halves
     }
 
-    func closed() async {
+    func closed() async -> String {
         _ = try? await closedSignal.wait()
+        return closeReason ?? "closed"
+    }
+
+    var closeReason: String? {
+        lock.withLock { storedCloseText }
     }
 
     func close() {
         log.add("connection.close")
-        closedSignal.resolve(())
+        end("closed")
     }
 
-    /// The connection ends by itself: the peer closed it, or it timed out.
-    func drop() {
+    /// The connection ends by itself, with the text the binding would give
+    /// for it: it timed out idle unless the test says otherwise (a close
+    /// the peer sent reads "closed by peer: … (code n)").
+    func drop(_ text: String = "timed out") {
+        end(text)
+    }
+
+    /// The connection has ended and says why, before whoever waits on
+    /// `closed()` has been told: what a probe that fails just then reads.
+    func endUnannounced(_ text: String) {
+        lock.withLock {
+            if storedCloseText == nil {
+                storedCloseText = text
+            }
+        }
+    }
+
+    /// The first end is the connection's; a later one changes nothing.
+    private func end(_ text: String) {
+        lock.withLock {
+            if storedCloseText == nil {
+                storedCloseText = text
+            }
+        }
         closedSignal.resolve(())
     }
 }

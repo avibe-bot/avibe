@@ -654,6 +654,13 @@ With a transport:
   the background counts its closure before it tells the transport to stop
   (which closes its streams), and a relay whose stream had already failed is
   not counted by a later event.
+  A path is used only once the probation rule has adopted its link
+  (`DirectProbation.swift`, docs/plans/remote-direct-probation.md): after a
+  path died soon after it was taken into use, the next link waits 30 s,
+  then 600 s, before plans, the preference and `direct.status` speak of it,
+  and is probed once a minute meanwhile. The level is kept per account and
+  instance across launches and reported as `path_guard`; with
+  「仅直连和中继」 in effect a link is used at once.
   The background also closes the listening socket;
   the return re-binds the same port, publishes the closure, and only then
   answers a held `direct.status()`, and only for the runtime and store it was

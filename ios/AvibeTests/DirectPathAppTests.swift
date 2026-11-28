@@ -5595,7 +5595,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 2)
         // A late report for the first instance changes nothing.
-        transport.report(.lost, for: target)
+        transport.report(.lost(.idle), for: target)
         XCTAssertEqual(directStatus(app, instance)?.sequence, 2)
 
         // Signing out rotates the store; the new one starts with no route
@@ -5996,7 +5996,7 @@ final class DirectPathAppTests: XCTestCase {
         let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
         let selections = transport.selections.count
 
-        transport.report(.lost, for: target)
+        transport.report(.lost(.idle), for: target)
         // The controller's own wait for the link to come back, then the drop.
         try await eventually(timeout: .seconds(30)) { (app.runtimeOpenAttempt?.id ?? 0) > opened }
         _ = try await waitForBrowser("instance-1", in: app)
@@ -6104,7 +6104,7 @@ final class DirectPathAppTests: XCTestCase {
             runtime: runtime
         )
 
-        transport.report(.lost, for: target)
+        transport.report(.lost(.idle), for: target)
         // Past the controller's own 10 s for the link to come back: the
         // drop is counted, and nothing is opened over the sign-in page.
         try await Task.sleep(for: .seconds(13))
@@ -6644,7 +6644,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(other, .skipped(.notUsable))
 
         // Lost: not usable any more.
-        transport.report(.lost, for: target)
+        transport.report(.lost(.idle), for: target)
         try await eventually { self.directStatus(app, self.instance)?.preferred == .tunnel }
         let lost = await handover(app, instance, other: .sole)
         XCTAssertEqual(lost, .skipped(.notUsable))

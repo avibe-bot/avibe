@@ -314,19 +314,110 @@ final class DirectPathUseTests: XCTestCase {
         XCTAssertEqual(use.pendingHandovers(for: scope).json, [])
     }
 
+    /// `path_guard`: one row for a finished minute that had a probation
+    /// note, with exactly the keys the instance requires and a level and a
+    /// reason that agree; carried until answered, never the minute still
+    /// running, and only this instance's.
+    func testTheProbationLevelIsReportedPerFinishedMinuteUntilAnswered() throws {
+        let clock = DirectPathUseTestClock()
+        let use = DirectPathUse(seconds: { clock.now }, app: nil)
+        let other = DirectPathUse.Scope(store: scope.store, host: "instance-two.example")
+        func rows(_ report: DirectPathUse.GuardReport) throws -> [[String: Any]] {
+            try report.json.map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+            }
+        }
+
+        // Two links held in one minute, the second on another kind of path.
+        use.probation(scope: scope, path: .lan, levelSeconds: 30, rose: .adopted, held: true)
+        use.probation(scope: scope, path: .punched, levelSeconds: 600, rose: .probation, held: true)
+        use.probation(scope: scope, path: .punched, levelSeconds: 600, rose: .probation, held: false)
+        use.probation(scope: other, path: .relay, levelSeconds: 30, rose: .adopted, held: false)
+        // The minute is not over: nothing yet.
+        XCTAssertEqual(use.pendingGuard(for: scope).json, [])
+
+        clock.now += 120
+        let pending = use.pendingGuard(for: scope)
+        XCTAssertEqual(
+            pending.json,
+            [#"{"client":"ios","age_min":2,"path":"punched","guard_level_s":600,"guard_rose":"probation","held":2}"#]
+        )
+        XCTAssertEqual(try rows(use.pendingGuard(for: other)).first?["path"] as? String, "relay")
+        // Asking changes nothing; an answer ends it, for its own instance.
+        XCTAssertEqual(use.pendingGuard(for: scope).json, pending.json)
+        use.answered(pending)
+        XCTAssertEqual(use.pendingGuard(for: scope).json, [])
+        XCTAssertEqual(use.pendingGuard(for: other).json.count, 1)
+
+        // A level and a reason that do not agree are never sent: one such
+        // row would cost the request its whole list.
+        use.probation(scope: scope, path: .lan, levelSeconds: 0, rose: .adopted, held: true)
+        clock.now += 60
+        use.probation(scope: scope, path: .lan, levelSeconds: 30, rose: .none, held: false)
+        clock.now += 60
+        use.probation(scope: scope, path: .lan, levelSeconds: 0, rose: .none, held: false)
+        clock.now += 60
+        XCTAssertEqual(
+            use.pendingGuard(for: scope).json,
+            [#"{"client":"ios","age_min":1,"path":"lan","guard_level_s":0,"guard_rose":"none","held":0}"#]
+        )
+
+        // At most ten rows, the newest; and an account change drops them.
+        for _ in 0..<14 {
+            use.probation(scope: scope, path: .lan, levelSeconds: 30, rose: .adopted, held: true)
+            clock.now += 60
+        }
+        let many = try rows(use.pendingGuard(for: scope))
+        XCTAssertEqual(many.count, DirectPathUse.guardLimit)
+        XCTAssertEqual(many.first?["age_min"] as? Int, 10)
+        XCTAssertEqual(many.last?["age_min"] as? Int, 1)
+        use.removeAll()
+        XCTAssertEqual(use.pendingGuard(for: scope).json, [])
+        XCTAssertEqual(use.pendingGuard(for: other).json, [])
+    }
+
+    /// Every cause the transport gives for a loss has its own word in the
+    /// report, and each is one the instance accepts for `retired_rule`.
+    func testEveryLossCauseIsReportedByItsOwnWord() throws {
+        let accepted: Set<String> = [
+            "idle", "connection_ended", "timeout", "revocation", "closed_by_peer", "not_ready", "lease",
+            "superseded", "network_change", "other", "background",
+        ]
+        XCTAssertEqual(Set(DirectPathUse.RetiredRule.allCases.map(\.rawValue)), accepted)
+        let causes: [DirectLossCause] = [
+            .idle, .connectionEnded, .probeTimeout, .revocation, .closedByPeer, .notReady, .leaseExpired,
+            .superseded, .networkChange, .withdrawn,
+        ]
+        for cause in causes {
+            XCTAssertEqual(DirectPathUse.RetiredRule(cause).rawValue, cause.rawValue)
+        }
+        // What the binding says of a closed connection, in both its forms.
+        XCTAssertEqual(DirectLossCause(closeText: "timed out"), .idle)
+        XCTAssertEqual(DirectLossCause(closeText: "TimedOut"), .idle)
+        XCTAssertEqual(DirectLossCause(closeText: "closed by peer: admission ended (code 1)"), .revocation)
+        XCTAssertEqual(DirectLossCause(closeText: "closed by peer: idle (code 2)"), .closedByPeer)
+        XCTAssertEqual(DirectLossCause(closeText: "ApplicationClosed(ApplicationClose { error_code: 2, reason: b\"idle\" })"), .closedByPeer)
+        XCTAssertEqual(DirectLossCause(closeText: "closed"), .withdrawn)
+        XCTAssertEqual(DirectLossCause(closeText: "LocallyClosed"), .withdrawn)
+        XCTAssertEqual(DirectLossCause(closeText: "reset by peer"), .connectionEnded)
+        XCTAssertEqual(DirectLossCause(closeText: ""), .connectionEnded)
+        // Only a death of the path is one the probation rule counts.
+        XCTAssertEqual(causes.filter { $0.linkEnd == .lost }, [.idle, .connectionEnded, .probeTimeout])
+    }
+
     func testWhatIsKeptAndSentIsBounded() throws {
         let clock = DirectPathUseTestClock()
         let use = DirectPathUse(seconds: { clock.now }, app: nil)
         for minute in 0..<40 {
             clock.now += 60
-            use.retired(.pathMonitor, scope: scope, path: minute % 2 == 0 ? .lan : .punched)
+            use.retired(.idle, scope: scope, path: minute % 2 == 0 ? .lan : .punched)
         }
         clock.now += 60
         // At most ten in one request, the oldest kept first.
         let many = use.pending(for: scope)
         XCTAssertEqual(many.count, DirectPathUse.reportLimit)
         XCTAssertEqual(try object(many[0])["age_min"] as? Int, DirectPathUse.kept)
-        XCTAssertEqual(try object(many[0])["retired_rule"] as? String, "path_monitor")
+        XCTAssertEqual(try object(many[0])["retired_rule"] as? String, "idle")
         // At most thirty kept: the oldest ten were dropped.
         var total = 0
         while true {

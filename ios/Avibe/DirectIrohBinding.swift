@@ -75,8 +75,12 @@ struct DirectIrohBinding: DirectIrohEngine {
             )
         }
 
-        func closed() async {
-            _ = await connection.closed()
+        func closed() async -> String {
+            await connection.closed()
+        }
+
+        var closeReason: String? {
+            connection.closeReason()
         }
 
         func close() {
