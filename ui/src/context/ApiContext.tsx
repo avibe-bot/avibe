@@ -4169,9 +4169,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   attemptDirectHandoverRef.current = attemptDirectHandover;
   // Why this page is not on the direct path now, for the instance's log
-  // (lib/pageReport): the gates of `attemptDirectHandover`, in their order,
-  // each by its word. `idle` is what is left when none of them holds and no
-  // attempt is under way.
+  // (lib/pageReport): the first that applies of `attemptDirectHandover`'s
+  // gates, each by its word, and of what its last attempt found (`not_ours`,
+  // before the bounds and the spacing, so that it names the cause while they
+  // hold). `idle` is what is left when none of them holds and no attempt is
+  // under way; an attempt that found no subscriber to the stream reads so
+  // too.
   const directHandoverWhy = (): PageWhy | null => {
     const state = directHandoverRef.current;
     if (!nativeDirectHandoverAvailable() || state.disposed) return null;

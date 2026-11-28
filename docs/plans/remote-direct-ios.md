@@ -258,7 +258,7 @@ A loss of the direct path or a selection change never closes it. So a healthy up
 
 Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one connection carries many requests, so every request on a lost direct connection fails with it. That is the cost of a lost path, not of the closing. Nothing replays them.
 
-**Why a page has not moved** (2026-11-28, after a return on which the page's requests stayed on the public path for minutes and the App's report said no hand-over was asked, with nothing to say why). The page tells the instance its present reason in one word, and the instance adds it to its own line a minute for the session (docs/plans/remote-direct-rendezvous.md section 2). The word is the gate of the hand-over that holds now, in the order the hand-over checks them:
+**Why a page has not moved** (2026-11-28, after a return on which the page's requests stayed on the public path for minutes and the App's report said no hand-over was asked, with nothing to say why). The page tells the instance its present reason in one word, and the instance adds it to its own line a minute for the session (docs/plans/remote-direct-rendezvous.md section 2). The word is the first of these that applies. Most are gates of the hand-over itself; `not_ours` is what its last attempt found, and comes before the bounds and the spacing so that it names the cause while they hold:
 
 | Word | The page |
 | --- | --- |
