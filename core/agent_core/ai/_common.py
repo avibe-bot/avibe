@@ -1891,6 +1891,7 @@ async def drive_sse_stream(
     translate: WireTranslator,
     refused: Callable[[ProviderError], bool] | None = None,
     on_send: Callable[[int], None] | None = None,
+    successful_wires: list[dict[str, Any]] | None = None,
     on_http_error: Callable[[int, str], None] | None = None,
     bound_pin_handback: bool = False,
 ) -> AsyncIterator[Any]:
@@ -1911,6 +1912,14 @@ async def drive_sse_stream(
     sent_at: float | None = None
     # The request's bytes, kept until it succeeds (``request_artifacts``), when a capture scope is active.
     attempt: RequestAttempt | None = None
+
+    receipt = None
+
+    def complete_wire() -> None:
+        nonlocal receipt
+        if receipt is not None and successful_wires is not None:
+            successful_wires.append(receipt)
+            receipt = None
 
     def silence_exhausted() -> bool:
         return (
@@ -1964,8 +1973,11 @@ async def drive_sse_stream(
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
                 sent_at = time.monotonic()
+                body_bytes = len(request.content)
                 if on_send is not None:
-                    on_send(len(request.content))
+                    on_send(body_bytes)
+                # Wall clock for reporting only; never use it for deadlines or retry decisions.
+                sent_at_us = time.time_ns() // 1000 if successful_wires is not None else None
                 opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
                     opening,
@@ -2056,10 +2068,26 @@ async def drive_sse_stream(
                             resolved_origin.source_id,
                             resolved_origin.source_identity,
                         )
+                        if successful_wires is not None:
+                            source = resolved_origin.source_id
+                            # Same bound as the Hub's complete served-hop report. Never retain an arbitrary header.
+                            source = source if source and len(source) <= 4096 and _SOURCE_ID.fullmatch(source) else None
+                            kind = response.headers.get("x-avibe-source-kind") if source and gateway else None
+                            if kind and resolver is not None:
+                                # An injected resolver may identify a different hop than the Hub header.
+                                reported = default_served_hop_resolver(response.headers)
+                                if reported is None or reported.source_id != source:
+                                    kind = None
+                            receipt = {
+                                "body_bytes": body_bytes, "sent_at_us": sent_at_us, "source_id": source,
+                                "source_kind": kind if kind in ("official_api_key", "relay_key", "subscription") else "unknown",
+                            }
                         async for item in translate(iter_sse_events(response, cancel, capture=capture)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
                                 break
+                            if item is PAUSE_TURN:
+                                complete_wire()
                             if item is PAUSE_TURN and attempt is not None:
                                 # A paused response's request ended normally; its continuation is another request.
                                 await _await_artifact(attempt.succeeded(), cancel)
@@ -2090,6 +2118,9 @@ async def drive_sse_stream(
                 # long again, so the failure ends the turn: neither replayed nor
                 # continued.
                 candidate = replace(candidate, retryable=False, continuable=False, silence_exhausted=True)
+            # Once the provider completed this POST, even a Stop during artifact cleanup cannot un-send it.
+            if isinstance(candidate, Done):
+                complete_wire()
             # Decided before the artifact's write is awaited: diagnostic storage never counts as provider silence.
             if attempt is not None:
                 await _await_artifact(

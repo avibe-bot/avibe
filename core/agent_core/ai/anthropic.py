@@ -1001,6 +1001,7 @@ class AnthropicAdapter(ProviderAdapter):
                     resolver=self._served_hop_resolver,
                     gateway=self._gateway,
                     translate=translate,
+                    successful_wires=request.successful_wires,
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
                     bound_pin_handback=speculative,
                     on_send=record_send if attempt else None,

@@ -12040,7 +12040,10 @@ class ModelHubService:
             verification_pending = source.verification_pending
             identity = identity_digest(source)
             origin = (
-                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
+                HopOrigin(
+                    source.vendor, source.protocol, target_model, source.id, identity,
+                    await asyncio.to_thread(HopOrigin.classify_source, source.kind, source.vendor, source.base_url),
+                )
                 if backend == "vibey" else None
             )
             if source.supply_channel == "native_cli":

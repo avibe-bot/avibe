@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 
@@ -17,6 +18,33 @@ def object_value(raw: Any) -> dict[str, Any]:
     except (TypeError, ValueError, RecursionError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def upload_receipts(cache_raw: Any) -> str | None:
+    """Return only measured, typed receipts; NULL (unknown) is distinct from an observed empty list."""
+    raw = object_value(cache_raw).get("successful_wires")
+    if not isinstance(raw, list):
+        return None
+    valid = []
+    for item in raw:
+        if not isinstance(item, dict) or not {"body_bytes", "source_id", "source_kind"} <= item.keys():
+            continue
+        size, source, kind = item["body_bytes"], item["source_id"], item["source_kind"]
+        if type(size) is not int or not 0 < size < 2**63:
+            continue
+        if kind not in ("official_api_key", "relay_key", "subscription", "unknown"):
+            continue
+        if source is None:
+            if kind != "unknown":
+                continue
+        elif not isinstance(source, str) or len(source) > 4096 or not re.fullmatch(r"src_[a-z0-9]{8,}", source):
+            continue
+        # Time is independent of the byte/Source evidence. A missing or malformed clock must
+        # not discard an otherwise valid upload, nor place it in a day using the row timestamp.
+        sent_at = item.get("sent_at_us")
+        valid.append({"body_bytes": size, "source_id": source, "source_kind": kind,
+                      "sent_at_us": sent_at if type(sent_at) is int and 0 <= sent_at < 2**63 else None})
+    return json.dumps(valid, separators=(",", ":")) if valid or not raw else None
 
 
 def count(value: Any) -> int:
@@ -190,9 +218,12 @@ CACHE_VIEWS = {
                CASE WHEN json_type({_EVENT}, '$.cache') = 'object' THEN json_extract({_EVENT}, '$.cache') ELSE '{{}}' END,
                CASE WHEN json_type({_EVENT}, '$.usage') = 'object' THEN json_extract({_EVENT}, '$.usage') ELSE '{{}}' END,
                json_extract({_EVENT}, '$.cache.provider'), json_extract({_EVENT}, '$.cache.protocol'),
-               json_extract({_EVENT}, '$.cache.model'), 'attempt'
+               json_extract({_EVENT}, '$.cache.model'),
+               CASE WHEN a.event_type = 'bot_handle_request' THEN 'bot_handle'
+                    WHEN json_type({_EVENT}, '$.cache.receipt_only') = 'true' THEN 'receipt_only'
+                    ELSE 'attempt' END
         FROM agent_events a
-        WHERE a.visibility = 'audit' AND a.event_type = 'model_attempt'
+        WHERE a.visibility = 'audit' AND a.event_type IN ('model_attempt', 'bot_handle_request')
               AND json_type({_EVENT}, '$.cache') = 'object'
         UNION ALL
         SELECT a.id || ':' || j.key, a.session_id, a.turn_id, a.created_at,
@@ -205,6 +236,10 @@ CACHE_VIEWS = {
                             THEN json_extract({_EVENT}, '$.cache_attempts') ELSE '[]' END) AS j
         WHERE a.visibility = 'audit' AND a.event_type = 'fork_turn' AND j.type = 'object'
     """,
+    "request_uploads": """
+        SELECT request_id, session_id, turn_id, at, purpose, upload_receipts(cache) AS successful_wires
+        FROM _cache_rows
+    """,
     "cache_requests": """
         WITH timed AS (
             SELECT *,
@@ -213,7 +248,7 @@ CACHE_VIEWS = {
                    coalesce(json_extract(usage, '$.input_tokens'), 0)
                    + coalesce(json_extract(usage, '$.cache_read_tokens'), 0)
                    + coalesce(json_extract(usage, '$.cache_write_tokens'), 0) AS total_input
-            FROM _cache_rows
+            FROM _cache_rows WHERE purpose NOT IN ('bot_handle', 'receipt_only')
         ), compared AS (
             SELECT *,
                    lag(started_at) OVER history AS previous_started,

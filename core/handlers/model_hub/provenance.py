@@ -82,6 +82,25 @@ class HopOrigin:
     # from the snapshot the origin came from. In memory only: never in
     # ``payload()``, the served-hop header, or persisted provenance.
     identity: str = field(default="", compare=False, repr=False)
+    source_kind: str = field(default="unknown", compare=False)
+
+    @staticmethod
+    def classify_source(kind: str, vendor: str, base_url: str | None) -> str:
+        """Classify the selected Source, never its display name, credential or the gateway URL."""
+        if kind == "subscription":
+            return "subscription"
+        if kind != "api_key":
+            return "unknown"
+        from vibe.model_hub_runtime.api_key_vendors import is_official_api_key_endpoint, official_api_key_base_url
+
+        try:
+            official = official_api_key_base_url(vendor)
+            if official and (not base_url or is_official_api_key_endpoint(vendor, base_url)):
+                return "official_api_key"
+            return "relay_key" if base_url else "unknown"
+        except (OSError, ValueError):
+            # A missing or unreadable catalog must not turn diagnostics into a routing failure.
+            return "unknown"
 
     def payload(self) -> dict[str, str]:
         return {"provider": self.provider, "api": self.api, "model": self.model}
@@ -96,7 +115,7 @@ class HopOrigin:
         # ensure_ascii makes character count equal to wire byte count.
         if len(value) > SERVED_HOP_HEADER_MAX_BYTES:
             raise ServedHopHeaderTooLarge("Served-hop header exceeds its transport bound")
-        return {SERVED_HOP_HEADER: value}
+        return {SERVED_HOP_HEADER: value, "x-avibe-source-kind": self.source_kind}
 
 
 # The user ended the turn: a Stop, or turning its backend off. Its outcome is
